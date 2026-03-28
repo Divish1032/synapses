@@ -156,6 +156,96 @@ func TestCarveConfig_OverridesApplied(t *testing.T) {
 	}
 }
 
+// TestCarveConfig_HybridLambda_PointerSemantics verifies the *float64 behaviour:
+//   - nil (unset in JSON)           → CarveConfig.HybridLambda == 0 (handler applies default)
+//   - explicit 0.0 in JSON          → CarveConfig.HybridLambda == 0 (disable hybrid)
+//   - explicit 0.5 in JSON          → CarveConfig.HybridLambda == 0.5
+//
+// The *float64 type is critical: without it, hybrid_lambda: 0 and omitted lambda
+// are indistinguishable, so users cannot disable hybrid scoring via synapses.json.
+func TestCarveConfig_HybridLambda_PointerSemantics(t *testing.T) {
+	zero := 0.0
+	half := 0.5
+
+	cases := []struct {
+		name   string
+		lambda *float64
+		want   float64
+	}{
+		{"nil (unset)", nil, 0},
+		{"explicit 0.0", &zero, 0},
+		{"explicit 0.5", &half, 0.5},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeConfig(t, config.Config{
+				ContextCarve: config.ContextCarveConfig{HybridLambda: tc.lambda},
+			})
+			cfg, err := config.Load(dir)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			cc := cfg.CarveConfig()
+			if cc.HybridLambda != tc.want {
+				t.Errorf("HybridLambda = %v, want %v", cc.HybridLambda, tc.want)
+			}
+			// Verify the pointer itself is correctly preserved for nil/non-nil check
+			// in handlers_context.go (the key distinction between unset and explicit-0).
+			if tc.lambda == nil && cfg.ContextCarve.HybridLambda != nil {
+				t.Error("expected ContextCarve.HybridLambda to be nil when unset")
+			}
+			if tc.lambda != nil && cfg.ContextCarve.HybridLambda == nil {
+				t.Errorf("expected ContextCarve.HybridLambda to be non-nil for value %v", *tc.lambda)
+			}
+		})
+	}
+}
+
+// FIX-RESOLVER-1: use_go_types should default to true when go.mod is present.
+func TestLoad_UseGoTypes_DefaultsTrueWhenGoModPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.UseGoTypes {
+		t.Error("expected UseGoTypes=true when go.mod is present, got false")
+	}
+}
+
+func TestLoad_UseGoTypes_FalseWhenNoGoMod(t *testing.T) {
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseGoTypes {
+		t.Error("expected UseGoTypes=false when no go.mod, got true")
+	}
+}
+
+func TestLoad_UseGoTypes_ExplicitFalseRespected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// synapses.json with explicit use_go_types: false — should override the go.mod default.
+	cfgJSON := []byte(`{"use_go_types": false}`)
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseGoTypes {
+		t.Error("explicit use_go_types=false in synapses.json should not be overridden by go.mod detection")
+	}
+}
+
 func TestCheckViolations_NoRules(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir()) // empty dir → no rules
 	g := buildViolationGraph(t)
@@ -241,60 +331,6 @@ func TestCheckViolations_FilePatternNoMatch(t *testing.T) {
 	}
 }
 
-// --- Peer config tests ---
-
-func TestPeerConfig_DefaultTrustLevel(t *testing.T) {
-	dir := t.TempDir()
-	raw := `{"version":"1","peers":[{"name":"backend","url":"http://localhost:8767"}]}`
-	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(raw), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(cfg.Peers) != 1 {
-		t.Fatalf("expected 1 peer, got %d", len(cfg.Peers))
-	}
-	if cfg.Peers[0].TrustLevel != "read_only" {
-		t.Errorf("TrustLevel = %q, want %q", cfg.Peers[0].TrustLevel, "read_only")
-	}
-}
-
-func TestPeerConfig_EnvVarOverridesToken(t *testing.T) {
-	dir := t.TempDir()
-	raw := `{"version":"1","peers":[{"name":"my-svc","url":"http://localhost:8767","token":"json-token"}]}`
-	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(raw), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SYNAPSES_PEER_TOKEN_MY_SVC", "env-token")
-
-	cfg, err := config.Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Peers[0].Token != "env-token" {
-		t.Errorf("Token = %q, want %q (env var should win)", cfg.Peers[0].Token, "env-token")
-	}
-}
-
-func TestPeerConfig_PeerAPITokenFromEnv(t *testing.T) {
-	dir := t.TempDir()
-	raw := `{"version":"1","peer_api_port":8766}`
-	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(raw), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SYNAPSES_PEER_API_TOKEN", "incoming-token")
-
-	cfg, err := config.Load(dir)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.PeerAPIToken != "incoming-token" {
-		t.Errorf("PeerAPIToken = %q, want %q", cfg.PeerAPIToken, "incoming-token")
-	}
-}
-
 func TestCheckViolations_PathComponentPatterns(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -371,6 +407,54 @@ func TestCheckViolations_PathComponentPatterns(t *testing.T) {
 	}
 }
 
+func TestCheckViolationsForEdges_MatchesSubset(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+	g := buildViolationGraph(t)
+	edges := g.AllEdges() // one CALLS edge: handler.tsx → Login
+
+	violations := cfg.CheckViolationsForEdges(edges, g.GetNode, nil)
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(violations))
+	}
+	if violations[0].RuleID != "no-calls" {
+		t.Errorf("violation RuleID = %q, want 'no-calls'", violations[0].RuleID)
+	}
+}
+
+func TestCheckViolationsForEdges_NoEdges(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+	violations := cfg.CheckViolationsForEdges(nil, func(_ graph.NodeID) *graph.Node { return nil }, nil)
+	if len(violations) != 0 {
+		t.Errorf("expected no violations for nil edges, got %d", len(violations))
+	}
+}
+
+func TestCheckViolationsForEdges_NoRules(t *testing.T) {
+	cfg := &config.Config{}
+	g := buildViolationGraph(t)
+	edges := g.AllEdges()
+	violations := cfg.CheckViolationsForEdges(edges, g.GetNode, nil)
+	if len(violations) != 0 {
+		t.Errorf("expected no violations with no rules, got %d", len(violations))
+	}
+}
+
 // buildViolationGraph creates a small graph with a .tsx file calling a function.
 func buildViolationGraph(t *testing.T) *graph.Graph {
 	t.Helper()
@@ -384,4 +468,562 @@ func buildViolationGraph(t *testing.T) *graph.Graph {
 	g.AddEdge(&graph.Edge{From: handlerID, To: loginFnID, Type: graph.EdgeCalls})
 
 	return g
+}
+
+func TestFederationACL_IsAllowed(t *testing.T) {
+	tests := []struct {
+		name    string
+		acl     *config.FederationACLConfig
+		project string
+		want    bool
+	}{
+		{"nil ACL denies all", nil, "any-project", false},
+		{"empty AllowReadFrom denies all", &config.FederationACLConfig{}, "any", false},
+		{"explicit empty slice denies all", &config.FederationACLConfig{AllowReadFrom: []string{}}, "any", false},
+		{"wildcard allows all", &config.FederationACLConfig{AllowReadFrom: []string{"*"}}, "anything", true},
+		{"exact match allows", &config.FederationACLConfig{AllowReadFrom: []string{"backend"}}, "backend", true},
+		{"non-matching denies", &config.FederationACLConfig{AllowReadFrom: []string{"backend"}}, "frontend", false},
+		{"multiple entries", &config.FederationACLConfig{AllowReadFrom: []string{"a", "b"}}, "b", true},
+		{"multiple entries deny unlisted", &config.FederationACLConfig{AllowReadFrom: []string{"a", "b"}}, "c", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.acl.IsAllowed(tt.project)
+			if got != tt.want {
+				t.Errorf("IsAllowed(%q) = %v, want %v", tt.project, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFederationACL_JSONRoundTrip(t *testing.T) {
+	cfg := config.Config{
+		Version: "1",
+		FederationACL: &config.FederationACLConfig{
+			AllowReadFrom: []string{"project-a", "project-b"},
+		},
+	}
+
+	dir := writeConfig(t, cfg)
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.FederationACL == nil {
+		t.Fatal("FederationACL should not be nil after load")
+	}
+	if len(loaded.FederationACL.AllowReadFrom) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(loaded.FederationACL.AllowReadFrom))
+	}
+	if !loaded.FederationACL.IsAllowed("project-a") {
+		t.Error("project-a should be allowed")
+	}
+	if loaded.FederationACL.IsAllowed("project-c") {
+		t.Error("project-c should NOT be allowed")
+	}
+}
+
+// ── Path-Pattern Architectural Rule Tests ────────────────────────────────────
+
+// buildLayeredGraph creates a 3-layer graph: handler → service → db.
+// Edges: handler -CALLS-> service -CALLS-> db.
+// Also includes a direct handler -CALLS-> db edge (the violation).
+// Absolute paths are used so that matchFilePath's progressive-suffix stripping
+// can match patterns like "*/handlers/*" against "/repo/handlers/order.go".
+func buildLayeredGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g := graph.New("/repo")
+
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	serviceID := g.MakeNodeID("/repo/service/order.go", "OrderService")
+	dbID := g.MakeNodeID("/repo/db/store.go", "Insert")
+
+	g.AddNode(&graph.Node{ID: handlerID, Type: graph.NodeFunction, Name: "HandleOrder", File: "/repo/handlers/order.go"})
+	g.AddNode(&graph.Node{ID: serviceID, Type: graph.NodeFunction, Name: "OrderService", File: "/repo/service/order.go"})
+	g.AddNode(&graph.Node{ID: dbID, Type: graph.NodeFunction, Name: "Insert", File: "/repo/db/store.go"})
+
+	// Proper path: handler → service → db (two-hop, via service layer).
+	g.AddEdge(&graph.Edge{From: handlerID, To: serviceID, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: serviceID, To: dbID, Type: graph.EdgeCalls})
+
+	// Direct violation: handler → db (one-hop, skips service layer).
+	g.AddEdge(&graph.Edge{From: handlerID, To: dbID, Type: graph.EdgeCalls})
+
+	return g
+}
+
+func TestCheckViolations_PathPattern_DirectCall(t *testing.T) {
+	// Rule: handler CALLS db directly is forbidden (1-hop path pattern).
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-direct-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	// Should detect the direct handler→db CALLS edge.
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-handler-direct-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected violation 'no-handler-direct-db', got %v", violations)
+	}
+}
+
+func TestCheckViolations_PathPattern_TwoHop(t *testing.T) {
+	// Rule: handler→X→db (two-hop) is forbidden — detects indirect-but-missing-service paths.
+	// This catches handler→service→db where service is NOT a proper service layer.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-two-hop-handler-db",
+			Severity: "warning",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-two-hop-handler-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected violation 'no-two-hop-handler-db' for handler→service→db path, got %v", violations)
+	}
+}
+
+func TestCheckViolations_PathPattern_NoViolation(t *testing.T) {
+	// Rule requires 3-hop path handler→X→Y→db. Graph only has 1-hop and 2-hop.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-three-hop",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls, graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	for _, v := range violations {
+		if v.RuleID == "no-three-hop" {
+			t.Errorf("unexpected violation 'no-three-hop': graph has no 3-hop path")
+		}
+	}
+}
+
+func TestCheckViolations_PathPattern_WrongEdgeType(t *testing.T) {
+	// Rule uses IMPORTS edge type — graph only has CALLS edges. Should find no violations.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-imports-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeImports},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	for _, v := range violations {
+		if v.RuleID == "no-handler-imports-db" {
+			t.Errorf("unexpected violation: graph has no IMPORTS edges")
+		}
+	}
+}
+
+func TestCheckViolations_PathPattern_EmptyGraph(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				PathPattern: []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := graph.New("empty")
+	violations := cfg.CheckViolations(g)
+
+	if len(violations) != 0 {
+		t.Errorf("expected 0 violations on empty graph, got %d", len(violations))
+	}
+}
+
+func TestCheckViolations_PathPattern_DoesNotFireForSingleEdgeRules(t *testing.T) {
+	// A rule with EdgeType but no PathPattern must NOT be affected by the
+	// path-pattern code path. Existing single-edge behaviour unchanged.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	// All CALLS edges should be caught by the normal single-edge path.
+	if len(violations) == 0 {
+		t.Error("expected violations for CALLS rule without path_pattern")
+	}
+}
+
+func TestCheckViolations_PathPattern_ViolationFields(t *testing.T) {
+	// Verify the violation has correct RuleID, Severity, and non-zero node IDs.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:          "check-fields",
+			Severity:    "warning",
+			Description: "handler must not call db directly",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	var v *config.Violation
+	for i := range violations {
+		if violations[i].RuleID == "check-fields" {
+			v = &violations[i]
+			break
+		}
+	}
+	if v == nil {
+		t.Fatal("expected violation 'check-fields', got none")
+	}
+	if v.Severity != "warning" {
+		t.Errorf("Severity = %q, want 'warning'", v.Severity)
+	}
+	if v.FromNode == "" {
+		t.Error("FromNode should not be empty")
+	}
+	if v.ToNode == "" {
+		t.Error("ToNode should not be empty")
+	}
+	if v.EdgeType != graph.EdgeCalls {
+		t.Errorf("EdgeType = %q, want CALLS", v.EdgeType)
+	}
+}
+
+func TestCheckViolationsForFile_PathPattern(t *testing.T) {
+	// File-scoped check: only fire when from-node is in the changed file.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "scoped-handler-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+
+	// Changed file is the handler — should detect violation.
+	violations := cfg.CheckViolationsForFile(g, "/repo/handlers/order.go")
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "scoped-handler-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected violation when handler file changed")
+	}
+
+	// Changed file is the service — handler is NOT in this file, no violation.
+	violations = cfg.CheckViolationsForFile(g, "/repo/service/order.go")
+	for _, v := range violations {
+		if v.RuleID == "scoped-handler-db" {
+			t.Error("unexpected path-pattern violation when non-handler file changed")
+		}
+	}
+}
+
+func TestPathPattern_JSONRoundTrip_SynapsesJSON(t *testing.T) {
+	// Verify that path_pattern survives a full synapses.json write → Load cycle.
+	// This tests the JSON unmarshaling path that agents and users hit when
+	// they write path-pattern rules directly in their synapses.json config.
+	cfg := config.Config{
+		Version: "1",
+		Rules: []config.Rule{{
+			ID:          "no-handler-db-json",
+			Description: "handlers must not call db directly",
+			Severity:    "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+			},
+		}},
+	}
+
+	dir := writeConfig(t, cfg)
+	loaded, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(loaded.Rules))
+	}
+	r := loaded.Rules[0]
+	if r.ID != "no-handler-db-json" {
+		t.Errorf("rule ID = %q", r.ID)
+	}
+	if len(r.ForbiddenEdge.PathPattern) != 2 {
+		t.Fatalf("PathPattern len = %d, want 2", len(r.ForbiddenEdge.PathPattern))
+	}
+	if r.ForbiddenEdge.PathPattern[0] != graph.EdgeCalls {
+		t.Errorf("PathPattern[0] = %q, want CALLS", r.ForbiddenEdge.PathPattern[0])
+	}
+	if r.ForbiddenEdge.PathPattern[1] != graph.EdgeCalls {
+		t.Errorf("PathPattern[1] = %q, want CALLS", r.ForbiddenEdge.PathPattern[1])
+	}
+	if r.ForbiddenEdge.FromFilePattern != "*/handlers/*" {
+		t.Errorf("FromFilePattern = %q", r.ForbiddenEdge.FromFilePattern)
+	}
+
+	// End-to-end: loaded config must detect violations on the layered graph.
+	g := buildLayeredGraph(t)
+	violations := loaded.CheckViolations(g)
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-handler-db-json" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("loaded config did not detect path-pattern violation")
+	}
+}
+
+func TestPathPattern_MultipleRulesShareNodeSnapshot(t *testing.T) {
+	// Two path-pattern rules must both fire correctly — validates that the
+	// lazy allNodes snapshot is shared correctly between rules.
+	cfg := &config.Config{
+		Rules: []config.Rule{
+			{
+				ID:       "rule-direct",
+				Severity: "error",
+				ForbiddenEdge: config.ForbiddenEdge{
+					FromFilePattern: "*/handlers/*",
+					ToFilePattern:   "*/db/*",
+					PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+				},
+			},
+			{
+				ID:       "rule-twohop",
+				Severity: "warning",
+				ForbiddenEdge: config.ForbiddenEdge{
+					FromFilePattern: "*/handlers/*",
+					ToFilePattern:   "*/db/*",
+					PathPattern:     []graph.EdgeType{graph.EdgeCalls, graph.EdgeCalls},
+				},
+			},
+		},
+	}
+
+	g := buildLayeredGraph(t)
+	violations := cfg.CheckViolations(g)
+
+	ruleDirect, ruleTwoHop := false, false
+	for _, v := range violations {
+		switch v.RuleID {
+		case "rule-direct":
+			ruleDirect = true
+		case "rule-twohop":
+			ruleTwoHop = true
+		}
+	}
+	if !ruleDirect {
+		t.Error("rule-direct did not fire")
+	}
+	if !ruleTwoHop {
+		t.Error("rule-twohop did not fire")
+	}
+}
+
+// ── CheckViolationsForEdges with graph (path-pattern BFS) ────────────────────
+
+func TestCheckViolationsForEdges_PathPattern_WithGraph(t *testing.T) {
+	// Carved subgraph contains only the handler→service edge.
+	// But the FULL graph has handler→db (forbidden 1-hop path).
+	// With g provided, CheckViolationsForEdges must detect the violation.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-handler-db",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/handlers/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+
+	// Carved subgraph: only the handler→service edge (not the direct handler→db edge).
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	serviceID := g.MakeNodeID("/repo/service/order.go", "OrderService")
+	carvedEdges := []*graph.Edge{
+		{From: handlerID, To: serviceID, Type: graph.EdgeCalls},
+	}
+
+	// Without graph: path-pattern BFS skipped, 0 violations.
+	noViolations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, nil)
+	for _, v := range noViolations {
+		if v.RuleID == "no-handler-db" {
+			t.Error("path-pattern violation must not fire when g=nil")
+		}
+	}
+
+	// With graph: BFS from handler finds handler→db in full graph.
+	violations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, g)
+	found := false
+	for _, v := range violations {
+		if v.RuleID == "no-handler-db" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected path-pattern violation when g provided — BFS must traverse full graph from handler seed")
+	}
+}
+
+func TestCheckViolationsForEdges_PathPattern_OnlySeedsFromEdges(t *testing.T) {
+	// BFS seeds must be from-nodes present in the carved edge set.
+	// If a forbidden path starts at a node NOT in the edge set, it must NOT fire.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-service-db",
+			Severity: "warning",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "*/service/*",
+				ToFilePattern:   "*/db/*",
+				PathPattern:     []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t) // service→db edge exists in full graph
+
+	// Carved subgraph: only the handler→service edge.
+	// Service is the TO node here, not a FROM node — so NOT a seed.
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	serviceID := g.MakeNodeID("/repo/service/order.go", "OrderService")
+	carvedEdges := []*graph.Edge{
+		{From: handlerID, To: serviceID, Type: graph.EdgeCalls},
+	}
+
+	violations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, g)
+	for _, v := range violations {
+		if v.RuleID == "no-service-db" {
+			t.Error("must not fire for service→db: service is not a from-node in the carved edge set")
+		}
+	}
+}
+
+func TestCheckViolationsForEdges_PathPattern_NilGraph_SkipsPathPatternRules(t *testing.T) {
+	// Explicit: g=nil must never produce path-pattern violations.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "would-fire-with-graph",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				PathPattern: []graph.EdgeType{graph.EdgeCalls},
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	dbID := g.MakeNodeID("/repo/db/store.go", "Insert")
+	carvedEdges := []*graph.Edge{{From: handlerID, To: dbID, Type: graph.EdgeCalls}}
+
+	violations := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, nil)
+	if len(violations) != 0 {
+		t.Errorf("expected 0 violations with g=nil, got %d", len(violations))
+	}
+}
+
+func TestCheckViolationsForEdges_SingleEdgeRules_Unaffected(t *testing.T) {
+	// Passing g must not break existing single-edge rule behaviour.
+	cfg := &config.Config{
+		Rules: []config.Rule{{
+			ID:       "no-calls",
+			Severity: "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				EdgeType: graph.EdgeCalls,
+			},
+		}},
+	}
+
+	g := buildLayeredGraph(t)
+	handlerID := g.MakeNodeID("/repo/handlers/order.go", "HandleOrder")
+	dbID := g.MakeNodeID("/repo/db/store.go", "Insert")
+	carvedEdges := []*graph.Edge{{From: handlerID, To: dbID, Type: graph.EdgeCalls}}
+
+	// With or without g, single-edge rules must fire.
+	withGraph := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, g)
+	withoutGraph := cfg.CheckViolationsForEdges(carvedEdges, g.GetNode, nil)
+
+	findRule := func(vs []config.Violation) bool {
+		for _, v := range vs {
+			if v.RuleID == "no-calls" {
+				return true
+			}
+		}
+		return false
+	}
+	if !findRule(withGraph) {
+		t.Error("single-edge rule did not fire with g provided")
+	}
+	if !findRule(withoutGraph) {
+		t.Error("single-edge rule did not fire with g=nil")
+	}
 }

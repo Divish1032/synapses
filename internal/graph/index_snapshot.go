@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
@@ -187,6 +188,9 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		if l == 0 {
 			return "", nil
 		}
+		if l > 10*1024*1024 { // 10 MB max string length
+			return "", fmt.Errorf("readStr: length %d exceeds maximum", l)
+		}
 		bs := make([]byte, l)
 		if _, err := io.ReadFull(r, bs); err != nil {
 			return "", err
@@ -215,6 +219,14 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 	if err != nil {
 		return nil, err
 	}
+	const maxNodeCount uint32 = 10_000_000
+	if nodeCount > maxNodeCount {
+		return nil, fmt.Errorf("nodeCount %d exceeds maximum %d", nodeCount, maxNodeCount)
+	}
+	const maxEdgeCount uint32 = 50_000_000
+	if edgeCount > maxEdgeCount {
+		return nil, fmt.Errorf("edgeCount %d exceeds maximum %d", edgeCount, maxEdgeCount)
+	}
 
 	idx := newGraphIndex(pool)
 
@@ -234,12 +246,30 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		if err != nil {
 			return nil, fmt.Errorf("graph snapshot: node %d id: %w", i, err)
 		}
-		typeID, _ := readSID()
-		nameID, _ := readSID()
-		fileID, _ := readSID()
-		pkgID, _ := readSID()
-		line, _ := readI32()
-		exp, _ := readBool()
+		typeID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d typeID: %w", i, err)
+		}
+		nameID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d nameID: %w", i, err)
+		}
+		fileID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d fileID: %w", i, err)
+		}
+		pkgID, err := readSID()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d pkgID: %w", i, err)
+		}
+		line, err := readI32()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d line: %w", i, err)
+		}
+		exp, err := readBool()
+		if err != nil {
+			return nil, fmt.Errorf("graph snapshot: node %d exported: %w", i, err)
+		}
 
 		nid := NodeID(nidStr)
 		idx.SeqIDs[i] = nid
@@ -252,7 +282,8 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		idx.IDToSeq[nid] = i
 	}
 
-	// StringPool
+	// StringPool must be deserialized BEFORE rebuilding secondary indexes,
+	// because the index rebuild calls pool.Value() to resolve StringIDs.
 	poolSize, err := readU32()
 	if err != nil {
 		return nil, err
@@ -265,37 +296,112 @@ func LoadSnapshot(data []byte, pool *StringPool) (*GraphIndex, error) {
 		pool.Intern(s) // re-intern to restore IDs (IDs are positional in the pool)
 	}
 
+	// --- Rebuild secondary indexes (nameIndex, fileIndex, receiverIndex) ---
+	// These are not serialised; rebuild from the node property arrays just
+	// loaded, matching the logic in buildIndex().
+	for i := uint32(1); i <= nodeCount; i++ {
+		name := pool.Value(idx.Names[i])
+		file := pool.Value(idx.FileIDs[i])
+		ntype := NodeType(pool.Value(idx.Types[i]))
+
+		// nameIndex: lowercase full name + unqualified suffix
+		nameLower := strings.ToLower(name)
+		idx.nameIndex[nameLower] = append(idx.nameIndex[nameLower], i)
+		if dotPos := strings.LastIndex(name, "."); dotPos >= 0 {
+			suffixLower := strings.ToLower(name[dotPos+1:])
+			if suffixLower != nameLower {
+				idx.nameIndex[suffixLower] = append(idx.nameIndex[suffixLower], i)
+			}
+			// receiverIndex: map receiver name → method seq IDs
+			if ntype == NodeMethod {
+				receiverLower := strings.ToLower(name[:dotPos])
+				idx.receiverIndex[receiverLower] = append(idx.receiverIndex[receiverLower], i)
+			}
+		}
+
+		// fileIndex: full path + basename only
+		idx.fileIndex[file] = append(idx.fileIndex[file], i)
+		if slashPos := strings.LastIndex(file, "/"); slashPos >= 0 {
+			base := file[slashPos+1:]
+			if base != file {
+				idx.fileIndex[base] = append(idx.fileIndex[base], i)
+			}
+		}
+	}
+
 	// CSR out-edges
 	idx.OutStart = make([]uint32, nodeCount+2)
 	idx.OutEnd = make([]uint32, nodeCount+2)
 	for i := uint32(1); i <= nodeCount; i++ {
-		idx.OutStart[i], _ = readU32()
-		idx.OutEnd[i], _ = readU32()
+		if idx.OutStart[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-edge start %d: %w", i, err)
+		}
+		if idx.OutEnd[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-edge end %d: %w", i, err)
+		}
 	}
 	idx.OutTargets = make([]uint32, edgeCount)
 	for i := range idx.OutTargets {
-		idx.OutTargets[i], _ = readU32()
+		if idx.OutTargets[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-target %d: %w", i, err)
+		}
 	}
 	idx.OutTypes = make([]StringID, edgeCount)
 	for i := range idx.OutTypes {
-		idx.OutTypes[i], _ = readSID()
+		if idx.OutTypes[i], err = readSID(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: out-type %d: %w", i, err)
+		}
 	}
 
 	// CSR in-edges
 	idx.InStart = make([]uint32, nodeCount+2)
 	idx.InEnd = make([]uint32, nodeCount+2)
 	for i := uint32(1); i <= nodeCount; i++ {
-		idx.InStart[i], _ = readU32()
-		idx.InEnd[i], _ = readU32()
+		if idx.InStart[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-edge start %d: %w", i, err)
+		}
+		if idx.InEnd[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-edge end %d: %w", i, err)
+		}
 	}
 	idx.InTargets = make([]uint32, edgeCount)
 	for i := range idx.InTargets {
-		idx.InTargets[i], _ = readU32()
+		if idx.InTargets[i], err = readU32(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-target %d: %w", i, err)
+		}
 	}
 	idx.InTypes = make([]StringID, edgeCount)
 	for i := range idx.InTypes {
-		idx.InTypes[i], _ = readSID()
+		if idx.InTypes[i], err = readSID(); err != nil {
+			return nil, fmt.Errorf("graph snapshot: in-type %d: %w", i, err)
+		}
 	}
+
+	// Validate CSR offsets to detect corrupt blobs before they cause a panic.
+	for i := uint32(1); i <= nodeCount; i++ {
+		if idx.OutStart[i] > idx.OutEnd[i] || idx.OutEnd[i] > edgeCount {
+			return nil, fmt.Errorf("graph snapshot: corrupt out-edge offsets at node %d (start=%d end=%d edgeCount=%d)",
+				i, idx.OutStart[i], idx.OutEnd[i], edgeCount)
+		}
+		if idx.InStart[i] > idx.InEnd[i] || idx.InEnd[i] > edgeCount {
+			return nil, fmt.Errorf("graph snapshot: corrupt in-edge offsets at node %d (start=%d end=%d edgeCount=%d)",
+				i, idx.InStart[i], idx.InEnd[i], edgeCount)
+		}
+	}
+	for i, t := range idx.OutTargets {
+		if t == 0 || t > nodeCount {
+			return nil, fmt.Errorf("graph snapshot: out-target %d (%d) out of range [1, %d]", i, t, nodeCount)
+		}
+	}
+	for i, t := range idx.InTargets {
+		if t == 0 || t > nodeCount {
+			return nil, fmt.Errorf("graph snapshot: in-target %d (%d) out of range [1, %d]", i, t, nodeCount)
+		}
+	}
+
+	// Recompute eigenvector centrality from the restored CSR arrays.
+	// Not serialised — cheap to recompute (<10 ms) and avoids a version bump.
+	idx.computeEigenvectorCentrality()
 
 	atomic.StoreInt32(&idx.ready, 1)
 	return idx, nil

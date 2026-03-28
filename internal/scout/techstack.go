@@ -2,13 +2,11 @@ package scout
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 // TechStackEntry represents one detected dependency with optional doc enrichment.
@@ -53,33 +51,36 @@ func DetectTechStack(projectRoot string) []TechStackEntry {
 	return entries
 }
 
-// EnrichWithDocs searches for official documentation for each entry via scout.
-// Enrichment is best-effort: any failed entries are returned unchanged.
-// A per-entry timeout of 5 seconds is enforced so startup stays fast.
-func EnrichWithDocs(ctx context.Context, sc *Client, entries []TechStackEntry) []TechStackEntry {
-	enriched := make([]TechStackEntry, len(entries))
-	copy(enriched, entries)
-
-	for i, e := range enriched {
-		if e.DocURL != "" {
-			continue // already has a URL
-		}
-		entryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		query := e.Name + " official documentation"
-		resp := sc.Search(entryCtx, SearchRequest{Query: query, MaxResults: 1})
-		cancel()
-		if resp != nil && len(resp.Hits) > 0 {
-			enriched[i].DocURL = resp.Hits[0].URL
-			enriched[i].Snippet = resp.Hits[0].Snippet
-		}
+// safeReadManifest reads a file after checking it is not a symlink and that
+// the resolved path stays within its parent directory (containment check).
+func safeReadManifest(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
 	}
-	return enriched
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, os.ErrPermission
+	}
+	// Containment: resolve the real path and verify it's within the expected dir.
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	expectedDir := filepath.Dir(path)
+	realDir, err := filepath.EvalSymlinks(expectedDir)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(real, realDir+string(filepath.Separator)) && real != realDir {
+		return nil, os.ErrPermission
+	}
+	return os.ReadFile(real)
 }
 
 // ── manifest parsers ──────────────────────────────────────────────────────────
 
 func parseGoMod(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	data, err := safeReadManifest(filepath.Join(root, "go.mod"))
 	if err != nil {
 		return nil
 	}
@@ -137,7 +138,7 @@ func moduleShortName(modPath string) string {
 }
 
 func parsePackageJSON(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	data, err := safeReadManifest(filepath.Join(root, "package.json"))
 	if err != nil {
 		return nil
 	}
@@ -172,7 +173,7 @@ func parsePackageJSON(root string) []TechStackEntry {
 }
 
 func parseRequirementsTxt(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "requirements.txt"))
+	data, err := safeReadManifest(filepath.Join(root, "requirements.txt"))
 	if err != nil {
 		return nil
 	}
@@ -206,7 +207,7 @@ func parseRequirementsTxt(root string) []TechStackEntry {
 }
 
 func parseCargoToml(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
+	data, err := safeReadManifest(filepath.Join(root, "Cargo.toml"))
 	if err != nil {
 		return nil
 	}
@@ -241,7 +242,7 @@ func parseCargoToml(root string) []TechStackEntry {
 }
 
 func parsePyprojectToml(root string) []TechStackEntry {
-	data, err := os.ReadFile(filepath.Join(root, "pyproject.toml"))
+	data, err := safeReadManifest(filepath.Join(root, "pyproject.toml"))
 	if err != nil {
 		return nil
 	}

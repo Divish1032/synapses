@@ -258,3 +258,73 @@ func TestResolveImplementsEdges_CrossPackageIgnored(t *testing.T) {
 		t.Errorf("expected 0 IMPLEMENTS edges across packages (heuristic only matches same-package), got %d", n)
 	}
 }
+
+// TestResolveCallEdges_DeterministicAcrossImports verifies that when two
+// imported packages define a function with the same name, the resolver
+// always picks the same target regardless of map iteration order.
+// This is the regression test for C1 — import map values are now sorted.
+func TestResolveCallEdges_DeterministicAcrossImports(t *testing.T) {
+	// Run multiple iterations — map iteration order is randomized per Go spec,
+	// so repeated runs increase confidence of determinism.
+	var firstTarget graph.NodeID
+	for iter := 0; iter < 20; iter++ {
+		g := graph.New("testrepo")
+
+		// Two packages, each defining a function called "Connect".
+		alphaFile := g.MakeNodeID("alpha.go", "alpha.go")
+		alphaPkg := g.MakeNodeID("alpha", "alpha")
+		alphaConnect := g.MakeNodeID("alpha.go", "Connect")
+
+		betaFile := g.MakeNodeID("beta.go", "beta.go")
+		betaPkg := g.MakeNodeID("beta", "beta")
+		betaConnect := g.MakeNodeID("beta.go", "Connect")
+
+		callerFile := g.MakeNodeID("main.go", "main.go")
+		callerFn := g.MakeNodeID("main.go", "Init")
+
+		g.AddNode(&graph.Node{ID: alphaFile, Type: graph.NodeFile, Name: "alpha.go", File: "alpha.go", Package: "alpha"})
+		g.AddNode(&graph.Node{ID: alphaPkg, Type: graph.NodePackage, Name: "github.com/test/alpha"})
+		g.AddNode(&graph.Node{ID: alphaConnect, Type: graph.NodeFunction, Name: "Connect", Package: "alpha", File: "alpha.go"})
+
+		g.AddNode(&graph.Node{ID: betaFile, Type: graph.NodeFile, Name: "beta.go", File: "beta.go", Package: "beta"})
+		g.AddNode(&graph.Node{ID: betaPkg, Type: graph.NodePackage, Name: "github.com/test/beta"})
+		g.AddNode(&graph.Node{ID: betaConnect, Type: graph.NodeFunction, Name: "Connect", Package: "beta", File: "beta.go"})
+
+		g.AddNode(&graph.Node{ID: callerFile, Type: graph.NodeFile, Name: "main.go", File: "main.go", Package: "main"})
+		g.AddNode(&graph.Node{ID: callerFn, Type: graph.NodeFunction, Name: "Init", Package: "main", File: "main.go"})
+
+		// main.go imports both packages.
+		g.AddEdge(&graph.Edge{From: callerFile, To: alphaPkg, Type: graph.EdgeImports})
+		g.AddEdge(&graph.Edge{From: callerFile, To: betaPkg, Type: graph.EdgeImports})
+
+		// Unqualified call to "Connect" from Init — ambiguous between alpha and beta.
+		// The fallback path iterates imports; sort ensures deterministic resolution.
+		g.AddCallSite(graph.CallSite{
+			CallerID:   callerFn,
+			CallerFile: "main.go",
+			PkgAlias:   "unknown", // not a real import alias, forces fallback path
+			FuncName:   "Connect",
+		})
+
+		resolver.ResolveCallEdges(g)
+
+		// Find which target was chosen.
+		var target graph.NodeID
+		for _, e := range g.AllEdges() {
+			if e.Type == graph.EdgeCalls && e.From == callerFn {
+				target = e.To
+				break
+			}
+		}
+		if target == "" {
+			t.Fatal("expected a CALLS edge to be resolved, got none")
+		}
+
+		if iter == 0 {
+			firstTarget = target
+		} else if target != firstTarget {
+			t.Fatalf("non-deterministic resolution: iteration 0 got %s, iteration %d got %s",
+				firstTarget, iter, target)
+		}
+	}
+}

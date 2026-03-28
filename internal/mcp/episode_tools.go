@@ -2,13 +2,16 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -19,16 +22,19 @@ func (s *Server) handleRemember(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	agentID := stringArg(req, "agent_id")
 	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
+		return mcp.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
 	}
-	decision := stringArg(req, "decision")
+	decision, err := stringArgLimited(req, "decision", maxArgLengthDecision)
+	if err != nil {
+		return mcp.NewToolResultError(stripInternalPaths(err.Error())), nil
+	}
 	if decision == "" {
-		return mcp.NewToolResultError("decision is required"), nil
+		return mcp.NewToolResultError("decision is required (e.g., 'switched auth to OAuth 2.0')"), nil
 	}
 
 	episodeType := stringArg(req, "episode_type")
@@ -49,20 +55,116 @@ func (s *Server) handleRemember(
 		return mcp.NewToolResultError("outcome must be one of: success, failure, partial, unknown"), nil
 	}
 
+	// Episode importance defaults to 0.5 (normal). The registered parameter
+	// is memory_importance (string), used for the companion memory — not this
+	// episode-level field. Previously an unregistered "importance" float was
+	// read here but agents never sent it (BUG-018).
 	importance := 0.5
-	if v, ok := req.GetArguments()["importance"].(float64); ok && v >= 0 && v <= 1 {
-		importance = v
+
+	// AM-1: Parse optional anchor_nodes for binding memories to graph nodes.
+	var anchorNodes []string
+	if raw := stringArg(req, "anchor_nodes"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &anchorNodes); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("anchor_nodes must be a JSON array of strings: %v", stripInternalPaths(err.Error()))), nil
+		}
+		// Validate node ID format: must contain "::" separator (e.g. "repo::file.go::FuncName").
+		for _, nid := range anchorNodes {
+			if nid != "" && !strings.Contains(nid, "::") {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid anchor node ID %q: must contain '::' separator (e.g. 'repo::pkg/file.go::FuncName')", nid)), nil
+			}
+		}
+	}
+
+	// rationale is concatenated with decision before embedding — needs same tight limit.
+	rationale, rationaleErr := stringArgLimited(req, "rationale", maxArgLengthRationale)
+	if rationaleErr != nil {
+		return mcp.NewToolResultError(stripInternalPaths(rationaleErr.Error())), nil
+	}
+
+	// OF-S2: scan externally-sourced content for prompt injection patterns.
+	// Covers decision and rationale — the two fields persisted to SQLite and embedded.
+	var injectionWarning string
+	if scanResult, scanErr := s.scanContent("decision", decision); scanErr != nil {
+		return mcp.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
+	} else {
+		decision = scanResult.sanitized
+		if scanResult.warning != "" {
+			injectionWarning = scanResult.warning
+			// P7-1: emit guard event for injection scan trigger.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "injection_scan", ToolName: "remember",
+					Category: "warn", AgentID: agentID, ProjectID: s.projectID,
+				})
+			}
+		}
+	}
+	if rationale != "" {
+		if scanResult, scanErr := s.scanContent("rationale", rationale); scanErr != nil {
+			return mcp.NewToolResultError(stripInternalPaths(scanErr.Error())), nil
+		} else {
+			rationale = scanResult.sanitized
+			if scanResult.warning != "" && injectionWarning == "" {
+				injectionWarning = scanResult.warning
+				// P7-1: emit guard event for injection scan trigger.
+				if pc := s.getPulseClient(); pc != nil {
+					pc.RecordGuardEvent(pulse.GuardEvent{
+						GuardType: "injection_scan", ToolName: "remember",
+						Category: "warn", AgentID: agentID, ProjectID: s.projectID,
+					})
+				}
+			}
+		}
+	}
+
+	// OF-E3: cross-project write approval gate.
+	// When project_id is explicitly set and differs from the current project,
+	// this is a cross-project write that requires user approval.
+	reqProjectID := stringArg(req, "project_id")
+	if reqProjectID != "" {
+		currentProject := ""
+		if s.graph != nil {
+			currentProject = s.graph.RepoID()
+		}
+		if currentProject == "" {
+			currentProject = filepath.Base(s.projectPath)
+		}
+		if reqProjectID != currentProject {
+			// OF-E3: check for an out-of-band user-approved approval file.
+			// The agent never sees the token — only the user can approve via `synapses approve`.
+			if !s.approvals.checkAndConsumeApproval("cross_project_remember", agentID) {
+				// P7-2: emit guard event for approval gate request.
+				if pc := s.getPulseClient(); pc != nil {
+					pc.RecordGuardEvent(pulse.GuardEvent{
+						GuardType: "approval_gate", ToolName: "remember",
+						Category: "requested", AgentID: agentID, ProjectID: s.projectID,
+					})
+				}
+				return s.approvals.requestApproval(
+					"cross_project_remember",
+					fmt.Sprintf("Agent %q writing memory to project %q (current project: %q)", agentID, reqProjectID, currentProject),
+					agentID,
+				), nil
+			}
+			// P7-2: emit guard event for approval gate consumption.
+			if pc := s.getPulseClient(); pc != nil {
+				pc.RecordGuardEvent(pulse.GuardEvent{
+					GuardType: "approval_gate", ToolName: "remember",
+					Category: "consumed", AgentID: agentID, ProjectID: s.projectID,
+				})
+			}
+		}
 	}
 
 	e := store.Episode{
 		AgentID:       agentID,
-		ProjectID:     stringArg(req, "project_id"),
+		ProjectID:     reqProjectID,
 		CreatedAt:     time.Now().Unix(),
 		EpisodeType:   episodeType,
 		Outcome:       outcome,
 		Trigger:       stringArg(req, "trigger"),
 		Decision:      decision,
-		Rationale:     stringArg(req, "rationale"),
+		Rationale:     rationale,
 		AffectedFiles: stringArgDefault(req, "affected_files", "[]"),
 		AffectedNodes: stringArgDefault(req, "affected_nodes", "[]"),
 		Tags:          stringArgDefault(req, "tags", "[]"),
@@ -73,41 +175,179 @@ func (s *Server) handleRemember(
 
 	id, err := s.store.RememberEpisode(e)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("remember episode: %v", err)), nil
+		return toolError("remember episode", err)
 	}
 
-	if episodeType == "failure" {
-		if err := s.store.AppendEvent("failure_recorded", agentID,
-			fmt.Sprintf(`{"episode_id":%q,"outcome":%q,"trigger":%q}`,
-				id, outcome, e.Trigger)); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: append failure_recorded event: %v\n", err)
+	// P3B-3: emit memory write operation event for pulse analytics.
+	if pc := s.getPulseClient(); pc != nil {
+		episodeTypeCopy := episodeType
+		agentCopy := agentID
+		projCopy := reqProjectID
+		if projCopy == "" {
+			projCopy = s.projectID
+		}
+		s.goBackground(func() {
+			pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+				Operation: "write",
+				Tier:      episodeTypeCopy,
+				Source:    "manual",
+				AgentID:   agentCopy,
+				ProjectID: projCopy,
+			})
+		})
+	}
+
+	// ── Dual-write to unified memories table ──
+	// Failures with affected nodes → entity-tier memories.
+	// All episodes → project-tier memory (decisions, patterns, failures).
+	memContent := e.Decision
+	if e.Rationale != "" {
+		memContent += " — " + e.Rationale
+	}
+	memTags := fmt.Sprintf(`["episode","%s"]`, episodeType)
+
+	// Collect written memory IDs for embedding.
+	var memoryIDs []string
+
+	// memory_importance: forwarded from caller when explicitly set.
+	// "pinned" exempts from decay; float strings set the weight multiplier.
+	// When empty, prepareMemory auto-computes via A-MAC admission control
+	// (content_type_prior × novelty_factor) at write time.
+	memImportance := stringArg(req, "memory_importance")
+
+	// Entity-tier: one memory per affected node (failures & patterns only).
+	if episodeType == "failure" || episodeType == "pattern" {
+		var affectedNodes []string
+		if err := json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes); err != nil {
+			logutil.Debug("synapses: episodes: unmarshal affected_nodes for episode %q: %v\n", id, err)
+		}
+		for _, nodeID := range affectedNodes {
+			mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
+				Tier:       store.TierEntity,
+				Content:    memContent,
+				EntityID:   nodeID,
+				AgentID:    agentID,
+				TaskID:     e.ProjectID,
+				Source:     store.SourceManual,
+				Tags:       memTags,
+				Importance: memImportance,
+			}, anchorNodes)
+			if merr == nil && mid != "" {
+				memoryIDs = append(memoryIDs, mid)
+			}
 		}
 	}
 
-	return jsonResult(map[string]interface{}{
+	// Project-tier: always write the episode as project knowledge.
+	mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
+		Tier:       store.TierProject,
+		Content:    memContent,
+		AgentID:    agentID,
+		TaskID:     e.ProjectID,
+		Source:     store.SourceManual,
+		Tags:       memTags,
+		Importance: memImportance,
+	}, anchorNodes)
+	if merr == nil && mid != "" {
+		memoryIDs = append(memoryIDs, mid)
+	}
+
+	// Fire-and-forget: embed newly written memories in background.
+	// Timeout protects against slow model init (first call downloads ~23MB).
+	if s.memoryEmbedder != nil && len(memoryIDs) > 0 {
+		embedder := s.memoryEmbedder
+		st := s.store
+		content := memContent
+		ids := make([]string, len(memoryIDs))
+		copy(ids, memoryIDs)
+		if !s.goBackground(func() {
+			for _, memID := range ids {
+				s.embedMemory(s.lifecycleCtx, embedder, st, memID, content)
+			}
+		}) {
+			for _, memID := range ids {
+				s.trackFailedEmbed(memID)
+			}
+		}
+	}
+
+	if episodeType == "failure" {
+		payload, _ := json.Marshal(map[string]string{
+			"episode_id": id, "outcome": outcome, "trigger": e.Trigger,
+		})
+		if err := s.store.AppendEvent("failure_recorded", agentID, string(payload)); err != nil {
+			logutil.Warn("synapses: append failure_recorded event: %v\n", err)
+		}
+	}
+
+	resp := map[string]interface{}{
 		"episode_id":   id,
 		"episode_type": episodeType,
 		"outcome":      outcome,
 		"message":      "Episode recorded. Use recall() to surface similar past episodes in future sessions.",
-	})
+	}
+	if injectionWarning != "" {
+		resp["injection_warning"] = injectionWarning
+	}
+	if len(anchorNodes) > 0 {
+		resp["anchored_to"] = len(anchorNodes)
+	} else {
+		resp["tier_hint"] = "If this memory describes a code entity, architecture fact, or task context derived from the graph, add anchor_nodes=[\"node_id\"] so it auto-invalidates when the code changes. Use find_entity() to get a node ID first."
+	}
+
+	// F12: Auto-create a fix task when:
+	//   • episode_type is "failure", AND
+	//   • create_fix_task=true is explicitly requested, OR importance >= 0.7
+	// The fix task is linked to the episode's affected_nodes so agents can jump
+	// straight to the relevant code via get_context(task_id=...).
+	createFixTask, _ := req.GetArguments()["create_fix_task"].(bool)
+	if s.store != nil && episodeType == "failure" && (createFixTask || importance >= 0.7) {
+		var affectedNodes []string
+		if err := json.Unmarshal([]byte(e.AffectedNodes), &affectedNodes); err != nil {
+			logutil.Debug("synapses: episodes: unmarshal affected_nodes for fix task (episode %q): %v\n", id, err)
+		}
+
+		fixTitle := "Fix: " + e.Decision
+		if len(fixTitle) > 120 {
+			fixTitle = fixTitle[:117] + "..."
+		}
+		fixDesc := fmt.Sprintf("Auto-created from failure episode %s.\nFailure: %s", id, e.Decision)
+		if e.Rationale != "" {
+			fixDesc += "\nRationale: " + e.Rationale
+		}
+		planID, _, perr := s.store.CreatePlan(fixTitle, fixDesc, agentID, []store.TaskInput{{
+			Title:       fixTitle,
+			Description: fixDesc,
+			Priority:    "p1",
+			LinkedNodes: affectedNodes,
+		}})
+		if perr == nil {
+			// Retrieve the newly created task ID (one task per auto-fix plan).
+			if tasks, terr := s.store.GetPendingTasks(planID, ""); terr == nil && len(tasks) > 0 {
+				resp["fix_task_id"] = tasks[0].ID
+				resp["fix_plan_id"] = planID
+				resp["message"] = resp["message"].(string) + fmt.Sprintf(" Fix task created (id=%s).", tasks[0].ID)
+			}
+		}
+	}
+
+	return jsonResult(resp)
 }
 
-// handleRecall performs FTS5 BM25 search over episodes and returns the top
-// matches. v1 uses top-N without a score threshold — caller decides relevance.
+// handleRecall searches episodic memory.
+// When query is provided: FTS5 BM25 semantic search, results ordered by relevance.
+// When query is empty: chronological browse (newest first), same as deprecated get_episodes.
 func (s *Server) handleRecall(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	query := stringArg(req, "query")
-	if query == "" {
-		return mcp.NewToolResultError("query is required"), nil
-	}
 
-	limit := 5
+	limit := 20
 	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
 		limit = int(v)
 	}
@@ -117,17 +357,522 @@ func (s *Server) handleRecall(
 		sinceDays = int(v)
 	}
 
+	// Parse absolute time bounds: since / until (Sprint 10 #5).
+	// Accepted formats: RFC3339 ("2026-03-01T00:00:00Z") or date-only ("2026-03-01").
+	var sinceTime, untilTime *time.Time
+	if sinceStr := stringArg(req, "since"); sinceStr != "" {
+		t, err := parseFlexibleTime(sinceStr, false)
+		if err != nil {
+			return toolError("since", err)
+		}
+		sinceTime = &t
+		// Auto-derive sinceDays if the caller didn't set since_days explicitly.
+		// This feeds the temporal channel with the right lookback window.
+		if sinceDays == 0 {
+			days := int(time.Since(t).Hours()/24) + 1
+			if days > 0 {
+				sinceDays = days
+			}
+		}
+	}
+	if untilStr := stringArg(req, "until"); untilStr != "" {
+		t, err := parseFlexibleTime(untilStr, true) // true = end-of-day for date-only
+		if err != nil {
+			return toolError("until", err)
+		}
+		untilTime = &t
+	}
+
+	// Validate ordering: since must be strictly before until.
+	if sinceTime != nil && untilTime != nil && !sinceTime.Before(*untilTime) {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"since (%s) must be before until (%s)",
+			sinceTime.Format("2006-01-02"), untilTime.Format("2006-01-02"),
+		)), nil
+	}
+
+	includeStale, _ := req.GetArguments()["include_stale"].(bool)
+
+	// Browse mode: empty query = list chronologically (newest first).
+	if query == "" {
+		// Parse tags: accept comma-separated string or JSON array.
+		var tags []string
+		if raw := stringArg(req, "tags"); raw != "" {
+			for _, t := range strings.Split(raw, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					tags = append(tags, t)
+				}
+			}
+		}
+		episodes, err := s.store.GetEpisodes(
+			stringArg(req, "project_id"),
+			stringArg(req, "agent_id"),
+			stringArg(req, "episode_type"),
+			tags,
+			limit,
+			sinceDays,
+		)
+		if err != nil {
+			return toolError("get episodes", err)
+		}
+
+		// Also surface recent memories from the unified table.
+		// Filter by agentID when provided (agent browsing their own history),
+		// otherwise return recent project/entity memories across all agents.
+		agentID := stringArg(req, "agent_id")
+		var recentMems []store.Memory
+		if includeStale {
+			var qErr error
+			recentMems, qErr = s.store.QueryMemoriesIncludingStale("", "", agentID, limit)
+			if qErr != nil {
+				logutil.Debug("synapses: episode browse memory query error: %v\n", qErr)
+			}
+		} else {
+			raw, qErr := s.store.QueryMemories("", "", agentID, limit)
+			if qErr != nil {
+				logutil.Debug("synapses: episode browse memory query error: %v\n", qErr)
+			}
+			// Apply decay visibility threshold — same filter as search mode.
+			// Pinned memories always pass; decayed memories are demoted but not deleted.
+			for _, m := range raw {
+				if store.DecayedImportanceScore(m, 0) >= store.DecayVisibilityThreshold {
+					recentMems = append(recentMems, m)
+				}
+			}
+		}
+
+		// BUG-011: Output-path injection scanning for browse mode.
+		for i := range episodes {
+			episodes[i].Decision = s.scanOutputContent(episodes[i].Decision)
+			episodes[i].Rationale = s.scanOutputContent(episodes[i].Rationale)
+		}
+		for i := range recentMems {
+			recentMems[i].Content = s.scanOutputContent(recentMems[i].Content)
+		}
+
+		summary := "no episodes found"
+		if len(episodes) > 0 || len(recentMems) > 0 {
+			summary = fmt.Sprintf("%d episode(s), %d memory/memories", len(episodes), len(recentMems))
+		}
+		hint := "Ordered by creation time (newest first). 'memories' includes auto-captured memories from end_session and annotate_node. Pass query=... for relevance-ranked search."
+		if stringArg(req, "as_of") != "" {
+			hint += " Note: as_of is only applied in search mode (with query=). Browse mode always shows current content."
+		}
+		if sinceTime != nil || untilTime != nil {
+			hint += " Note: since/until are only applied in search mode (with query=). In browse mode, use since_days= to limit the lookback window."
+		}
+		resp := map[string]interface{}{
+			"summary":  summary,
+			"episodes": episodes,
+			"mode":     "browse",
+			"hint":     hint,
+		}
+		if len(recentMems) > 0 {
+			resp["memories"] = recentMems
+		}
+		return jsonResult(resp)
+	}
+
+	// Sprint 10.1: parse optional as_of parameter for temporal versioned recall.
+	var asOfTime *time.Time
+	if asOfStr := stringArg(req, "as_of"); asOfStr != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, asOfStr)
+		if parseErr != nil {
+			// Try date-only format as fallback (e.g. "2026-03-15").
+			parsed, parseErr = time.Parse("2006-01-02", asOfStr)
+			if parseErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("as_of must be RFC3339 (e.g. '2026-03-15T12:00:00Z') or date (e.g. '2026-03-15'): %v", stripInternalPaths(parseErr.Error()))), nil
+			}
+			// Set to end of day in UTC for date-only format.
+			parsed = parsed.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+		}
+		asOfTime = &parsed
+	}
+
+	// Read depth for graph channel multi-hop traversal (Sprint 10 #8).
+	// 0 = default (2 hops). Negative values clamp to 1 inside quadRecallSearch.
+	depth := 0
+	if v, ok := req.GetArguments()["depth"].(float64); ok && v > 0 {
+		depth = int(v)
+	}
+
+	// Search mode: quad-channel recall (BM25 + semantic + graph + temporal).
+	searchLimit := limit
+	if searchLimit > 5 {
+		searchLimit = 5 // default cap for search mode
+	}
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		searchLimit = int(v) // explicit override
+	}
+
+	// Sprint 10.5: inflate episode fetch limit when time bounds are active,
+	// same logic as quadLimit for memories. Without inflation, the top-N
+	// episodes by BM25 relevance could all fall outside the time window,
+	// returning 0 episodes even though in-window episodes exist at rank N+1.
+	episodeLimit := searchLimit
+	if sinceTime != nil || untilTime != nil {
+		episodeLimit = searchLimit * 10
+		if episodeLimit < 50 {
+			episodeLimit = 50
+		}
+	}
+
+	// Sprint 13 #6: Context-weighted recall — when agent_id is provided,
+	// enrich the BM25/semantic query with the agent's declared intent and
+	// active task title. Graph channel always uses the original structural query.
+	// Implements ACT-R spreading activation: current working memory cues
+	// surface contextually relevant memories (RC: Memory #9).
+	//
+	// Enrichment is computed once and used for BOTH episode and memory search
+	// (both are text-retrieval channels that benefit from session context).
+	enrichedQuery := ""
+	// contextEnrichment is always populated when agent_id is provided so callers
+	// can distinguish "enrichment applied" (applied=true) from "enrichment
+	// attempted but no new context terms found" (applied=false) from
+	// "no agent provided at all" (field absent). This allows transparent
+	// reasoning about why a recall returned the results it did.
+	var contextEnrichment map[string]interface{}
+	if agentIDStr := stringArg(req, "agent_id"); agentIDStr != "" && query != "" {
+		if agent, agentErr := s.store.GetAgent(agentIDStr); agentErr == nil && agent != nil {
+			enrichedQuery = buildEnrichedQuery(query, agent.Intent, agent.CurrentTaskTitle)
+			applied := enrichedQuery != query
+			contextEnrichment = map[string]interface{}{
+				"applied":    applied,
+				"intent":     agent.Intent,
+				"task_title": agent.CurrentTaskTitle,
+			}
+			if applied {
+				contextEnrichment["enriched_query"] = enrichedQuery
+			}
+		}
+		// Lookup errors are silently swallowed — recall degrades to non-enriched.
+	}
+	// episodeQuery uses enrichedQuery when available (episode search is also FTS5/BM25).
+	episodeQuery := query
+	if enrichedQuery != "" {
+		episodeQuery = enrichedQuery
+	}
+
+	// Episodes: still searched via FTS5 BM25 separately (not part of RRF).
 	episodes, err := s.store.RecallEpisodes(
-		query,
+		episodeQuery,
 		stringArg(req, "project_id"),
 		stringArg(req, "agent_id"),
 		stringArg(req, "episode_type"),
 		stringArg(req, "outcome_filter"),
-		limit,
+		episodeLimit,
 		sinceDays,
 	)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("recall episodes: %v", err)), nil
+		return toolError("recall episodes", err)
+	}
+
+	// Sprint 10.5: when time bounds are active, inflate the internal fetch limit
+	// so post-filtering has enough candidates. Without this, in-range memories
+	// ranked below the normal channel limit would be silently excluded.
+	// A 10× multiplier (min 50) covers typical Synapses scale (hundreds of memories).
+	quadLimit := searchLimit
+	if sinceTime != nil || untilTime != nil {
+		quadLimit = searchLimit * 10
+		if quadLimit < 50 {
+			quadLimit = 50
+		}
+	}
+
+	// Quad-channel recall: 4 parallel channels merged via RRF.
+	// Replaces the old sequential BM25 + vector search path.
+	memories, attr, staleEmbIDs, traversalInfo := s.quadRecallSearch(ctx, query, enrichedQuery, quadLimit, includeStale, sinceDays, untilTime, depth)
+
+	// Sprint 10.5: apply absolute time bounds (since / until) as post-filters.
+	// sinceTime and untilTime are only set when the caller provided since= / until=.
+	// We parse m.CreatedAt as time.Time for comparison — string comparison of
+	// RFC3339 is lexicographically safe for UTC but fragile if the format varies.
+	if sinceTime != nil || untilTime != nil {
+		filtered := memories[:0]
+		for _, m := range memories {
+			t, parseErr := time.Parse(time.RFC3339, m.CreatedAt)
+			if parseErr != nil {
+				// Unparseable created_at — keep the memory to avoid silently dropping data.
+				filtered = append(filtered, m)
+				continue
+			}
+			if sinceTime != nil && t.Before(*sinceTime) {
+				continue
+			}
+			if untilTime != nil && t.After(*untilTime) {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		memories = filtered
+
+		// Re-cap to searchLimit. The inflated quadLimit was only for fetching
+		// enough candidates before filtering — never for returning more than
+		// the user requested. Without this cap, limit=5 with 40 in-range
+		// memories would return 40, violating the limit contract.
+		if len(memories) > searchLimit {
+			memories = memories[:searchLimit]
+		}
+
+		// Reconcile staleEmbIDs and traversalInfo.Paths to the post-cap set.
+		// They were computed from the pre-filter result; IDs no longer in memories
+		// (filtered out OR past the limit cap) must be removed to avoid confusing
+		// agents with references to absent memories.
+		if len(staleEmbIDs) > 0 || traversalInfo != nil {
+			survivingIDs := make(map[string]bool, len(memories))
+			for _, m := range memories {
+				survivingIDs[m.ID] = true
+			}
+			if len(staleEmbIDs) > 0 {
+				kept := staleEmbIDs[:0]
+				for _, id := range staleEmbIDs {
+					if survivingIDs[id] {
+						kept = append(kept, id)
+					}
+				}
+				staleEmbIDs = kept
+			}
+			if traversalInfo != nil && len(traversalInfo.Paths) > 0 {
+				keptPaths := traversalInfo.Paths[:0]
+				for _, p := range traversalInfo.Paths {
+					if survivingIDs[p.MemoryID] {
+						keptPaths = append(keptPaths, p)
+					}
+				}
+				traversalInfo.Paths = keptPaths
+			}
+		}
+
+		// Filter episodes by absolute time bounds (CreatedAt is Unix seconds).
+		filteredEp := episodes[:0]
+		for _, ep := range episodes {
+			t := time.Unix(ep.CreatedAt, 0).UTC()
+			if sinceTime != nil && t.Before(*sinceTime) {
+				continue
+			}
+			if untilTime != nil && t.After(*untilTime) {
+				continue
+			}
+			filteredEp = append(filteredEp, ep)
+		}
+		episodes = filteredEp
+		// Re-cap episodes at searchLimit (inflated episodeLimit was for candidate fetch only).
+		if len(episodes) > searchLimit {
+			episodes = episodes[:searchLimit]
+		}
+	}
+
+	// Sprint 10.1: apply temporal versioning — swap content with historical version.
+	if asOfTime != nil && len(memories) > 0 {
+		memIDs := make([]string, len(memories))
+		for i, m := range memories {
+			memIDs[i] = m.ID
+		}
+		versioned, verr := s.store.GetMemoryAsOf(memIDs, *asOfTime)
+		if verr == nil && len(versioned) > 0 {
+			memories = versioned
+		}
+	}
+
+	// BUG-011: Output-path injection scanning — scan recalled content before
+	// delivering to agents. Content stored before the scanner existed (or while
+	// in warn mode) may contain injection patterns that must be annotated.
+	for i := range memories {
+		memories[i].Content = s.scanOutputContent(memories[i].Content)
+	}
+	for i := range episodes {
+		episodes[i].Decision = s.scanOutputContent(episodes[i].Decision)
+		episodes[i].Rationale = s.scanOutputContent(episodes[i].Rationale)
+	}
+
+	// Touch surfaced memories in background to renew TTL.
+	if len(memories) > 0 {
+		ids := make([]string, len(memories))
+		for i, m := range memories {
+			ids[i] = m.ID
+		}
+		s.goBackground(func() {
+			for _, id := range ids {
+				s.store.TouchMemory(id)
+			}
+		})
+	}
+
+	// Emit knowledge_accessed lifecycle event when results are found.
+	if len(memories) > 0 || len(episodes) > 0 {
+		agentID := stringArg(req, "agent_id")
+		mCount, eCount := len(memories), len(episodes)
+		s.goBackground(func() {
+			if err := s.store.AppendEvent("knowledge_accessed", agentID,
+				fmt.Sprintf(`{"query":%q,"memories":%d,"episodes":%d}`, query, mCount, eCount)); err != nil {
+				logutil.Warn("synapses: recall: append knowledge_accessed event: %v\n", err)
+			}
+		})
+	}
+
+	// P3-4: emit recall hit/miss event.
+	if pc := s.getPulseClient(); pc != nil {
+		totalResults := len(episodes) + len(memories)
+		op := "recall_miss"
+		if totalResults > 0 {
+			op = "recall_hit"
+		}
+		recallAgentID := stringArg(req, "agent_id")
+		projID := s.projectID
+		// P5 — SA-D6: attach session ID for cross-session reuse tracking.
+		mcpSessID := SessionIDFromContext(ctx)
+		sessID := s.getSynapseSessionID(mcpSessID)
+		// P5 — Item 39: vector search latency is extracted inside quadRecallSearch
+		// from the INPUT channels map and surfaced via traversalInfo.VectorSearchMs.
+		// (Reading from the output Attribution would always return zero — Attribution
+		// is keyed by memID, not by channel name.)
+		var vecSearchMs float64
+		if traversalInfo != nil {
+			vecSearchMs = traversalInfo.VectorSearchMs
+		}
+		// Sprint 15 #4: TopChannel — the channel that contributed most to the
+		// rank-1 result. attr.TopChannel returns attribution[memories[0].ID][0],
+		// which is sorted best-contributor first by RRFMergeWeighted/ConvexMerge.
+		var topChan string
+		if len(memories) > 0 {
+			topChan = attr.TopChannel(memories[0].ID)
+		}
+		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+			Operation:      op,
+			Tier:           "episodic",
+			Source:         "manual",
+			ResultCount:    totalResults,
+			AgentID:        recallAgentID,
+			ProjectID:      projID,
+			SessionID:      sessID,
+			VectorSearchMs: vecSearchMs,
+			TopChannel:     topChan,
+		})
+		// P5 — Item 12: trigger recall channel attribution refresh after hits.
+		// Debounced to recallStatsMinInterval: a busy session with N recalls
+		// triggers at most one full aggregation per interval via CAS on a
+		// unix-nanosecond timestamp — no mutex, no goroutine.
+		if op == "recall_hit" {
+			now := time.Now().UnixNano()
+			last := s.recallStatsLastNs.Load()
+			if now-last > int64(recallStatsMinInterval) && s.recallStatsLastNs.CompareAndSwap(last, now) {
+				s.goBackground(func() { pc.UpdateRecallChannelStats(projID) })
+			}
+		}
+	}
+
+	// Cross-project episode search when projects= is provided.
+	var crossProjectEpisodes []map[string]interface{}
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.federationResolver != nil {
+		var aliases []string
+		for _, a := range strings.Split(projectsParam, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				aliases = append(aliases, a)
+			}
+		}
+		if len(aliases) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			fedEpisodes := s.federationResolver.SearchEpisodes(ctx, query, aliases, searchLimit)
+			for _, fe := range fedEpisodes {
+				// Sprint 10.5: apply time bounds to federation results.
+				if sinceTime != nil && time.Unix(fe.Episode.CreatedAt, 0).UTC().Before(*sinceTime) {
+					continue
+				}
+				if untilTime != nil && time.Unix(fe.Episode.CreatedAt, 0).UTC().After(*untilTime) {
+					continue
+				}
+				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+					"source":       fmt.Sprintf("[%s]", fe.Alias),
+					"id":           fe.Episode.ID,
+					"decision":     fe.Episode.Decision,
+					"rationale":    fe.Episode.Rationale,
+					"episode_type": fe.Episode.EpisodeType,
+					"outcome":      fe.Episode.Outcome,
+					"trigger":      fe.Episode.Trigger,
+					"tags":         fe.Episode.Tags,
+					"created_at":   fe.Episode.CreatedAt,
+				})
+			}
+		}
+	}
+
+	// Cross-project recall via daemon project registry (covers all registered projects,
+	// not just explicitly federated ones). This is the primary cross-project path.
+	if projectsParam := stringArg(req, "projects"); projectsParam != "" && s.projectRegistry != nil {
+		stores, notFound := s.resolveProjectStores(projectsParam)
+		if len(notFound) > 0 {
+			crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+				"_error": fmt.Sprintf("unknown project(s): %s. Available: %s", strings.Join(notFound, ", "), strings.Join(s.allowedProjectNames(), ", ")),
+			})
+		}
+		for projName, projStore := range stores {
+			// Skip projects already covered by federation.
+			alreadyCovered := false
+			for _, ep := range crossProjectEpisodes {
+				if src, ok := ep["source"].(string); ok && src == fmt.Sprintf("[%s]", projName) {
+					alreadyCovered = true
+					break
+				}
+			}
+			if alreadyCovered {
+				continue
+			}
+
+			// Use inflated limits for cross-project search when time bounds active —
+			// same rationale as local search: avoid missing in-window results
+			// ranked just below the unfiltered searchLimit.
+			eps, err := projStore.RecallEpisodes(query, "", "", "", "", episodeLimit, sinceDays)
+			if err == nil {
+				for _, ep := range eps {
+					// Sprint 10.5: apply time bounds to registry episode results.
+					epTime := time.Unix(ep.CreatedAt, 0).UTC()
+					if sinceTime != nil && epTime.Before(*sinceTime) {
+						continue
+					}
+					if untilTime != nil && epTime.After(*untilTime) {
+						continue
+					}
+					crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+						"source":       fmt.Sprintf("[%s]", projName),
+						"id":           ep.ID,
+						"decision":     ep.Decision,
+						"rationale":    ep.Rationale,
+						"episode_type": ep.EpisodeType,
+						"outcome":      ep.Outcome,
+						"trigger":      ep.Trigger,
+						"tags":         ep.Tags,
+						"created_at":   ep.CreatedAt,
+					})
+				}
+			}
+			// Also search memories; apply decay filter and time bounds for consistency.
+			mems, _ := projStore.SearchMemories(query, quadLimit)
+			for _, m := range mems {
+				if store.DecayedImportanceScore(m, 0) < store.DecayVisibilityThreshold {
+					continue // skip decayed memories in cross-project results
+				}
+				// Sprint 10.5: apply time bounds to cross-project memories.
+				if sinceTime != nil || untilTime != nil {
+					mt, parseErr := time.Parse(time.RFC3339, m.CreatedAt)
+					if parseErr == nil {
+						if sinceTime != nil && mt.Before(*sinceTime) {
+							continue
+						}
+						if untilTime != nil && mt.After(*untilTime) {
+							continue
+						}
+					}
+				}
+				crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+					"source":     fmt.Sprintf("[%s]", projName),
+					"id":         m.ID,
+					"decision":   m.Content,
+					"tier":       m.Tier,
+					"created_at": m.CreatedAt,
+				})
+			}
+		}
 	}
 
 	// Surface any dynamic rules derived from matching failure episodes.
@@ -138,18 +883,64 @@ func (s *Server) handleRecall(
 		}
 	}
 
-	summary := "no matching episodes"
-	if len(episodes) > 0 {
-		summary = fmt.Sprintf("%d episode(s) matching %q", len(episodes), query)
+	totalMatches := len(episodes) + len(memories) + len(crossProjectEpisodes)
+	summary := "no matching results"
+	if totalMatches > 0 {
+		summary = fmt.Sprintf("%d result(s) matching %q (%d local episode(s), %d memory/memories, %d cross-project)",
+			totalMatches, query, len(episodes), len(memories), len(crossProjectEpisodes))
 	}
 
-	result := map[string]interface{}{
+	resp := map[string]interface{}{
 		"summary":       summary,
 		"episodes":      episodes,
 		"related_rules": relatedRules,
-		"hint":          "Episodes ordered by relevance (best match first). Check related_rules for constraints derived from similar past failures.",
+		"mode":          "search",
+		"hint":          "Results ordered by relevance. 'episodes' = explicit remember() calls. 'memories' = auto-captured from end_session, annotate_node, and remember() across all tiers (session_log, entity, project). Check related_rules for constraints from past failures. stale_embedding_ids lists memories whose anchored code entity changed since the memory was written — verify before trusting.",
 	}
-	return jsonResult(result)
+	if len(memories) > 0 {
+		resp["memories"] = memories
+	}
+	// Sprint 10.7: surface stale embedding IDs so agents know which memories
+	// are about code entities that changed since the memory was written.
+	// Agents should verify these memories before trusting their content.
+	if len(staleEmbIDs) > 0 {
+		resp["stale_embedding_ids"] = staleEmbIDs
+	}
+	if len(crossProjectEpisodes) > 0 {
+		resp["cross_project_episodes"] = crossProjectEpisodes
+	}
+	// Sprint 10.1: annotate response when as_of filtering was applied.
+	if asOfTime != nil {
+		resp["as_of"] = asOfTime.Format(time.RFC3339)
+		resp["as_of_note"] = "Memory content shown as it existed at the specified time. Memories with version > 0 show historical content."
+	}
+	// Sprint 10.5: annotate response when absolute time bounds were applied.
+	// Tells the agent exactly what window was searched so it can reason about completeness.
+	if sinceTime != nil || untilTime != nil {
+		tf := map[string]interface{}{}
+		if sinceTime != nil {
+			tf["since"] = sinceTime.UTC().Format(time.RFC3339)
+		}
+		if untilTime != nil {
+			tf["until"] = untilTime.UTC().Format(time.RFC3339)
+		}
+		tf["note"] = "Results are bounded to the specified time window. All result sources (local memories, episodes, cross-project) were filtered by this range."
+		resp["time_filter"] = tf
+	}
+	// Sprint 10.8: surface graph traversal info when graph channel was active.
+	// graph_traversal.paths shows the structural connections that led to each
+	// graph-attributed memory — e.g. "AuthService -[CALLS]- TokenValidator".
+	if traversalInfo != nil {
+		resp["graph_traversal"] = traversalInfo
+	}
+	// Sprint 13 #6: surface query enrichment when agent_id was provided.
+	// "query_enrichment" (distinct from get_context's "enrichment" field which
+	// carries rules/violations/task hints) shows how recall() modified the
+	// BM25/semantic query using the agent's session state.
+	if contextEnrichment != nil {
+		resp["query_enrichment"] = contextEnrichment
+	}
+	return jsonResult(resp)
 }
 
 // handleGetEpisodes lists episodes with optional filters, ordered by
@@ -159,7 +950,7 @@ func (s *Server) handleGetEpisodes(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	limit := 20
@@ -190,7 +981,7 @@ func (s *Server) handleGetEpisodes(
 		sinceDays,
 	)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get episodes: %v", err)), nil
+		return toolError("get episodes", err)
 	}
 
 	summary := "no episodes found"
@@ -213,12 +1004,12 @@ func (s *Server) handleCheckPlanSafety(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	planDesc := stringArg(req, "plan_description")
 	if planDesc == "" {
-		return mcp.NewToolResultError("plan_description is required"), nil
+		return mcp.NewToolResultError("plan_description is required (e.g., 'refactor auth module to use OAuth 2.0')"), nil
 	}
 
 	agentID := stringArg(req, "agent_id")
@@ -228,22 +1019,8 @@ func (s *Server) handleCheckPlanSafety(
 	safetyCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
-	type result struct {
-		ep  *store.Episode
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		ep, err := s.store.CheckPlanSafety(planDesc, projectID)
-		ch <- result{ep, err}
-	}()
-
-	var match *store.Episode
-	var err error
-	select {
-	case r := <-ch:
-		match, err = r.ep, r.err
-	case <-safetyCtx.Done():
+	match, err := s.store.CheckPlanSafetyCtx(safetyCtx, planDesc, projectID)
+	if safetyCtx.Err() != nil {
 		return jsonResult(map[string]interface{}{
 			"status": "clear",
 			"hint":   "Safety check timed out (>500ms). Proceed with validate_plan().",
@@ -260,9 +1037,54 @@ func (s *Server) handleCheckPlanSafety(
 	}
 
 	if match == nil {
+		// P3B-4: emit safety_miss — no matching failure episode found.
+		if pc := s.getPulseClient(); pc != nil {
+			agentCopy := agentID
+			projCopy := projectID
+			s.goBackground(func() {
+				pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+					Operation: "safety_miss",
+					Tier:      "episodic",
+					Source:    "auto",
+					AgentID:   agentCopy,
+					ProjectID: projCopy,
+				})
+				// P8-7: track check_plan_safety outcome for hit-rate analysis.
+				pc.RecordValidationEvent(pulse.ValidationEvent{
+					ToolName:     "check_plan_safety",
+					Status:       "ok",
+					SafetyStatus: "clear",
+					AgentID:      agentCopy,
+					ProjectID:    projCopy,
+				})
+			})
+		}
 		return jsonResult(map[string]interface{}{
 			"status": "clear",
 			"hint":   "No failure episodes recorded yet. Record failures with remember(episode_type='failure') to build the Hall of Shame.",
+		})
+	}
+
+	// P3B-4: emit safety_hit — a matching failure episode was found.
+	if pc := s.getPulseClient(); pc != nil {
+		agentCopy := agentID
+		projCopy := projectID
+		s.goBackground(func() {
+			pc.RecordMemoryOp(pulse.MemoryOperationEvent{
+				Operation: "safety_hit",
+				Tier:      "episodic",
+				Source:    "auto",
+				AgentID:   agentCopy,
+				ProjectID: projCopy,
+			})
+			// P8-7: track check_plan_safety outcome for hit-rate analysis.
+			pc.RecordValidationEvent(pulse.ValidationEvent{
+				ToolName:     "check_plan_safety",
+				Status:       "warning",
+				SafetyStatus: "warning",
+				AgentID:      agentCopy,
+				ProjectID:    projCopy,
+			})
 		})
 	}
 
@@ -280,7 +1102,7 @@ func (s *Server) handleCheckPlanSafety(
 			Importance:  0.6,
 		}
 		if _, err := s.store.RememberEpisode(interjection); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: record interjection episode: %v\n", err)
+			logutil.Warn("synapses: record interjection episode: %v\n", err)
 		}
 	}
 
@@ -304,14 +1126,16 @@ func (s *Server) handleCheckPlanSafety(
 }
 
 // handleGetRuleCandidates returns failure episodes that have appeared ≥N times
-// and have not yet been promoted to a dynamic rule. Agents can review these and
-// call upsert_rule() + mark_episode_promoted() to close the feedback loop.
+// and have not yet been promoted to a dynamic rule, plus structural coupling
+// patterns detected by the graph (source="structural_coupling"). Agents can
+// review these and call upsert_rule() + mark_episode_promoted() / upsert_adr()
+// to close the loop.
 func (s *Server) handleGetRuleCandidates(
 	_ context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("episodic memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("episodic memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 
 	minOccurrences := 2
@@ -321,17 +1145,63 @@ func (s *Server) handleGetRuleCandidates(
 
 	candidates, err := s.store.GetRuleCandidates(minOccurrences)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get rule candidates: %v", err)), nil
+		return toolError("get rule candidates", err)
 	}
 
-	summary := fmt.Sprintf("no failure patterns with ≥%d occurrences yet", minOccurrences)
-	if len(candidates) > 0 {
-		summary = fmt.Sprintf("%d rule candidate(s) ready for promotion", len(candidates))
+	// Build uniform candidate list with source field.
+	type candidate struct {
+		Source      string  `json:"source"`
+		ID          string  `json:"id"`
+		Description string  `json:"description"`
+		Confidence  float64 `json:"confidence,omitempty"`
+		Occurrences int     `json:"occurrences,omitempty"`
+	}
+	var all []candidate
+	for i, c := range candidates {
+		// Trigger is optional on older episodes — fall back to a slug of the
+		// decision text so agents always have a non-empty ID to pass to upsert_rule.
+		id := c.Trigger
+		if id == "" {
+			words := strings.Fields(strings.ToLower(c.Decision))
+			if len(words) > 4 {
+				words = words[:4]
+			}
+			slug := strings.Map(func(r rune) rune {
+				if r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+					return r
+				}
+				return '-'
+			}, strings.Join(words, "-"))
+			id = fmt.Sprintf("failure-%d-%s", i+1, slug)
+		}
+		all = append(all, candidate{
+			Source:      "failure_pattern",
+			ID:          id,
+			Description: c.Decision,
+			Occurrences: c.Occurrences,
+		})
+	}
+
+	// Add structural coupling patterns from the graph when available.
+	if s.graph != nil {
+		for _, sr := range s.graph.SuggestRules() {
+			all = append(all, candidate{
+				Source:      "structural_coupling",
+				ID:          sr.ID,
+				Description: sr.Description,
+				Confidence:  sr.Confidence,
+			})
+		}
+	}
+
+	summary := fmt.Sprintf("no candidates found (failure patterns with ≥%d occurrences or high-confidence structural couplings)", minOccurrences)
+	if len(all) > 0 {
+		summary = fmt.Sprintf("%d rule candidate(s) ready for promotion", len(all))
 	}
 	return jsonResult(map[string]interface{}{
 		"summary":    summary,
-		"candidates": candidates,
-		"hint":       "For each candidate: call upsert_rule() to enforce it structurally, then call mark_episode_promoted(episode_id, rule_id) to close the loop.",
+		"candidates": all,
+		"hint":       "For failure_pattern candidates: upsert_rule() then mark_episode_promoted(). For structural_coupling candidates: upsert_rule() to enforce, then upsert_adr() to document the architectural decision.",
 	})
 }
 
@@ -342,4 +1212,23 @@ func stringArgDefault(req mcp.CallToolRequest, name, def string) string {
 		return def
 	}
 	return v
+}
+
+// parseFlexibleTime parses a time string in either RFC3339 or date-only "2006-01-02" format.
+// When endOfDay is true and a date-only string is given, the returned time is set to 23:59:59
+// of that day (useful for "until" bounds). Returns an error if neither format matches.
+func parseFlexibleTime(s string, endOfDay bool) (time.Time, error) {
+	// Try RFC3339 first (most precise).
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), nil
+	}
+	// Fall back to date-only "YYYY-MM-DD".
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expected RFC3339 (e.g. '2026-03-01T00:00:00Z') or date (e.g. '2026-03-01'), got %q", s)
+	}
+	if endOfDay {
+		t = t.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+	}
+	return t.UTC(), nil
 }

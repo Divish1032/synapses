@@ -1,10 +1,13 @@
 package parser_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
@@ -26,10 +29,20 @@ func assertNode(t *testing.T, g *graph.Graph, name string, wantType graph.NodeTy
 	if len(nodes) == 0 {
 		t.Fatalf("node %q not found", name)
 	}
-	if nodes[0].Type != wantType {
-		t.Errorf("node %q: type = %q, want %q", name, nodes[0].Type, wantType)
+	// Prefer exact name match over qualified-name match (e.g. "Tree" vs "Data.Tree").
+	// FindByName returns both because it fuzzy-matches qualified names.
+	best := nodes[0]
+	nameLower := strings.ToLower(name)
+	for _, n := range nodes {
+		if strings.ToLower(n.Name) == nameLower {
+			best = n
+			break
+		}
 	}
-	return nodes[0]
+	if best.Type != wantType {
+		t.Errorf("node %q: type = %q, want %q", name, best.Type, wantType)
+	}
+	return best
 }
 
 func assertDefinesEdge(t *testing.T, g *graph.Graph, fileNodeID graph.NodeID, entityName string) {
@@ -134,7 +147,7 @@ func TestJavaParser_ExtractsMethod(t *testing.T) {
 func TestJavaParser_DefinesEdges(t *testing.T) {
 	g := parseJava(t, javaSource)
 	fileID := g.FindByName("AuthService.java")[0].ID
-	for _, name := range []string{"Authenticator", "AuthService", "Status", "login"} {
+	for _, name := range []string{"Authenticator", "AuthService", "Status", "AuthService.login"} {
 		assertDefinesEdge(t, g, fileID, name)
 	}
 }
@@ -246,7 +259,8 @@ func TestScalaParser_ExtractsObject(t *testing.T) {
 }
 
 func TestScalaParser_ExtractsFunction(t *testing.T) {
-	assertNode(t, parseScala(t, scalaSource), "login", graph.NodeFunction)
+	// login is inside AuthService class body, so it's class-qualified as a method.
+	assertNode(t, parseScala(t, scalaSource), "AuthService.login", graph.NodeMethod)
 }
 
 func TestScalaParser_EmptyFile(t *testing.T) {
@@ -287,7 +301,7 @@ func TestGroovyParser_ExtractsClass(t *testing.T) {
 }
 
 func TestGroovyParser_ExtractsMethod(t *testing.T) {
-	assertNode(t, parseGroovy(t, groovySource), "login", graph.NodeMethod)
+	assertNode(t, parseGroovy(t, groovySource), "AuthService.login", graph.NodeMethod)
 }
 
 func TestGroovyParser_EmptyFile(t *testing.T) {
@@ -484,7 +498,8 @@ func TestCppParser_ExtractsStruct(t *testing.T) {
 }
 
 func TestCppParser_ExtractsNamespace(t *testing.T) {
-	assertNode(t, parseCpp(t, cppSource), "auth", graph.NodeStruct)
+	// Namespaces are now NodePackage (more accurate than NodeStruct).
+	assertNode(t, parseCpp(t, cppSource), "auth", graph.NodePackage)
 }
 
 func TestCppParser_EmptyFile(t *testing.T) {
@@ -931,18 +946,74 @@ func TestProtobufParser_ExtractsService(t *testing.T) {
 
 func TestProtobufParser_ExtractsRPCs(t *testing.T) {
 	g := parseProto(t, protoSource)
-	assertNode(t, g, "Login", graph.NodeMethod)
-	assertNode(t, g, "Logout", graph.NodeMethod)
+	// RPCs are qualified as ServiceName.RPCName.
+	assertNode(t, g, "AuthService.Login", graph.NodeMethod)
+	assertNode(t, g, "AuthService.Logout", graph.NodeMethod)
 }
 
 func TestProtobufParser_DefinesEdges(t *testing.T) {
 	g := parseProto(t, protoSource)
 	fileID := g.FindByName("auth.proto")[0].ID
-	for _, name := range []string{"LoginRequest", "LoginResponse", "Status", "AuthService", "Login", "Logout"} {
+	for _, name := range []string{"LoginRequest", "LoginResponse", "Status", "AuthService", "AuthService.Login", "AuthService.Logout"} {
 		assertDefinesEdge(t, g, fileID, name)
 	}
 }
 
 func TestProtobufParser_EmptyFile(t *testing.T) {
 	assertNoCrash(t, parser.NewProtobufParser(), ".proto", `syntax = "proto3";`)
+}
+
+// ─── SCSS ─────────────────────────────────────────────────────────────────────
+
+func TestSCSSParser_BasicExtraction(t *testing.T) {
+	src := []byte(`
+$primary-color: #333;
+$font-size: 16px;
+
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+}
+
+@function rem($px) {
+  @return $px / 16 * 1rem;
+}
+
+@use 'sass:math';
+@import './variables';
+
+.container {
+  color: $primary-color;
+}
+`)
+	g := graph.New("testrepo")
+	p := parser.NewSCSSParser()
+	err := p.Parse(g, "styles.scss", src)
+	require.NoError(t, err)
+
+	nodes := g.FindByType(graph.NodeFunction)
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		names = append(names, n.Name)
+	}
+	assert.Contains(t, names, "flex-center")
+	assert.Contains(t, names, "rem")
+
+	vars := g.FindByType(graph.NodeVariable)
+	varNames := make([]string, 0, len(vars))
+	for _, n := range vars {
+		varNames = append(varNames, n.Name)
+	}
+	assert.Contains(t, varNames, "$primary-color")
+	assert.Contains(t, varNames, "$font-size")
+
+	edges := g.AllEdges()
+	hasImport := false
+	for _, e := range edges {
+		if e.Type == graph.EdgeImports {
+			hasImport = true
+			break
+		}
+	}
+	assert.True(t, hasImport, "expected EdgeImports from @use/@import")
 }

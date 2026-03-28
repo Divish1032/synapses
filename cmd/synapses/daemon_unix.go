@@ -4,7 +4,11 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 )
 
 func detachedSysProcAttr() *syscall.SysProcAttr {
@@ -16,6 +20,7 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
+	defer proc.Release()
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
@@ -24,7 +29,9 @@ func killProcess(pid int) error {
 	if err != nil {
 		return nil
 	}
-	return proc.Signal(syscall.SIGTERM)
+	err = proc.Signal(syscall.SIGTERM)
+	proc.Release()
+	return err
 }
 
 func forceKillProcess(pid int) error {
@@ -32,5 +39,75 @@ func forceKillProcess(pid int) error {
 	if err != nil {
 		return nil
 	}
-	return proc.Kill()
+	err = proc.Kill()
+	proc.Release()
+	return err
+}
+
+// processStartTime returns the start time of the process as Unix nanos,
+// or 0 if it cannot be determined.
+//
+// Uses `ps -o etime=` which outputs elapsed time in [[dd-]hh:]mm:ss format.
+// This is locale-independent (no month/day names), working reliably on
+// macOS, Linux, and BSD regardless of LC_TIME settings.
+func processStartTime(pid int) int64 {
+	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return 0
+	}
+	elapsed := parseEtime(s)
+	if elapsed <= 0 {
+		return 0
+	}
+	return time.Now().Add(-elapsed).UnixNano()
+}
+
+// parseEtime parses the `ps -o etime=` format: [[dd-]hh:]mm:ss
+// Returns the duration, or 0 on parse failure.
+func parseEtime(s string) time.Duration {
+	var days, hours, minutes, seconds int
+
+	// Split off days: "dd-hh:mm:ss" → days="dd", rest="hh:mm:ss"
+	if idx := strings.Index(s, "-"); idx >= 0 {
+		d, err := strconv.Atoi(s[:idx])
+		if err != nil {
+			return 0
+		}
+		days = d
+		s = s[idx+1:]
+	}
+
+	parts := strings.Split(s, ":")
+	switch len(parts) {
+	case 3: // hh:mm:ss
+		h, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return 0
+		}
+		hours = h
+		parts = parts[1:]
+		fallthrough
+	case 2: // mm:ss
+		m, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return 0
+		}
+		minutes = m
+		sec, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return 0
+		}
+		seconds = sec
+	default:
+		return 0
+	}
+
+	return time.Duration(days)*24*time.Hour +
+		time.Duration(hours)*time.Hour +
+		time.Duration(minutes)*time.Minute +
+		time.Duration(seconds)*time.Second
 }

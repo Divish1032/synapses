@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-      - '!vscode-v*'
 
 permissions:
   contents: write
@@ -52,6 +51,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Generate completions
+        run: make completions
+
       - name: Build darwin/amd64
         env:
           GOOS: darwin
@@ -60,7 +62,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
-          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE synapses.example.json
+          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE synapses.example.json completions/
           rm synapses
 
       - name: Build darwin/arm64
@@ -71,7 +73,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
-          tar czf synapses_darwin_arm64.tar.gz synapses README.md LICENSE synapses.example.json
+          tar czf synapses_darwin_arm64.tar.gz synapses README.md LICENSE synapses.example.json completions/
           rm synapses
 
       - name: Upload to release
@@ -81,38 +83,3 @@ jobs:
           gh release upload ${{ github.ref_name }} \
             synapses_darwin_x86_64.tar.gz \
             synapses_darwin_arm64.tar.gz
-
-  release-windows:
-    name: Release (Windows)
-    needs: release-linux
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build windows/amd64
-        env:
-          GOOS: windows
-          GOARCH: amd64
-          CGO_ENABLED: "1"
-        shell: bash
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          go build -o synapses.exe -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
-
-      - name: Create archive
-        shell: pwsh
-        run: |
-          Compress-Archive -Path synapses.exe, README.md, LICENSE, synapses.example.json -DestinationPath synapses_windows_x86_64.zip
-
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          gh release upload ${{ github.ref_name }} synapses_windows_x86_64.zip

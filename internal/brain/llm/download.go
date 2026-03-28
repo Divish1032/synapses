@@ -1,0 +1,243 @@
+package llm
+
+// download.go — GGUF model auto-download from HuggingFace.
+//
+// Downloads a GGUF file from a public HuggingFace repository to the local
+// model directory (~/.synapses/models/ by default). Uses atomic writes
+// (download to .tmp, rename on success) so interrupted downloads never leave
+// a corrupt file behind.
+//
+// No authentication is required for public HuggingFace repositories.
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// HFBaseURL is the HuggingFace resolve endpoint for file downloads.
+const HFBaseURL = "https://huggingface.co"
+
+// maxGGUFBytes is the maximum number of bytes accepted from a GGUF download
+// response body. 20 GiB covers the largest practical quantized models (~14B Q5)
+// while preventing a compromised CDN or rogue server from streaming an
+// unbounded response. The SHA-256 integrity check already catches truncation,
+// so this is defense-in-depth at the transport layer.
+const maxGGUFBytes = 20 << 30 // 20 GiB
+
+// DownloadConfig holds parameters for a GGUF download.
+type DownloadConfig struct {
+	// Repo is the HuggingFace repo, e.g. "divish/sil-coder"
+	Repo string
+	// Filename is the GGUF file name within the repo, e.g. "sil-coder-Q5_K_M.gguf"
+	Filename string
+	// DestDir is the local directory to save to. Created if it doesn't exist.
+	DestDir string
+	// Progress is an optional writer for progress messages. May be nil.
+	Progress io.Writer
+	// SHA256 is the expected SHA-256 hex digest. Required: download fails if empty.
+	SHA256 string
+}
+
+// DestPath returns the full local path where the GGUF will be saved.
+func (d DownloadConfig) DestPath() string {
+	return filepath.Join(d.DestDir, d.Filename)
+}
+
+// URL returns the HuggingFace download URL for this file.
+func (d DownloadConfig) URL() string {
+	return fmt.Sprintf("%s/%s/resolve/main/%s", HFBaseURL, d.Repo, d.Filename)
+}
+
+// GGUFExists returns true if the GGUF file already exists on disk.
+func GGUFExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() > 0
+}
+
+// DownloadGGUF downloads a GGUF model file from HuggingFace if it doesn't
+// already exist locally. Returns the local path on success.
+//
+// Progress messages are written to cfg.Progress (if non-nil) in the format:
+//
+//	Downloading sil-coder-Q5_K_M.gguf from huggingface.co/divish/sil-coder
+//	 500 MB / 6.5 GB (7%)
+//	 ...
+//	Download complete: /Users/you/.synapses/models/sil-coder-Q5_K_M.gguf
+func DownloadGGUF(ctx context.Context, cfg DownloadConfig) (string, error) {
+	dest := cfg.DestPath()
+
+	// Fast path: already downloaded.
+	if GGUFExists(dest) {
+		logf(cfg.Progress, "Model already exists: %s\n", dest)
+		return dest, nil
+	}
+
+	if cfg.Repo == "" {
+		return "", fmt.Errorf("download: hf_repo is not configured — run: brain config hf-repo <username/repo>")
+	}
+
+	// Create destination directory.
+	if err := os.MkdirAll(cfg.DestDir, 0o755); err != nil {
+		return "", fmt.Errorf("download: create model dir %q: %w", cfg.DestDir, err)
+	}
+
+	url := cfg.URL()
+	logf(cfg.Progress, "Downloading %s\n  from %s\n  to   %s\n", cfg.Filename, url, dest)
+
+	// HTTP GET with context.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("download: build request: %w", err)
+	}
+
+	// Use a dedicated client with a timeout to prevent indefinite hangs
+	// on stalled network connections during multi-GB model downloads.
+	dlClient := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := dlClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download: GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("download: file not found on HuggingFace — check hf_repo=%q and hf_filename=%q", cfg.Repo, cfg.Filename)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download: unexpected HTTP %d from %s", resp.StatusCode, url)
+	}
+
+	totalBytes := resp.ContentLength // -1 if unknown
+
+	// Atomic write: download to .tmp file, rename on success.
+	tmpPath := dest + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("download: create temp file: %w", err)
+	}
+
+	// Cap the response body to maxGGUFBytes before wrapping with the progress
+	// reporter. io.LimitReader returns io.EOF after N bytes, so an oversized
+	// response is silently truncated here; the subsequent SHA-256 check then
+	// rejects and removes the partial file, preventing corrupt models from
+	// being used or cached.
+	cappedBody := io.LimitReader(resp.Body, maxGGUFBytes)
+
+	// Wrap body with progress reporter.
+	reader := &progressReader{
+		r:     cappedBody,
+		total: totalBytes,
+		w:     cfg.Progress,
+		name:  cfg.Filename,
+	}
+
+	if _, err := io.Copy(f, reader); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: write %q: %w", tmpPath, err)
+	}
+	f.Close()
+
+	// Verify SHA-256 integrity before atomic rename — stream the file through
+	// the hash to avoid loading multi-GB GGUF files entirely into memory.
+	hashFile, readErr := os.Open(tmpPath)
+	if readErr != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: open downloaded file for verification: %w", readErr)
+	}
+	h := sha256.New()
+	if _, readErr = io.Copy(h, hashFile); readErr != nil {
+		hashFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: hash downloaded file: %w", readErr)
+	}
+	hashFile.Close()
+	actualHex := hex.EncodeToString(h.Sum(nil))
+	if cfg.SHA256 != "" {
+		if subtle.ConstantTimeCompare([]byte(actualHex), []byte(cfg.SHA256)) != 1 {
+			os.Remove(tmpPath)
+			return "", fmt.Errorf("download: integrity check failed for %s: expected sha256 %s, got %s", cfg.Filename, cfg.SHA256, actualHex)
+		}
+		logf(cfg.Progress, "SHA-256 verified: %s\n", actualHex[:16])
+	} else {
+		// Fail closed: refuse to use an unverified download. Log the actual hash
+		// so an operator can pin it in the config, then remove the temp file.
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: integrity check failed for %s: no expected sha256 hash configured (actual: %s) — pin this hash before shipping", cfg.Filename, actualHex)
+	}
+
+	// Atomic rename.
+	if err := os.Rename(tmpPath, dest); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download: rename to %q: %w", dest, err)
+	}
+
+	logf(cfg.Progress, "\nDownload complete: %s\n", dest)
+	return dest, nil
+}
+
+// progressReader wraps an io.Reader and prints download progress.
+type progressReader struct {
+	r         io.Reader
+	total     int64
+	read      int64
+	w         io.Writer
+	name      string
+	lastPrint int64
+}
+
+func (p *progressReader) Read(buf []byte) (int, error) {
+	n, err := p.r.Read(buf)
+	p.read += int64(n)
+
+	// Print every 50 MB.
+	if p.w != nil && p.read-p.lastPrint >= 50*1024*1024 {
+		p.lastPrint = p.read
+		if p.total > 0 {
+			pct := p.read * 100 / p.total
+			logf(p.w, "  %s / %s (%d%%)\n",
+				humanBytes(p.read), humanBytes(p.total), pct)
+		} else {
+			logf(p.w, "  %s downloaded\n", humanBytes(p.read))
+		}
+	}
+	return n, err
+}
+
+// humanBytes formats bytes as a human-readable string.
+func humanBytes(b int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case b >= GB:
+		return fmt.Sprintf("%.1f GB", float64(b)/GB)
+	case b >= MB:
+		return fmt.Sprintf("%d MB", b/MB)
+	default:
+		return fmt.Sprintf("%d KB", b/KB)
+	}
+}
+
+// logf writes a formatted message to w if w is non-nil.
+func logf(w io.Writer, format string, args ...any) {
+	if w == nil {
+		return
+	}
+	msg := fmt.Sprintf(format, args...)
+	// Ensure lines end with \n.
+	if !strings.HasSuffix(msg, "\n") {
+		msg += "\n"
+	}
+	fmt.Fprint(w, msg)
+}

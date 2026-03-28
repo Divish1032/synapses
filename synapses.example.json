@@ -1,95 +1,63 @@
 {
   "version": "1",
+  "mode": "full",
 
   "rules": [
     {
-      "id": "no-sql-in-view",
-      "description": "Database queries must not appear in view/component files. Route all DB access through a repository layer.",
+      "id": "no-db-in-handler",
+      "description": "Handlers must not call database functions directly — use a service layer",
+      "severity": "warning",
+      "rule_type": "structural",
       "forbidden_edge": {
-        "from_file_pattern": "*.tsx",
+        "from_file_pattern": "*/handlers/*",
+        "to_file_pattern": "*/db/*",
         "edge_type": "CALLS",
-        "to_name_pattern": "SELECT"
-      },
-      "severity": "error"
+        "from_type": "",
+        "to_type": "",
+        "to_name_pattern": ""
+      }
     },
     {
-      "id": "no-direct-db-in-handler",
-      "description": "HTTP handlers must not call database methods directly. Use a service or repository layer.",
+      "id": "no-logging-secrets",
+      "description": "Functions handling secrets must not call logging functions",
+      "severity": "error",
+      "rule_type": "agent",
       "forbidden_edge": {
-        "from_file_pattern": "*handler*.go",
-        "edge_type": "IMPORTS",
-        "to_file_pattern": "*repository*.go"
-      },
-      "severity": "warning"
-    },
-    {
-      "id": "no-cross-service-struct-import",
-      "description": "Service structs must not import other service structs directly.",
-      "forbidden_edge": {
-        "from_type": "struct",
-        "edge_type": "IMPORTS",
-        "to_type": "struct"
-      },
-      "severity": "warning"
+        "from_file_pattern": "*/secrets/*",
+        "to_name_pattern": "Log"
+      }
     }
   ],
 
   "edge_weights": {
-    "CALLS":      1.0,
-    "IMPLEMENTS": 0.9,
-    "EMBEDS":     0.85,
-    "DEPENDS_ON": 0.8,
-    "IMPORTS":    0.7,
-    "DEFINES":    0.6,
-    "EXPORTS":    0.5
+    "CALLS": 1.0,
+    "IMPLEMENTS": 0.8,
+    "IMPORTS": 0.3
   },
 
   "context_carve": {
-    "default_depth":   2,
-    "decay_factor":    0.5,
-    "token_budget":    4000,
-    "direction_boost": 0.2,
-    "exclude_test_files": true
+    "default_depth": 2,
+    "decay_factor": 0.6,
+    "token_budget": 4000,
+    "min_relevance": 0.05,
+    "exclude_test_files": true,
+    "direction_boost": 0.2
   },
+
+  "linked": [
+    "../shared-types"
+  ],
+
+  "embedding_endpoint": "",
+  "embeddings": "builtin",
 
   "api_entries": [
     {
-      "_comment": "Custom patterns for frameworks not auto-detected by conventions.",
-      "_comment2": "Built-in conventions (no config needed): net/http, gin, echo, fiber, gRPC, proto RPC.",
-
-      "name_pattern": "Handler",
+      "name_pattern": "Handle",
       "file_pattern": "*/routes/*",
       "node_type": "function"
-    },
-    {
-      "name_pattern": "Controller",
-      "file_pattern": "*.controller.ts"
-    },
-    {
-      "file_pattern": "*/api/*",
-      "node_type": "function"
     }
   ],
-
-  "data_flow_sources": [
-    {
-      "_comment": "Custom source patterns — built-in heuristics cover net/http, gin, echo, fiber, env vars, and parsers automatically.",
-      "name_pattern": "FromRequest",
-      "role": "http_input",
-      "label": "custom_http_source"
-    }
-  ],
-
-  "data_flow_sinks": [
-    {
-      "_comment": "Custom sink patterns — built-in heuristics cover sql.DB, exec.Command, and file writes automatically.",
-      "name_pattern": "RawExec",
-      "role": "sql_sink",
-      "label": "custom_sql_sink"
-    }
-  ],
-
-  "data_flow_max_hops": 4,
 
   "use_go_types": false,
   "use_ts_types": false,
@@ -98,21 +66,84 @@
   "coverage_profile": "",
   "pprof_profile": "",
 
-  "plugins": [
+  "data_flow_sources": [
     {
-      "_comment": "External parser plugins for file types not handled by built-in parsers.",
-      "_comment2": "Protocol: synapses writes '<abs_path>\\n<file_content>' to stdin. Plugin writes JSON to stdout: {\"nodes\":[...],\"edges\":[...]}",
-      "_comment3": "Node fields: name(req), type(req: function/method/struct/interface/package), line(req), exported, doc, signature",
-      "_comment4": "Edge fields: from(req), to(req), type(req: CALLS/IMPORTS/DEFINES/...)",
-
-      "extensions": [".prisma"],
-      "command": "./parsers/prisma-parser"
-    },
-    {
-      "extensions": [".graphql", ".gql"],
-      "command": "node parsers/graphql.js"
+      "name_pattern": "ParseInput",
+      "sig_pattern": "",
+      "file_pattern": "",
+      "node_type": "function",
+      "role": "source",
+      "label": "custom_input_parser"
     }
   ],
+  "data_flow_sinks": [
+    {
+      "name_pattern": "AuditLog",
+      "sig_pattern": "",
+      "file_pattern": "",
+      "node_type": "function",
+      "role": "sink",
+      "label": "audit_log_sink"
+    }
+  ],
+  "data_flow_max_hops": 4,
 
-  "linked": []
+  "federation": [
+    {
+      "path": "../sibling-project",
+      "alias": "sibling"
+    }
+  ],
+  "federation_acl": {
+    "allow_read_from": ["sibling"]
+  },
+
+  "constitution": {
+    "principles": [
+      "No CGo — pure Go only",
+      "All handlers must be fail-silent"
+    ],
+    "inject_in_context": true,
+    "inject_in_session_init": true
+  },
+
+  "brain": {
+    "enabled": false,
+    "intelligence_mode": "",
+    "ollama_url": "http://localhost:11434",
+    "model": "qwen3.5:2b",
+    "fast_model": "qwen3.5:2b",
+    "model_ingest": "",
+    "model_guardian": "",
+    "model_enrich": "",
+    "model_orchestrate": "",
+    "model_archivist": "",
+    "db_path": "",
+    "ingest": false,
+    "enrich": false,
+    "context_builder": false
+  },
+
+  "pulse": {
+    "url": "",
+    "timeout_sec": 2
+  },
+
+  "session": {
+    "auto_end_threshold_calls": 80,
+    "reconnect_window_secs": 300,
+    "stale_threshold_mins": 30,
+    "hibernate_window_secs": 14400
+  },
+
+  "rate_limits": {
+    "write_ops_per_minute": 30,
+    "expensive_reads_per_minute": 20,
+    "cross_project_per_minute": 60
+  },
+
+  "content_safety": {
+    "enabled": true,
+    "mode": "warn"
+  }
 }

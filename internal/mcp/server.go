@@ -5,24 +5,100 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	"github.com/SynapsesOS/synapses/internal/scout"
+	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 )
+
+// loadAppSettingsJSON reads ~/.synapses/app_settings.json and returns the
+// decoded map. Returns an error (and nil map) if the file is absent or invalid.
+func loadAppSettingsJSON() (map[string]interface{}, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".synapses", "app_settings.json"))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// sessionContextKey is an unexported type for context values to avoid collisions
+// with other packages that also store values in context.
+type sessionContextKey int
+
+const sessionIDCtxKey sessionContextKey = iota
+
+// WithSessionID stores a MCP session ID in ctx. Called during daemon connection
+// setup so all tool handlers can read the session ID via SessionIDFromContext.
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionIDCtxKey, sessionID)
+}
+
+// SessionIDFromContext retrieves the session ID injected by WithSessionID.
+// Returns "" when no session ID was injected (stdio path, tests).
+func SessionIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(sessionIDCtxKey).(string)
+	return v
+}
 
 // ChangeSource is implemented by types that maintain a recent file-change log.
 // Typically this is *watcher.Watcher, wired in cmdStart via SetChangeSource.
 type ChangeSource interface {
 	RecentChanges(windowMinutes int) []watcher.ChangeEvent
+}
+
+// WatcherHealthChecker is an optional interface that ChangeSource implementations
+// may satisfy to report whether the file-watching event loop is still alive.
+type WatcherHealthChecker interface {
+	IsAlive() bool
+}
+
+// NodeEmbedderSetter is an optional interface that ChangeSource implementations
+// may satisfy to accept a node embedder for Tier 1 embedding-based entity resolution.
+// Implemented by *watcher.Watcher; checked via type assertion in SetMemoryEmbedder.
+type NodeEmbedderSetter interface {
+	SetNodeEmbedder(embed.Embedder)
+}
+
+// ProjectStoreProvider gives access to a sibling project's store for cross-project queries.
+// Implemented by the daemon's project registry; nil in single-project (stdio) mode.
+type ProjectStoreProvider interface {
+	// ListProjects returns human-readable names of all registered projects.
+	ListProjects() []string
+	// GetStore returns the store for the named project, or nil if not found.
+	// The name is the directory basename (e.g. "backend" for /Users/x/code/backend).
+	GetStore(name string) *store.Store
 }
 
 const serverName = "synapses"
@@ -33,7 +109,7 @@ var Version = "dev"
 
 // packetCacheEntry holds a cached context packet with an expiry time.
 type packetCacheEntry struct {
-	pkt       interface{} // *brain.ContextPacket (typed as interface{} to avoid import cycle)
+	pkt       *brain.ContextPacket
 	expiresAt time.Time
 }
 
@@ -44,21 +120,423 @@ type Server struct {
 	config       *config.Config
 	store        *store.Store  // nil if started without a persistent store
 	changeSource ChangeSource  // nil if started without a file watcher
-	peerManager  interface{}   // *peer.PeerManager — set via SetPeerManager; nil if no peers configured
-	brainClient  interface{}   // *brain.Client — set via SetBrainClient; nil if brain not configured
-	scoutClient  interface{}   // *scout.Client — set via SetScoutClient; nil if scout not configured
-	pulseClient  interface{}   // *pulse.Client — set via SetPulseClient; nil if pulse not configured
-	embedClient  *embed.Client // nil if embedding_endpoint not configured
-	techStack    interface{}   // []scout.TechStackEntry — set via SetTechStack after autosubscribe
+	federationResolver  *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
+	projectRegistry     ProjectStoreProvider   // nil in single-project mode — set via SetProjectRegistry
+	brainClient  *brain.Client   // set via SetBrainClient; nil if brain not configured
+	webCache     *webcache.Cache // nil if webcache not configured
+	pulseClient  *pulse.Client   // set via SetPulseClient; nil if pulse not configured
+	embedClient    *embed.Client  // nil if embedding_endpoint not configured
+	memoryEmbedder embed.Embedder // nil if embeddings mode is "off" — set via SetMemoryEmbedder
+	techStack    []scout.TechStackEntry // set via SetTechStack after autosubscribe; nil if not detected
+	injectionScanner *InjectionScanner // prompt injection scanner for externally-sourced content (nil = disabled)
+	knowledgeMode bool          // when true, only knowledge tools are registered (no code graph)
+	projectID    string         // stable project identifier (FNV hash of project root path)
+	projectPath  string         // absolute path to the project root (for go.mod parsing)
 	rulesMu      sync.RWMutex  // protects s.config.Rules for concurrent dynamic upserts
+	toolEmbeds         [][]float32  // per-tool normalized vectors; len==len(toolCatalog) when ready
+	toolEmbedModel     string       // embedding model used to build toolEmbeds; must match query model
+	toolEmbedsMu       sync.RWMutex // protects toolEmbeds and toolEmbedModel
+	toolCatalogRetries atomic.Int32 // counts delayed retries to cap at 2
+
+	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
+	// Loaded once at startup. When false, the corresponding data collection is skipped.
+	logToolCalls     bool // controls RecordToolCall recording (default: true)
+	logSessions      bool // controls pulse session tracking (default: true)
+	cacheWebSearches bool // controls web_cache inserts (default: true)
 
 	// Context-packet cache: 20 slots max, 30s TTL. Keyed by "entityName:depth".
-	packetCacheMu sync.Mutex
+	packetCacheMu sync.RWMutex
 	packetCache   map[string]*packetCacheEntry
 
 	// Brain cache warming debounce: prevents hammering the brain on rapid saves.
 	warmMu   sync.Mutex
 	lastWarm time.Time
+
+	// GAP-1: Feedback loop — track get_context call counts per (agentID, entity)
+	// within a session. When the same agent calls get_context ≥3 times for the
+	// same entity, we auto-record a "context_repeated" episode as a signal that
+	// the initial context slice wasn't sufficient. Entries expire after 30m.
+	ctxCallMu     sync.Mutex
+	ctxCalls      map[string]*ctxCallEntry
+	ctxCallLastGC time.Time // tracks when we last ran GC on ctxCalls (R29 GAP3)
+
+	// lastAgentID is the agent_id from the most recent session_init call.
+	// Used as a fallback when individual tool calls don't include agent_id,
+	// ensuring Pulse can attribute token savings to the correct agent.
+	lastAgentMu sync.RWMutex
+	lastAgentID string
+
+	// promptTemplates holds activation-context prompts loaded at startup.
+	// They are auto-injected into get_context and session_init responses
+	// when their patterns (file, entity, module) match the queried entity.
+	// Populated via SetPromptTemplates after the server is constructed.
+	promptTemplates []skills.PromptTemplate
+
+	// sessionHashes auto-caches entity_hash per session to allow the server to
+	// detect unchanged context without requiring agents to pass known_hash manually.
+	// Key format: "sessionID::entityCacheKey", Value: entity_hash string.
+	// sync.Map gives safe concurrent reads/writes with no lock contention.
+	// Entries are cleared by ClearSessionHashes when a session disconnects.
+	sessionHashes sync.Map
+
+	// RX1: per-connection call counters for auto end_session detection.
+	// Key: "sessionID::agentID", Value: *sessionCallEntry.
+	// Protected by sessionCallsMu. Entries removed when auto-log fires or
+	// agent calls end_session explicitly.
+	sessionCallsMu sync.Mutex
+	sessionCalls   map[string]*sessionCallEntry
+
+	// P5 — SA-C1: per-session tool position counter for sequence capture.
+	// Key: MCP sessionID. Protected by sessionCallsMu (reuse existing lock).
+	toolPositions map[string]int
+
+	// Session Intelligence (Layer 1): maps MCP connection session ID → Synapses session UUID.
+	// Created on session_init(); used to attribute every subsequent tool call to a session.
+	// Key: MCP sessionID (from SessionIDFromContext) or "stdio" for single-connection mode.
+	// Protected by synapseSessionsMu.
+	synapseSessionsMu sync.RWMutex
+	synapsesSessions  map[string]*synapseSessionEntry
+
+	// startTime records when the server was constructed, used by session_init
+	// to report daemon uptime in the daemon_health field (IMP-EVAL-3).
+	startTime time.Time
+
+	// stopCh is closed by Close() to signal background goroutines to exit.
+	// startOnce ensures StartBackground() is truly idempotent.
+	// wg tracks all goroutines started by StartBackground so Close() can
+	// wait for them to finish before returning.
+	stopCh    chan struct{}
+	startOnce sync.Once
+	wg        sync.WaitGroup
+
+	// lifecycleCtx is cancelled by Close() to bound embedding and other
+	// background work to the server lifetime. Background ops that accept a
+	// context should use this rather than context.Background().
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+
+	// Bounded background worker pool for fire-and-forget operations.
+	// All handler goroutines (telemetry, embedding, store writes) go through
+	// goBackground() which enqueues work items. Fixed workers drain the queue.
+	// Close() rejects new work, closes the queue, and waits for workers to
+	// drain remaining items — preventing goroutines from racing with Store.Close().
+	bgQueue    chan func()   // buffered work queue (cap bgQueueCap)
+	bgDrops    atomic.Int64 // BUG-020: total work items dropped due to full queue
+	shutdownMu sync.RWMutex // guards bgClosed + bgQueue sends
+	bgClosed   bool         // true after Close() — rejects new work
+
+	// failedEmbedIDs tracks memory IDs whose embedding was dropped due to a
+	// full background queue. A 60s retry goroutine re-embeds them. Bounded to
+	// 256 entries to prevent unbounded growth.
+	// Key: memoryID (string), Value: struct{}.
+	failedEmbedIDs sync.Map
+
+	// ledgerWatermarks tracks per-session deduplication state for cross-session alerts.
+	// Key: Synapses session ID (string), Value: *ledgerWatermark.
+	ledgerWatermarks sync.Map
+
+	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
+	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
+	// the exact same handler functions. In knowledge mode, graph-tool entries hold
+	// the knowledge-mode stub (same as what mcp-go has).
+	toolHandlersMu sync.RWMutex
+	toolHandlers   map[string]server.ToolHandlerFunc
+
+	// orientMu protects the orientation result cache (explain_codebase, get_repo_map).
+	// Stored separately from the 20-slot packet cache so that heavy get_context
+	// traffic cannot evict orientation results. Invalidated whenever the graph
+	// structure changes (see InvalidatePacketCacheForFile in resources.go).
+	orientMu          sync.RWMutex
+	orientExplain     *string // nil = not yet computed or invalidated
+	orientRepoCompact *string
+	orientRepoFull    *string
+
+	// B28: repo scale (micro/small/medium/large) computed from node count.
+	// Used by coreTierTools/standardTierTools for discover_tools status labels.
+	repoScale graph.Scale
+
+	// OF-S5: per-session loop guard. Tracks fingerprints of the last 20 calls
+	// per session. Warns at 3 identical calls, trips circuit breaker at 5.
+	// Resets on every file-change event.
+	lg *loopGuard
+
+	// Security F10: per-session token-bucket rate limiter for write operations,
+	// expensive reads (recall), and cross-project queries. Configured via
+	// synapses.json "rate_limits". Cleared on session close.
+	rl *rateLimiter
+
+	// Phase 6: component health tracker for prepare_context pipeline.
+	// Components that panic or timeout ≥3 times in a session are auto-disabled.
+	// Per-agent scoped — concurrent agents don't interfere.
+	componentHealth componentHealthTracker
+
+	// OF-E3: cross-project write approval gates.
+	// Stores pending approval tokens for broadcast send_message and
+	// cross-project remember operations. Tokens expire after 5 minutes.
+	approvals *approvalStore
+
+	// OF-S4: tool description integrity.
+	// toolDescs captures name → (description + "\x00" + JSON(inputSchema)) at
+	// addOrDefer time, so both the tool description and parameter schemas are
+	// included in the integrity baseline.
+	// toolDescBaseline is the SHA256 hex of all sorted entries, computed once at
+	// the end of registerTools(). handleSessionInit re-derives the hash from
+	// toolDescs and compares it to detect runtime tampering of descriptions or
+	// parameter definitions.
+	toolDescs        map[string]string
+	toolDescBaseline string
+
+	// Sprint 15 #4: recall channel weight learning — rate controls.
+	//
+	// recallStatsLastNs is the unix-nanosecond timestamp of the last
+	// UpdateRecallChannelStats trigger. CAS-updated so multiple concurrent
+	// recall_hit events debounce to at most one aggregation per interval.
+	recallStatsLastNs atomic.Int64
+
+	// recallWeightsMu guards recallWeightsCache and recallWeightsCachedAt.
+	// recallChannelWeights() reads from SQLite at most once per cache TTL
+	// to keep the hot recall path free of per-call database round-trips.
+	recallWeightsMu       sync.RWMutex
+	recallWeightsCache    map[string]float64
+	recallWeightsCachedAt time.Time
+
+	// updateChecker is an optional function that returns the pending update
+	// version string, or "" if up to date. Set via SetUpdateChecker.
+	// Used by session_init to include an update_available hint.
+	updateChecker func() string
+}
+
+const (
+	// bgWorkers is the number of fixed worker goroutines processing the
+	// background queue. 8 is sufficient — most work items are fast SQLite
+	// writes serialized by WAL anyway; brain/pulse HTTP calls are IO-bound
+	// and benefit from concurrency.
+	bgWorkers = 8
+
+	// bgQueueCap is the buffer size for the background work queue.
+	// Absorbs burst traffic (~50 concurrent tool calls × 5 background ops).
+	// When full, new work is dropped with a stderr warning (back-pressure).
+	bgQueueCap = 256
+)
+
+// goBackground enqueues fn for execution by the bounded worker pool.
+// Safe to call from any handler goroutine. Work is silently dropped after
+// Close() is called or when the queue is full (back-pressure).
+// Returns true if the work was queued, false if it was dropped.
+func (s *Server) goBackground(fn func()) bool {
+	s.shutdownMu.RLock()
+	if s.bgClosed {
+		s.shutdownMu.RUnlock()
+		return false
+	}
+	select {
+	case s.bgQueue <- fn:
+		// queued successfully
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordBackgroundWorkerEnqueue() // P2-5
+			pc.RecordBackgroundQueueDepth(len(s.bgQueue)) // P9-4
+		}
+		s.shutdownMu.RUnlock()
+		return true
+	default:
+		s.bgDrops.Add(1) // BUG-020: track drops for health endpoint
+		logutil.Warn("synapses: background queue full (%d), dropping work\n", bgQueueCap)
+		if pc := s.getPulseClient(); pc != nil {
+			pc.RecordBackgroundWorkerDrop() // P2-5
+		}
+	}
+	s.shutdownMu.RUnlock()
+	return false
+}
+
+// getConfig returns a snapshot of the server config, safe for concurrent use.
+// BUG-037: rulesMu protects config pointer from concurrent hot-reload replacement.
+func (s *Server) getConfig() *config.Config {
+	s.rulesMu.RLock()
+	cfg := s.config
+	s.rulesMu.RUnlock()
+	return cfg
+}
+
+// BackgroundQueueStats returns the current queue depth and total drop count
+// for health endpoint reporting (BUG-020).
+func (s *Server) BackgroundQueueStats() (depth int, drops int64) {
+	return len(s.bgQueue), s.bgDrops.Load()
+}
+
+// getSessionHash returns the last stored entity_hash for this session+entityKey, or "".
+func (s *Server) getSessionHash(sessionID, entityKey string) string {
+	if sessionID == "" {
+		return ""
+	}
+	v, ok := s.sessionHashes.Load(sessionID + "::" + entityKey)
+	if !ok {
+		return ""
+	}
+	return v.(string)
+}
+
+// setSessionHash stores an entity_hash for a session+entityKey pair.
+// Called after successfully serving a full get_context response so agents
+// can receive {unchanged:true} automatically on the next identical call.
+func (s *Server) setSessionHash(sessionID, entityKey, hash string) {
+	if sessionID == "" || entityKey == "" || hash == "" {
+		return
+	}
+	s.sessionHashes.Store(sessionID+"::"+entityKey, hash)
+}
+
+// ClearSessionHashes removes all cached hashes for a session. Must be called
+// when a session disconnects to prevent unbounded memory growth in long-running
+// daemons with many short-lived connections.
+func (s *Server) ClearSessionHashes(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	prefix := sessionID + "::"
+	s.sessionHashes.Range(func(k, _ interface{}) bool {
+		if strings.HasPrefix(k.(string), prefix) {
+			s.sessionHashes.Delete(k)
+		}
+		return true
+	})
+}
+
+// synapseSessionEntry maps an MCP connection to its Synapses session UUID.
+// One entry exists per active connection; keyed by MCP sessionID (or "stdio").
+type synapseSessionEntry struct {
+	id      string // UUID in the sessions table
+	agentID string
+	model   string // agent model from session_init (e.g. "claude-opus-4-6")
+}
+
+// synapseSessionKey returns the map key for a given MCP session ID.
+// Stdio mode passes "" as the MCP session ID; we normalise to "stdio" so the
+// map key is never empty (empty key causes ambiguous lookups in daemon mode).
+func synapseSessionKey(mcpSessionID string) string {
+	if mcpSessionID == "" {
+		return "stdio"
+	}
+	return mcpSessionID
+}
+
+// getSynapseSessionID returns the Synapses session UUID for the given MCP
+// connection, or "" when no session_init has been called on that connection yet.
+func (s *Server) getSynapseSessionID(mcpSessionID string) string {
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return entry.id
+}
+
+// getSynapseAgentID returns the agent_id associated with an MCP session,
+// or "" if the session hasn't called session_init yet.
+func (s *Server) getSynapseAgentID(mcpSessionID string) string {
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return entry.agentID
+}
+
+// registerSynapseSession associates a newly created Synapses session with an
+// MCP connection. Called from handleSessionInit after CreateSession succeeds.
+func (s *Server) registerSynapseSession(mcpSessionID, synapseSessionID, agentID, model string) {
+	s.synapseSessionsMu.Lock()
+	s.synapsesSessions[synapseSessionKey(mcpSessionID)] = &synapseSessionEntry{
+		id:      synapseSessionID,
+		agentID: agentID,
+		model:   model,
+	}
+	s.synapseSessionsMu.Unlock()
+}
+
+// modelBudgetMultiplier returns a token budget multiplier based on the agent's
+// declared model. Large-context models get richer context automatically.
+// Unknown models default to 1.0 (no change).
+func modelBudgetMultiplier(model string) float64 {
+	// Normalize: strip suffixes like date stamps (e.g. "claude-sonnet-4-6-20250514")
+	// by matching known prefixes.
+	m := strings.ToLower(model)
+	switch {
+	case strings.HasPrefix(m, "claude-opus"):
+		return 2.0
+	case strings.HasPrefix(m, "claude-sonnet"):
+		return 1.5
+	case strings.HasPrefix(m, "gpt-4o-mini"):
+		return 0.5
+	case strings.HasPrefix(m, "gpt-4o"):
+		return 1.0
+	case strings.HasPrefix(m, "gpt-4.1-mini"), strings.HasPrefix(m, "gpt-4.1-nano"):
+		return 0.5
+	case strings.HasPrefix(m, "gpt-4.1"):
+		return 1.5
+	case strings.HasPrefix(m, "claude-haiku"):
+		return 0.75
+	case strings.HasPrefix(m, "gemini-2.5-pro"), strings.HasPrefix(m, "gemini-2.5-flash"):
+		return 1.5
+	default:
+		return 1.0
+	}
+}
+
+// getSessionBudgetMultiplier returns the token budget multiplier for the
+// current MCP session based on the model declared in session_init.
+// Returns 1.0 when no session or model is known.
+func (s *Server) getSessionBudgetMultiplier(ctx context.Context) float64 {
+	mcpSessionID := SessionIDFromContext(ctx)
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok || entry.model == "" {
+		return 1.0
+	}
+	return modelBudgetMultiplier(entry.model)
+}
+
+// ClearSynapseSession removes the session mapping for an MCP connection.
+// Should be called when a connection closes (daemon) or end_session fires.
+// Safe to call with an empty or unknown session ID.
+func (s *Server) ClearSynapseSession(mcpSessionID string) {
+	key := synapseSessionKey(mcpSessionID)
+	s.synapseSessionsMu.Lock()
+	delete(s.synapsesSessions, key)
+	s.synapseSessionsMu.Unlock()
+	// OF-S5: release loop-guard memory for the closed session.
+	s.lg.clearSession(key)
+	// Security F10: release rate-limiter state for the closed session.
+	s.rl.clearSession(key)
+}
+
+// ctxCallEntry tracks how many times an agent requested context for an entity.
+// lastAt is updated on every call so timing-based signal classification can
+// compute the interval between the previous delivery and the current refetch.
+type ctxCallEntry struct {
+	count   int
+	firstAt time.Time
+	lastAt  time.Time
+}
+
+// setLastAgent records the agent_id from the most recent session_init call.
+func (s *Server) setLastAgent(id string) {
+	if id == "" {
+		return
+	}
+	s.lastAgentMu.Lock()
+	s.lastAgentID = id
+	s.lastAgentMu.Unlock()
+}
+
+// getLastAgent returns the agent_id from the most recent session_init call, or "".
+func (s *Server) getLastAgent() string {
+	s.lastAgentMu.RLock()
+	defer s.lastAgentMu.RUnlock()
+	return s.lastAgentID
 }
 
 // New creates a Server wired to the given graph, config, and optional store.
@@ -67,10 +545,64 @@ type Server struct {
 // All tools are registered during construction.
 func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	s := &Server{
-		graph:       g,
-		config:      cfg,
-		store:       st,
-		packetCache: make(map[string]*packetCacheEntry, 20),
+		graph:            g,
+		config:           cfg,
+		store:            st,
+		packetCache:      make(map[string]*packetCacheEntry, 20),
+		sessionCalls:     make(map[string]*sessionCallEntry),
+		toolPositions:    make(map[string]int),
+		synapsesSessions: make(map[string]*synapseSessionEntry),
+		toolHandlers:     make(map[string]server.ToolHandlerFunc),
+		stopCh:           make(chan struct{}),
+		bgQueue:          make(chan func(), bgQueueCap),
+		logToolCalls:     true, // default on
+		logSessions:      true,
+		cacheWebSearches: true,
+		startTime:        time.Now(),
+		lg:               newLoopGuard(),
+		approvals:        newApprovalStore(),
+		toolDescs:        make(map[string]string),
+	}
+	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
+
+	// Security F10: build rate limiter from config (or defaults if cfg is nil).
+	if cfg != nil {
+		s.rl = newRateLimiter(cfg.RateLimits)
+	} else {
+		s.rl = newRateLimiter(config.RateLimitConfig{})
+	}
+
+	// OF-S2: prompt injection scanner for externally-sourced content.
+	// Default: enabled with "warn" mode. Configurable via content_safety in synapses.json.
+	{
+		var csc config.ContentSafetyConfig
+		if cfg != nil {
+			csc = cfg.ContentSafety
+		}
+		if csc.ContentSafetyEnabled() {
+			s.injectionScanner = NewInjectionScanner(ScanMode(csc.ContentSafetyMode()))
+		}
+	}
+
+	// Load app-level settings from ~/.synapses/app_settings.json.
+	// This file is written by the Synapses desktop app; the daemon reads it
+	// once at startup. Missing file or missing keys → defaults (all enabled).
+	if appSettingsJSON, err := loadAppSettingsJSON(); err == nil {
+		if v, ok := appSettingsJSON["log_tool_calls"]; ok {
+			if b, ok := v.(bool); ok {
+				s.logToolCalls = b
+			}
+		}
+		if v, ok := appSettingsJSON["log_sessions"]; ok {
+			if b, ok := v.(bool); ok {
+				s.logSessions = b
+			}
+		}
+		if v, ok := appSettingsJSON["cache_web_searches"]; ok {
+			if b, ok := v.(bool); ok {
+				s.cacheWebSearches = b
+			}
+		}
 	}
 
 	// Restore dynamic rules persisted from previous sessions. This runs before
@@ -82,74 +614,232 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		}
 	}
 
+	// B28: compute repo scale for scale-aware tool registration.
+	// NodeCount == 0 means the graph is not yet indexed → default to full tier
+	// so agents always have access to all tools on first run.
+	{
+		var nc int
+		if g != nil {
+			nc = g.NodeCount()
+		}
+		switch {
+		case nc == 0:
+			s.repoScale = graph.ScaleLarge // not yet indexed — register all tools
+		case nc < 100:
+			s.repoScale = graph.ScaleMicro
+		case nc < 500:
+			s.repoScale = graph.ScaleSmall
+		case nc < 2000:
+			s.repoScale = graph.ScaleMedium
+		default:
+			s.repoScale = graph.ScaleLarge
+		}
+	}
 	// Usage observability: wire before/after hooks to record every tool call
 	// timing and success status into the tool_calls SQLite table.
 	hooks := &server.Hooks{}
 	startTimes := &callStartTimes{}
 	hooks.AddBeforeCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest) {
-		startTimes.set(req.Params.Name, time.Now())
+		startTimes.push(req, time.Now())
 	})
-	hooks.AddAfterCallTool(func(_ context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
-		elapsed := time.Since(startTimes.pop(req.Params.Name))
+	hooks.AddAfterCallTool(func(ctx context.Context, _ any, req *mcp.CallToolRequest, result *mcp.CallToolResult) {
+		elapsed := time.Since(startTimes.pop(req))
 		success := result == nil || !result.IsError
 		agentID, _ := req.GetArguments()["agent_id"].(string)
+		if agentID == "" {
+			agentID = s.getLastAgent()
+		}
 		entity, _ := req.GetArguments()["entity"].(string)
 		if entity == "" {
 			entity, _ = req.GetArguments()["query"].(string)
 		}
-		if s.store != nil {
-			s.store.RecordToolCall(req.Params.Name, agentID, entity, elapsed.Milliseconds(), success)
+		// P8-9: capture topic for send_message so message distribution is tracked.
+		if entity == "" {
+			entity, _ = req.GetArguments()["topic"].(string)
 		}
+
+		// Session Intelligence: touch heartbeat and record audit row.
+		// Both ops are fire-and-forget — never block the response path.
+		mcpSessionID := SessionIDFromContext(ctx)
+		synapseSessionID := s.getSynapseSessionID(mcpSessionID)
+		if s.store != nil && synapseSessionID != "" {
+			s.store.TouchSession(synapseSessionID)
+			if s.logToolCalls {
+				toolName := req.Params.Name
+				aid := agentID
+				sessID := synapseSessionID
+				ent := entity
+				ms := elapsed.Milliseconds()
+				ok := success
+				s.goBackground(func() { s.store.RecordToolCall(toolName, aid, sessID, ent, ms, ok) })
+			}
+		}
+
 		// Fire-and-forget telemetry to synapses-pulse (if configured).
-		if pc := s.getPulseClient(); pc != nil {
+		if pc := s.getPulseClient(); pc != nil && s.logToolCalls {
 			var responseBytes int
+			var errorMsg string
 			if result != nil && !result.IsError && len(result.Content) > 0 {
 				if tc, ok := result.Content[0].(mcp.TextContent); ok {
 					responseBytes = len(tc.Text)
 				}
 			}
-			go pc.RecordToolCall(pulse.ToolCallEvent{
+			if result != nil && result.IsError && len(result.Content) > 0 {
+				if tc, ok := result.Content[0].(mcp.TextContent); ok {
+					errorMsg = tc.Text
+					if len(errorMsg) > 200 {
+						// Truncate at a valid UTF-8 boundary.
+						errorMsg = truncateUTF8(errorMsg, 200)
+					}
+				}
+			}
+			pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+			// P5 — Item 26: serialize request params (truncated for storage).
+			var reqParams string
+			if args := req.GetArguments(); len(args) > 0 {
+				if b, jErr := json.Marshal(args); jErr == nil {
+					reqParams = string(b)
+					if len(reqParams) > 512 {
+						reqParams = reqParams[:512]
+					}
+				}
+			}
+			evt := pulse.ToolCallEvent{
 				ToolName:      req.Params.Name,
 				AgentID:       agentID,
+				ProjectID:     s.projectID,
 				Entity:        entity,
 				DurationMs:    elapsed.Milliseconds(),
 				Success:       success,
 				ResponseBytes: responseBytes,
-			})
+				SessionID:     pulseSessID,
+				ErrorMessage:  errorMsg,
+				RequestParams: reqParams,
+			}
+			s.goBackground(func() { pc.RecordToolCall(evt) })
 		}
+		// P5 — SA-C1: record tool sequence entry for workflow analysis.
+		if pc := s.getPulseClient(); pc != nil {
+			sessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+			if sessID != "" {
+				pos := s.nextToolPosition(SessionIDFromContext(ctx))
+				toolName := req.Params.Name
+				ok := success
+				s.goBackground(func() { pc.RecordToolSequenceEntry(sessID, toolName, pos, ok) })
+			}
+		}
+		// RX1: track per-connection call depth and auto-trigger session log on threshold.
+		// Skip end_session calls themselves to avoid recursion.
+		if req.Params.Name != "end_session" && agentID != "" && s.store != nil {
+			sessionID := SessionIDFromContext(ctx)
+			s.trackSessionCall(sessionID, agentID)
+		}
+	})
+
+	// Sprint 8 #1: hide deprecated/subsumed tools from tools/list.
+	// Tools remain registered (callable) but are filtered from the listing.
+	// Power users can still find them via discover_tools.
+	hooks.AddAfterListTools(func(_ context.Context, _ any, _ *mcp.ListToolsRequest, result *mcp.ListToolsResult) {
+		if result == nil {
+			return
+		}
+		filtered := result.Tools[:0]
+		for _, t := range result.Tools {
+			if !hiddenTools[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		result.Tools = filtered
 	})
 
 	s.mcp = server.NewMCPServer(serverName, Version,
 		server.WithToolCapabilities(true),
 		server.WithResourceCapabilities(true, true), // subscribe + listChanged
+		server.WithPromptCapabilities(false),         // static prompts; no listChanged notifications
 		server.WithHooks(hooks),
+		server.WithRecovery(), // recover panics in tool handlers — prevents daemon crash
 	)
+
+	// Knowledge mode detection: explicit config setting.
+	// Must be set BEFORE registerTools() so addOrDefer sees knowledgeMode=true
+	// and registers stubs for graph-dependent tools.
+	if cfg != nil && cfg.Mode == "knowledge" {
+		s.knowledgeMode = true
+	}
+
 	s.registerTools()
 	s.registerResources()
+	s.registerPrompts()      // no-op until SetPromptTemplates is called
+	// OF-S4: compute baseline AFTER all registrations.
+	// handleSessionInit re-derives and compares to detect runtime tampering.
+	s.toolDescBaseline = hashToolDescs(s.toolDescs)
 	return s
 }
 
-// callStartTimes is a simple concurrent map for per-tool-call start timestamps.
-// It uses the tool name as key; concurrent calls to the same tool will race,
-// but that is acceptable — timing accuracy is best-effort for observability.
-type callStartTimes struct {
-	mu   sync.Mutex
-	data map[string]time.Time
+// hashToolDescs computes a deterministic SHA256 hex digest of all tool
+// name→(description+schema) pairs. Names are sorted alphabetically before
+// hashing so the result is independent of registration order. The value
+// includes both the tool description and the serialised input schema so that
+// parameter-level tampering (renamed params, altered descriptions) is caught
+// alongside top-level description changes. Called once at startup to establish
+// the baseline, and re-called in handleSessionInit to detect drift.
+func hashToolDescs(descs map[string]string) string {
+	names := make([]string, 0, len(descs))
+	for name := range descs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00", name, descs[name])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (c *callStartTimes) set(name string, t time.Time) {
+// NewKnowledge creates a Server in knowledge mode — memory, events, tasks, and
+// messages only, no code graph. Used for non-code domains (marketing, ops, QA).
+func NewKnowledge(cfg *config.Config, st *store.Store) *Server {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	cfg.Mode = "knowledge"
+	return New(nil, cfg, st)
+}
+
+// callStartTimes tracks per-tool-call start timestamps keyed by request pointer.
+// Each *mcp.CallToolRequest is a unique allocation per invocation, so using the
+// pointer as the key is correct for all transports (stdio, HTTP/SSE) including
+// concurrent calls to the same tool — no FIFO ordering assumption is needed.
+type callStartTimes struct {
+	mu   sync.Mutex
+	data map[*mcp.CallToolRequest]time.Time
+}
+
+// callStartTimesGCThreshold is how long an entry can sit in callStartTimes
+// before being considered leaked (from a panic that skipped the after-hook).
+// Normal tool calls complete in well under 5 minutes.
+const callStartTimesGCThreshold = 5 * time.Minute
+
+func (c *callStartTimes) push(req *mcp.CallToolRequest, t time.Time) {
 	c.mu.Lock()
 	if c.data == nil {
-		c.data = make(map[string]time.Time)
+		c.data = make(map[*mcp.CallToolRequest]time.Time)
 	}
-	c.data[name] = t
+	// GC entries that are suspiciously old — these are leaked by panics that
+	// caused the after-hook to be skipped. O(n) over concurrent calls (≪100).
+	for k, v := range c.data {
+		if t.Sub(v) > callStartTimesGCThreshold {
+			delete(c.data, k)
+		}
+	}
+	c.data[req] = t
 	c.mu.Unlock()
 }
 
-func (c *callStartTimes) pop(name string) time.Time {
+func (c *callStartTimes) pop(req *mcp.CallToolRequest) time.Time {
 	c.mu.Lock()
-	t := c.data[name]
-	delete(c.data, name)
+	t := c.data[req]
+	delete(c.data, req)
 	c.mu.Unlock()
 	return t
 }
@@ -160,13 +850,13 @@ const (
 )
 
 // getPacketFromCache returns a cached context packet for the given key, or nil
-// if the entry is absent or expired.
-func (s *Server) getPacketFromCache(key string) interface{} {
-	s.packetCacheMu.Lock()
-	defer s.packetCacheMu.Unlock()
+// if the entry is absent or expired. Uses a read lock so concurrent reads do
+// not serialise; expired entries are lazily evicted by setPacketCache.
+func (s *Server) getPacketFromCache(key string) *brain.ContextPacket {
+	s.packetCacheMu.RLock()
+	defer s.packetCacheMu.RUnlock()
 	e, ok := s.packetCache[key]
 	if !ok || time.Now().After(e.expiresAt) {
-		delete(s.packetCache, key)
 		return nil
 	}
 	return e.pkt
@@ -176,7 +866,7 @@ func (s *Server) getPacketFromCache(key string) interface{} {
 // When the cache exceeds packetCacheMax entries, the entry with the oldest
 // expiresAt timestamp is evicted (LRU-style). With ≤20 slots, the linear
 // scan is trivial.
-func (s *Server) setPacketCache(key string, pkt interface{}) {
+func (s *Server) setPacketCache(key string, pkt *brain.ContextPacket) {
 	s.packetCacheMu.Lock()
 	defer s.packetCacheMu.Unlock()
 	if len(s.packetCache) >= packetCacheMax {
@@ -205,47 +895,161 @@ func (s *Server) SetChangeSource(cs ChangeSource) {
 	s.changeSource = cs
 }
 
-// SetPeerManager wires a *peer.PeerManager into the server so that the
-// list_peers, get_peer_context, and get_dependency_graph tools are functional.
-// Using interface{} avoids an import cycle (peer imports graph/store but not mcp).
-func (s *Server) SetPeerManager(pm interface{}) {
-	s.peerManager = pm
+// SetFederationResolver wires a federation.Resolver into the server for
+// cross-project dependency tracking and drift detection. When set,
+// session_init includes federation health and drift alerts, prepare_context
+// enriches responses with cross-project dependency data.
+// Pass nil to disable federation features.
+func (s *Server) SetFederationResolver(fr *federation.Resolver) {
+	s.federationResolver = fr
+}
+
+// SetProjectRegistry wires a cross-project store provider so that recall,
+// get_events, get_messages, and get_agents can query sibling projects.
+func (s *Server) SetProjectRegistry(pr ProjectStoreProvider) {
+	s.projectRegistry = pr
+}
+
+// resolveProjectStores parses a comma-separated projects param (or "*" for all)
+// and returns a map of projectName → *store.Store. Excludes the current project.
+// The second return value lists any requested project names that were not found
+// (empty for "*" queries). Callers can surface this to help agents fix typos.
+//
+// Federation ACL enforcement: if s.config.FederationACL is configured, only
+// projects listed in AllowReadFrom (or "*" for all) are returned. Projects
+// blocked by the ACL appear in the third return value so agents understand why.
+// Default (nil ACL or empty AllowReadFrom): deny-all — no cross-project reads.
+func (s *Server) resolveProjectStores(projectsParam string) (map[string]*store.Store, []string) {
+	if s.projectRegistry == nil || projectsParam == "" {
+		return nil, nil
+	}
+	projectsParam = strings.TrimSpace(projectsParam)
+
+	allNames := s.projectRegistry.ListProjects()
+	allSet := make(map[string]bool, len(allNames))
+	for _, n := range allNames {
+		allSet[n] = true
+	}
+
+	var wanted map[string]bool
+	if projectsParam == "*" {
+		wanted = allSet
+	} else {
+		parts := strings.Split(projectsParam, ",")
+		wanted = make(map[string]bool, len(parts))
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				wanted[p] = true
+			}
+		}
+	}
+
+	// ACL enforcement: check federation_acl.allow_read_from.
+	acl := s.config.FederationACL
+
+	result := make(map[string]*store.Store)
+	var notFound []string
+	for name := range wanted {
+		// ACL check — deny-all by default.
+		if !acl.IsAllowed(name) {
+			if projectsParam != "*" {
+				notFound = append(notFound, name+" (denied by federation_acl)")
+			}
+			continue
+		}
+
+		st := s.projectRegistry.GetStore(name)
+		if st == nil {
+			if projectsParam != "*" {
+				// Only report not-found for explicit names, not wildcard.
+				notFound = append(notFound, name)
+			}
+			continue
+		}
+		// Skip self: compare store pointers rather than names to handle
+		// disambiguated names like "api (work)" correctly.
+		if st == s.store {
+			continue
+		}
+		result[name] = st
+	}
+	return result, notFound
+}
+
+// allowedProjectNames returns the subset of registered project names that the
+// current project's ACL permits reading from. Used in error messages to avoid
+// leaking the names of projects the agent is not allowed to access.
+func (s *Server) allowedProjectNames() []string {
+	if s.projectRegistry == nil {
+		return nil
+	}
+	acl := s.config.FederationACL
+	var allowed []string
+	for _, name := range s.projectRegistry.ListProjects() {
+		if acl.IsAllowed(name) {
+			allowed = append(allowed, name)
+		}
+	}
+	return allowed
 }
 
 // SetBrainClient wires a *brain.Client into the server so that get_context
 // returns enriched Context Packets and violations include LLM explanations.
-// Using interface{} avoids an import cycle (brain imports only stdlib).
-func (s *Server) SetBrainClient(bc interface{}) {
+func (s *Server) SetBrainClient(bc *brain.Client) {
 	s.brainClient = bc
 }
 
-// SetScoutClient wires a *scout.Client into the server so that web_search,
-// web_fetch, and web_deep_search tools are functional.
-// Using interface{} avoids an import cycle (scout imports only stdlib).
-func (s *Server) SetScoutClient(sc interface{}) {
-	s.scoutClient = sc
+// SetProjectID sets the stable project identifier used when building context packets.
+// Also propagates the ID to loop_guard and rate_limiter for guard event attribution.
+func (s *Server) SetProjectID(id string) {
+	s.projectID = id
+	s.lg.projectID = id
+	s.rl.projectID = id
+}
+
+// SetWebCache wires a *webcache.Cache into the server so that lookup_docs
+// can serve version-pinned package documentation and URL caching.
+func (s *Server) SetWebCache(wc *webcache.Cache) {
+	s.webCache = wc
+}
+
+// SetProjectPath stores the absolute project root path so that lookup_docs
+// can parse go.mod for version-pinned package documentation.
+func (s *Server) SetProjectPath(path string) {
+	s.projectPath = path
 }
 
 // SetPulseClient wires a *pulse.Client into the server so that every tool
 // call emits telemetry to the synapses-pulse analytics sidecar.
+// Also propagates the pulse client to loop_guard and rate_limiter so they
+// can emit guard events (P3-2, P3-3).
 func (s *Server) SetPulseClient(pc *pulse.Client) {
 	s.pulseClient = pc
-}
-
-// getPulseClient type-asserts the stored pulseClient to *pulse.Client.
-// Returns nil if no pulse client is configured.
-func (s *Server) getPulseClient() *pulse.Client {
-	if s.pulseClient == nil {
-		return nil
+	s.lg.SetPulseClient(pc)
+	s.rl.SetPulseClient(pc)
+	s.lg.projectID = s.projectID
+	s.rl.projectID = s.projectID
+	// P8-2: wire session resolver so guard events include Synapses session UUID.
+	resolver := func(mcpSessID string) string {
+		return s.getSynapseSessionID(mcpSessID)
 	}
-	pc, _ := s.pulseClient.(*pulse.Client)
-	return pc
+	s.lg.resolveSession = resolver
+	s.rl.resolveSession = resolver
+	// Agent-scoped rate limiting: same agent_id across reconnections shares one bucket.
+	s.rl.resolveAgent = func(mcpSessID string) string {
+		return s.getSynapseAgentID(mcpSessID)
+	}
 }
 
-// SetTechStack stores the detected tech stack entries ([]scout.TechStackEntry)
-// so that get_project_identity can surface them as tech_stack.
+// getPulseClient returns the stored pulse client, or nil if not configured.
+func (s *Server) getPulseClient() *pulse.Client {
+	return s.pulseClient
+}
+
+// SetTechStack stores the detected tech stack entries so that
+// get_project_identity can surface them as tech_stack.
 // Called from cmdStart after autosubscribe detection completes.
-func (s *Server) SetTechStack(ts interface{}) {
+func (s *Server) SetTechStack(ts []scout.TechStackEntry) {
 	s.techStack = ts
 }
 
@@ -256,10 +1060,418 @@ func (s *Server) SetEmbedClient(ec *embed.Client) {
 	s.embedClient = ec
 }
 
+// SetMemoryEmbedder wires an embedder for generating memory embeddings
+// on remember() writes and for vector search in recall(). Pass nil to
+// disable memory embeddings (FTS5-only recall).
+// Also wires the embedder into the store's semantic dedup: when Jaccard
+// similarity is inconclusive, the store uses the embedder to compare
+// new content against existing memory embeddings.
+func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
+	s.memoryEmbedder = e
+	if s.store != nil && e != nil {
+		s.store.SetSemanticDedupFunc(func(text string) ([]float32, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return e.Embed(ctx, text)
+		})
+	} else if s.store != nil {
+		s.store.SetSemanticDedupFunc(nil)
+	}
+	// Wire the same embedder into the watcher for Tier 1 node embedding.
+	// Uses an optional interface so this compiles without importing watcher directly.
+	if setter, ok := s.changeSource.(NodeEmbedderSetter); ok {
+		setter.SetNodeEmbedder(e)
+	}
+
+	// Pre-embed tool catalog in background so discover_tools can rank by
+	// cosine similarity instead of keyword overlap (Sprint 12 #5).
+	if e != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				select {
+				case <-s.stopCh:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+			defer cancel()
+			s.EmbedToolCatalog(ctx, e)
+		}()
+	}
+}
+
+// SetUpdateChecker sets the function that returns the pending update version.
+func (s *Server) SetUpdateChecker(fn func() string) {
+	s.updateChecker = fn
+}
+
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until
 // the client disconnects or the process receives a signal.
 func (s *Server) ServeStdio() error {
 	return server.ServeStdio(s.mcp)
+}
+
+// MCPServer returns the underlying mcp-go MCPServer instance.
+// Used by the daemon to serve MCP sessions over Unix socket connections
+// instead of stdio.
+func (s *Server) MCPServer() *server.MCPServer {
+	return s.mcp
+}
+
+// StartBackground launches background maintenance goroutines and the
+// bounded worker pool that processes fire-and-forget handler work.
+// Call Close() to stop them and wait for graceful completion.
+// Idempotent — safe to call multiple times.
+//
+// IMPORTANT: must be called before any handler executes. All production paths
+// (stdio, daemon full-mode, daemon knowledge-mode) call this immediately after
+// New(). goBackground() enqueues work into the buffered channel even before
+// StartBackground runs, so a brief gap is tolerable — items accumulate in the
+// buffer and are consumed once workers start. However, if StartBackground is
+// never called, queued items are silently lost on Close().
+func (s *Server) StartBackground() {
+	s.startOnce.Do(func() {
+		// Start bounded worker pool — processes all goBackground() work items.
+		// Workers drain the queue on shutdown via close(bgQueue) + range loop.
+		for i := 0; i < bgWorkers; i++ {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				for fn := range s.bgQueue {
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								logutil.Error("synapses: background worker panic: %v\nstack:\n%s\n", r, debug.Stack())
+								if pc := s.getPulseClient(); pc != nil {
+									pc.RecordBackgroundWorkerPanic() // P2-5
+								}
+							}
+						}()
+						fn()
+					}()
+				}
+			}()
+		}
+
+		// Memory expiry loop (requires store).
+		// Capture s.store now — tests may set s.store = nil after StartBackground.
+		if st := s.store; st != nil {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.memoryExpiryLoop(st)
+			}()
+			// Periodic sweep for dropped memory embeddings (#23).
+			// Catches embeddings lost due to background queue pressure.
+			if s.memoryEmbedder != nil {
+				embedder := s.memoryEmbedder
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.embedSweepLoop(embedder, st)
+				}()
+				// Retry goroutine for embeds dropped due to full bgQueue.
+				s.wg.Add(1)
+				go func() {
+					defer s.wg.Done()
+					s.failedEmbedRetryLoop(embedder, st)
+				}()
+			}
+		}
+	})
+}
+
+// closeGracefulTimeout is how long Close() waits for background goroutines
+// before giving up. Workers drain remaining bgQueue items; memoryExpiryLoop
+// calls store.ExpireMemories() — both fast in practice. The cap prevents
+// daemon shutdown from hanging if the store is locked or unresponsive.
+const closeGracefulTimeout = 5 * time.Second
+
+// Close signals all background goroutines to stop and waits up to 5 seconds
+// for graceful completion. Shutdown sequence:
+//  1. Reject new work (shutdownMu write lock ensures no concurrent goBackground sends)
+//  2. Signal long-running loops via stopCh
+//  3. Close bgQueue — workers drain remaining items then exit their range loop
+//  4. Wait with timeout for all tracked goroutines
+//
+// Safe to call multiple times — subsequent calls are no-ops.
+func (s *Server) Close() {
+	// 1. Reject new work — atomic with bgQueue access via shutdownMu.
+	// After this, goBackground() returns immediately without enqueuing.
+	s.shutdownMu.Lock()
+	alreadyClosed := s.bgClosed
+	s.bgClosed = true
+	s.shutdownMu.Unlock()
+
+	if alreadyClosed {
+		return
+	}
+
+	// 2. Signal long-running loops (memoryExpiryLoop) and cancel lifecycle context.
+	close(s.stopCh)
+	s.lifecycleCancel()
+
+	if s.lg != nil {
+		s.lg.close()
+	}
+	if s.rl != nil {
+		s.rl.close()
+	}
+
+	// 3. Close queue — workers drain remaining items then exit.
+	close(s.bgQueue)
+
+	// 4. Wait with timeout.
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(closeGracefulTimeout):
+		logutil.Error("synapses: background workers did not drain within %v\n", closeGracefulTimeout)
+	}
+}
+
+// memoryExpiryLoop runs ExpireMemories every 6 hours until stopCh is closed.
+// st is captured at call-site to avoid reading s.store which may be set to nil
+// by tests. Returns immediately when st is nil.
+func (s *Server) memoryExpiryLoop(st *store.Store) {
+	if st == nil {
+		return
+	}
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	// Run once at startup to clear any stale memories from previous sessions.
+	st.ExpireMemories()
+	_ = st.PruneExpiredWebCache()
+
+	for {
+		select {
+		case <-ticker.C:
+			st.ExpireMemories()
+			_ = st.PruneExpiredWebCache()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+// embedSweepLoop periodically checks for memories missing embeddings (dropped
+// by background queue pressure) and re-embeds them. Runs every 5 minutes.
+func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
+	if st == nil || embedder == nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ids, err := st.GetMemoriesWithoutEmbeddings(50)
+			if err != nil || len(ids) == 0 {
+				continue
+			}
+			logutil.Info("synapses: embed sweep: %d memories missing embeddings\n", len(ids))
+			for _, memID := range ids {
+				content, ok := st.GetMemoryContent(memID)
+				if !ok || content == "" {
+					continue
+				}
+				if !s.goBackground(func() { s.embedMemory(s.lifecycleCtx, embedder, st, memID, content) }) {
+					s.trackFailedEmbed(memID)
+				}
+			}
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+// ── B28: Scale-aware tool registration ───────────────────────────────────────
+
+// coreTierTools are the ~12 tools registered at every repo scale (micro+).
+// They cover the minimal viable session: bootstrap, navigate, plan, implement,
+// and finish. Always available regardless of repo size.
+// Phase 6 (Proactive Context Engine): updated to match the design doc's core set.
+// All other tools are deferred and auto-promoted on first call.
+// Sprint 24 Phase 6: final 12-tool set. All tools are core — no tiers needed.
+var coreTierTools = map[string]bool{
+	"session_init":    true,
+	"search":          true,
+	"get_context":     true,
+	"get_file_context": true,
+	"get_impact":      true,
+	"validate":        true,
+	"memory":          true,
+	"end_session":     true,
+	"tasks":           true,
+	"rules":           true,
+	"annotate":        true,
+	"lookup_docs":     true,
+}
+
+// standardTierTools = coreTierTools (all 12 tools are core after consolidation).
+var standardTierTools = map[string]bool{
+	"session_init":    true,
+	"search":          true,
+	"get_context":     true,
+	"get_file_context": true,
+	"get_impact":      true,
+	"validate":        true,
+	"memory":          true,
+	"end_session":     true,
+	"tasks":           true,
+	"rules":           true,
+	"annotate":        true,
+	"lookup_docs":     true,
+}
+
+// knowledgeTools are the tools available when the server runs in knowledge mode
+// (no code graph). All other tools return a clear error message.
+// Sprint 24: removed deleted/absorbed tools.
+var knowledgeTools = map[string]bool{
+	"session_init": true,
+	"end_session":  true,
+	"memory":       true, // remember + recall + get_episodes
+	"tasks":        true, // create_plan + get_plans + get_pending_tasks + update_task + save/get_session_state + link_task_nodes
+	"validate":     true, // includes check_plan_safety (phase=safety)
+}
+
+// hiddenTools are deprecated or subsumed tools that remain callable but are
+// filtered from tools/list to reduce the default tool surface.
+// Sprint 24: many tools removed/absorbed — only plan_context remains hidden.
+var hiddenTools = map[string]bool{
+	// Sprint 25: all tools now merged — no hidden tools remain.
+}
+
+// toolInTier reports whether name should be registered at startup given
+// s.repoScale. Phase 6 (Proactive Context Engine): all tools are always
+// registered at all scales. The design doc mandates "the agent NEVER sees
+// 'tool not found' for any previously-existing tool" (Section 5.2).
+// Scale-aware discoverability is now handled via suggested_tools in
+// session_init and the status field in discover_tools, not via tool hiding.
+// The coreTierTools and standardTierTools maps are retained for
+// categorization purposes (e.g. discover_tools status field).
+func (s *Server) toolInTier(_ string) bool {
+	return true
+}
+
+// addOrDefer registers tool t with the MCP server. In knowledge mode,
+// non-knowledge tools are replaced with a stub returning a clear error message.
+// Always populates the REST dispatch table (toolHandlers) with the effective handler
+// so POST /v1/tools/{name} calls the same function as the MCP path.
+func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
+	// OF-S4: capture description + input schema for integrity baseline.
+	// Encoding the full schema (parameter names, types, descriptions) alongside
+	// the tool description means parameter-level tampering is also detected —
+	// not just changes to the top-level tool description.
+	schemaBytes, _ := json.Marshal(t.InputSchema)
+	s.toolDescs[t.Name] = t.Description + "\x00" + string(schemaBytes)
+	if s.knowledgeMode && !knowledgeTools[t.Name] {
+		// In knowledge mode, register a stub that returns a clear error.
+		stub := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"Tool %q is not available in knowledge mode (no code graph). "+
+					"Available tools: session_init, end_session, memory, tasks, validate.", t.Name)), nil
+		}
+		s.mcp.AddTool(t, stub)
+		s.toolHandlersMu.Lock()
+		s.toolHandlers[t.Name] = stub
+		s.toolHandlersMu.Unlock()
+		return
+	}
+	// Security F10: apply per-session rate limiting before loop-guard so that
+	// rate-limited calls never consume a loop-guard slot. Rate limiting is
+	// evaluated first (cheapest check first), then loop detection.
+	rateLimited := s.rl.wrap(t.Name, h)
+	// OF-S5: wrap every handler with the loop guard so that agent loops are
+	// detected and rejected uniformly — no per-handler wiring needed.
+	guarded := s.lg.wrap(rateLimited)
+
+	// Sprint 24: Work Ledger wrapper — passively records entity/file signals
+	// from every tool call and injects cross-session overlap alerts.
+	toolName := t.Name
+	ledgerWrapped := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		result, err := guarded(ctx, req)
+		if err != nil || result == nil || s.store == nil {
+			return result, err
+		}
+
+		args := req.GetArguments()
+		entities, files := extractSignals(toolName, args)
+		sessionID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+		if sessionID == "" {
+			return result, nil
+		}
+
+		// Async write — never blocks the response
+		if len(entities) > 0 || len(files) > 0 {
+			entry := store.LedgerEntry{
+				SessionID: sessionID,
+				ProjectID: s.projectID,
+				ToolName:  toolName,
+				EntityIDs: entities,
+				FilePaths: files,
+			}
+			s.goBackground(func() {
+				_ = s.store.AppendLedger(entry)
+			})
+		}
+
+		// Sync overlap check — fast indexed query, <1ms
+		if len(entities) > 0 || len(files) > 0 {
+			alerts := s.checkOverlaps(sessionID, entities, files)
+			alerts = s.filterSeenAlerts(sessionID, alerts)
+			if len(alerts) > 0 {
+				injectAlerts(result, alerts)
+			}
+		}
+
+		return result, nil
+	}
+
+	s.mcp.AddTool(t, ledgerWrapped)
+	s.toolHandlersMu.Lock()
+	s.toolHandlers[t.Name] = ledgerWrapped
+	s.toolHandlersMu.Unlock()
+}
+
+// DispatchTool calls a registered tool handler directly by name.
+// Used by the REST API (POST /v1/tools/{name}) to bypass the JSON-RPC layer.
+// Returns (nil, ErrUnknownTool) when name is not registered.
+// The caller is responsible for injecting the session ID into ctx if needed.
+func (s *Server) DispatchTool(ctx context.Context, name string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	s.toolHandlersMu.RLock()
+	h, ok := s.toolHandlers[name]
+	s.toolHandlersMu.RUnlock()
+	if !ok {
+		return nil, &ErrUnknownTool{Name: name}
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Name = name
+	req.Params.Arguments = args
+	return h(ctx, req)
+}
+
+// ErrUnknownTool is returned by DispatchTool when the tool name is not registered.
+type ErrUnknownTool struct {
+	Name string
+}
+
+func (e *ErrUnknownTool) Error() string {
+	return "unknown tool: " + e.Name
+}
+
+// SuggestToolsForIntent returns tool suggestions based on the agent's declared
+// intent. Does not modify server state — pure query.
+func (s *Server) SuggestToolsForIntent(intent string) []ToolSuggestion {
+	return suggestToolsForIntent(intent)
 }
 
 // registerTools wires all Synapses tool definitions to their handlers.
@@ -271,159 +1483,198 @@ func (s *Server) registerTools() {
 	// called session_init before, unchanged sections (e.g. project_identity)
 	// are omitted to save tokens. The agent's context profile is updated
 	// after each call so subsequent calls are incremental.
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"session_init",
 			mcp.WithDescription(
-				"Single-call session bootstrap. Returns pending_tasks, project_identity, "+
-					"working_state, and recent_events in one round-trip — replacing the "+
-					"three-step startup ritual. Includes scale_guidance so agents self-tune "+
-					"their tool usage to repo size. Call this INSTEAD of the three individual tools. "+
+				"Single-call session bootstrap replacing the three-step startup ritual. "+
+					"Default scope (standard): returns pending_tasks, working_state, scale_guidance, "+
+					"and a more_available field listing richer sections you can request. "+
+					"Pass scope=\"full\" to also receive project_identity, brain_health, "+
+					"federation_health, relevant_memories, knowledge_graph, and session analytics. "+
 					"Incremental mode: when agent_id is provided and the agent has called "+
-					"session_init before, unchanged sections are skipped to save tokens "+
-					"(e.g. project_identity is omitted if the graph hasn't changed).",
+					"session_init before, unchanged sections are skipped to save tokens. "+
+					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) "+
+					"are always included regardless of scope. "+
+					"Lean defaults: pending_tasks.tasks is omitted when empty — check pending_tasks.summary. "+
+					"recent_events is omitted when empty — latest_event_seq is always present.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Self-declared agent identifier. Enables incremental delivery: "+
 					"subsequent calls skip unchanged project_identity and filter events to only "+
 					"those since the last session. Always provide for token savings."),
 			),
+			mcp.WithString("model",
+				mcp.Description("Optional. The model you are running on, e.g. 'claude-sonnet-4-6'. "+
+					"Recorded in pulse analytics so cost savings are calculated against your actual model price."),
+			),
+			mcp.WithString("provider",
+				mcp.Description("Optional. Model provider: 'anthropic', 'openai', etc."),
+			),
+			mcp.WithString("intent",
+				mcp.Description("Optional. Short free-text declaration of what you are working on — visible to peer agents as a Tier 2/3 signal. E.g. 'implementing R1 framework edge injection'. Pass empty string to clear."),
+			),
+			mcp.WithString("scope",
+				mcp.Description("Optional. Controls response verbosity. "+
+					"\"standard\" (default): tasks + working_state + scale_guidance (~500 tokens); "+
+					"rich sections are deferred — see more_available in the response for what is available. "+
+					"\"full\": all sections; use when you need project_identity, brain_health, federation_health, "+
+					"relevant_memories, knowledge_graph, or other rich sections. Empty arrays still omitted. "+
+					"\"quick\": alias for standard (legacy). "+
+					"\"resume\": tasks with session states + working_state + relevant_memories + federation_health "+
+					"(for task context continuity across reconnects). "+
+					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) are always included in all scopes."),
+			),
 		),
 		s.handleSessionInit,
 	)
 
-	// discover_tools: lightweight tool finder
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"discover_tools",
-			mcp.WithDescription(
-				"Finds the right Synapses tool for a task. Describe what you need in natural language "+
-					"and get back the top matching tools with usage examples. "+
-					"Use this instead of scanning all tool definitions. ~300 tokens vs ~4200.",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Natural language description of what you need, e.g. 'check what calls this function' or 'save my progress'."),
-			),
-		),
-		s.handleDiscoverTools,
-	)
+	// Sprint 24: report_usage absorbed into end_session.
+	// Sprint 24: get_my_analytics moved to MCP Resource synapses://analytics.
+	// Sprint 24: explain_codebase, get_repo_map, get_project_identity absorbed into session_init.
+	// Sprint 24: discover_tools removed — unnecessary with 12 tools.
+	// Sprint 24: get_edge_types moved to MCP Resource synapses://edge-types.
 
 	// ── Code Graph Tools ────────────────────────────────────────────────────
 
-	// get_project_identity
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_project_identity",
-			mcp.WithDescription(
-				"Returns a compact architectural summary of the indexed project: "+
-					"node counts, entry points, highest-connectivity entities, and active rules. "+
-					"Call this at the start of every session to orient yourself before querying deeper.",
-			),
-		),
-		s.handleGetProjectIdentity,
-	)
-
-	// get_context
-	s.mcp.AddTool(
+	// get_context (absorbs prepare_context via mode=intent, get_call_chain via mode=path)
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"Returns a relevance-ranked subgraph centred on the named entity. "+
-					"Uses BFS with edge-type-weighted decay so the closest, most semantically "+
-					"significant relationships appear first. This replaces grep: ask for what you "+
-					"need structurally, not textually.",
+				"Unified context retrieval. mode='context' (default): BFS/PPR ego-subgraph with full param control. "+
+					"mode='intent': intent-based assembly (declare intent + target, one round-trip). "+
+					"mode='path': shortest call chain between two entities (requires from + to params).",
 			),
 			mcp.WithString("entity",
-				mcp.Required(),
-				mcp.Description("The name of the code entity to carve context around (e.g. 'AuthService')."),
-			),
-			mcp.WithNumber("depth",
-				mcp.Description("BFS hop limit. Defaults to the project config value (usually 2)."),
-			),
-			mcp.WithNumber("token_budget",
-				mcp.Description("Maximum approximate tokens in the response. Defaults to 4000."),
-			),
-			mcp.WithString("task_id",
-				mcp.Description("Optional task ID from get_pending_tasks. Nodes linked to this task get a relevance boost."),
+				mcp.Description("Entity name for mode=context (e.g. 'AuthService'). Required for mode=context."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("'explore' (default): ego-subgraph BFS. 'impact': reverse-BFS showing what depends on this entity (same as get_impact)."),
+				mcp.Description("'context' (default): BFS graph traversal. 'intent': intent-based context assembly. 'path': call chain between two entities."),
+			),
+			// mode=context params
+			mcp.WithNumber("depth",
+				mcp.Description("BFS hop limit (mode=context). Defaults to project config value."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max tokens in response. Defaults to 4000 (context) or intent-specific."),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional task ID for relevance boosting."),
 			),
 			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to pin the lookup to a specific file (e.g. 'cmd/synapses/main.go'). Use when entity names are ambiguous across multiple files."),
+				mcp.Description("Optional file path suffix to disambiguate entity names."),
 			),
 			mcp.WithString("format",
-				mcp.Description("Output format: 'json' (default, full JSON blob ~2000-3800 tokens) or 'compact' (natural-language briefing ~400-600 tokens). Use 'compact' to reduce token usage when brain summaries are available."),
+				mcp.Description("Output format: 'compact' (default) or 'json'. Mode=context only."),
 			),
 			mcp.WithString("detail_level",
-				mcp.Description("Only used with format='compact'. Controls verbosity: 'summary' (~50 tokens, root entity header + warnings only), 'neighbors' (~200 tokens, adds Calls/Called-by name lists), 'full' (default, ~400-600 tokens, adds callee detail blocks and insight)."),
+				mcp.Description("Verbosity for format=compact: 'summary', 'neighbors', 'full' (default). Mode=context only."),
+			),
+			mcp.WithBoolean("helpful",
+				mcp.Description("Feedback signal (true=useful, false=missed). Mode=context only."),
+			),
+			mcp.WithBoolean("include_inferred",
+				mcp.Description("When false, strips inferred route nodes. Default true. Mode=context only."),
+			),
+			mcp.WithString("known_hash",
+				mcp.Description("Entity hash for conditional fetch. Mode=context only."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Agent ID for peer tracking."),
+			),
+			mcp.WithString("intent",
+				mcp.Description("For mode=context: shapes traversal weights. For mode=intent: required — 'modify'|'understand'|'review'|'debug'|'add'|'plan'."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated federation aliases for cross-project context."),
+			),
+			mcp.WithNumber("cross_domain_decay",
+				mcp.Description("Cross-domain relevance multiplier (0,1]. Default 0.5. Mode=context only."),
+			),
+			// mode=intent params
+			mcp.WithString("target",
+				mcp.Description("Entity name, file path, or query. Required for mode=intent."),
+			),
+			// mode=path params
+			mcp.WithString("from",
+				mcp.Description("Starting entity for call chain. Required for mode=path."),
+			),
+			mcp.WithString("to",
+				mcp.Description("Target entity for call chain. Required for mode=path."),
 			),
 		),
-		s.handleGetContext,
+		s.handleGetContextDispatch,
 	)
 
-	// find_entity
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"find_entity",
-			mcp.WithDescription(
-				"Locates nodes in the graph by name or substring. "+
-					"Returns matching node references (ID, type, file, line) without full context. "+
-					"Use this to discover the exact entity name before calling get_context.",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Name or substring to search for (case-insensitive)."),
-			),
-		),
-		s.handleFindEntity,
-	)
+	// Sprint 25: find_entity absorbed into search(mode="exact").
 
-	// validate_plan
-	s.mcp.AddTool(
+	// validate (merges validate_plan, verify_implementation, get_violations, plan_context, check_plan_safety)
+	s.addOrDefer(
 		mcp.NewTool(
-			"validate_plan",
+			"validate",
 			mcp.WithDescription(
-				"Checks a list of proposed code changes against the project's architectural rules. "+
-					"Returns any violations before a single line of code is written. "+
-					"Call this before implementing a plan that touches multiple files.",
+				"Unified validation tool. phase='pre' (default): check proposed changes against rules. "+
+					"phase='post': verify files after writing. phase='list': list current violations. "+
+					"phase='full': compound pre-implementation gate (safety+rules+scope). "+
+					"phase='safety': search failure episodes for similar past failures.",
 			),
+			mcp.WithString("phase",
+				mcp.Description("'pre' (default), 'post', 'list', 'full', or 'safety'."),
+			),
+			// phase=pre params
 			mcp.WithString("changes",
-				mcp.Required(),
-				mcp.Description(
-					"JSON array of proposed changes. Each item: "+
-						`{"file": "path/to/file.go", "adds_call_to": "SomeFunction", "removes_call_to": "OtherFunction"}.`,
-				),
+				mcp.Description("JSON array of proposed changes. Required for phase=pre/full."),
 			),
-		),
-		s.handleValidatePlan,
-	)
-
-	// get_violations (absorbs get_violation_log via rule_id + limit params)
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_violations",
-			mcp.WithDescription(
-				"Lists all current architectural rule violations found in the graph. "+
-					"Returns rule ID, severity, affected nodes, and a human-readable description. "+
-					"Pass rule_id to filter to a specific rule. Pass include_log=true to also return the historical audit log.",
+			mcp.WithBoolean("check_safety",
+				mcp.Description("When true with phase=pre, also runs failure-episode safety check."),
 			),
+			mcp.WithString("plan_description",
+				mcp.Description("Natural language plan description. Used by phase=pre (safety) and phase=safety/full."),
+			),
+			mcp.WithBoolean("skip_logic_checks",
+				mcp.Description("Skip heuristic logic checks. Phase=pre only. Default false."),
+			),
+			// phase=post params
+			mcp.WithString("files_written",
+				mcp.Description("JSON array of written file paths. Required for phase=post."),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional task ID for phase=post verification or phase=full relevance."),
+			),
+			// phase=list params
 			mcp.WithString("rule_id",
-				mcp.Description("Optional. Filter violations to a specific rule ID."),
+				mcp.Description("Filter violations to a rule ID. Phase=list only."),
 			),
 			mcp.WithBoolean("include_log",
-				mcp.Description("When true, also returns the historical violation log entries. Default false."),
+				mcp.Description("Include historical violation log. Phase=list only."),
 			),
 			mcp.WithNumber("log_limit",
-				mcp.Description("Max historical log entries to return when include_log=true. Default 50."),
+				mcp.Description("Max log entries. Phase=list only. Default 50."),
+			),
+			// phase=full params
+			mcp.WithString("target",
+				mcp.Description("Entity/file for scope assessment. Required for phase=full."),
+			),
+			mcp.WithString("file",
+				mcp.Description("File path suffix to disambiguate. Phase=full only."),
+			),
+			// phase=safety params
+			mcp.WithString("agent_id",
+				mcp.Description("Agent identifier for attribution."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Repo context for scoping failure search. Phase=safety only."),
 			),
 		),
-		s.handleGetViolations,
+		s.handleValidateDispatch,
 	)
 
+	// Sprint 25: upsert_gap absorbed into annotate(action="add_gap").
+	// Sprint 25: get_gaps absorbed into annotate(action="list_gaps").
+
 	// get_file_context
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_file_context",
 			mcp.WithDescription(
@@ -435,83 +1686,107 @@ func (s *Server) registerTools() {
 				mcp.Required(),
 				mcp.Description("File path or suffix, e.g. 'internal/store/tasks.go' or 'tasks.go'."),
 			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response size in tokens (default 4000). When exceeded, entities are dropped from the bottom of the file (highest line numbers first). Response includes truncated=true and total_entities=N when trimmed."),
+			),
 		),
 		s.handleGetFileContext,
 	)
 
-	// search (absorbs semantic_search via mode param)
-	s.mcp.AddTool(
+	// search (absorbs semantic_search via mode param, find_entity via mode=exact)
+	s.addOrDefer(
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
-				"Keyword search across entity names and doc comments. "+
-					"Results are ranked: exact name match > name prefix > name substring > doc comment match. "+
-					"Returns up to 25 results. Use this to find auth-related code, error handlers, etc. "+
-					"Set mode='fulltext' for FTS5 BM25 search by concept ('rate limiting', 'JWT validation'). 'semantic' is accepted as alias. "+
-					"CamelCase names are auto-split: searching 'carve' finds 'CarveEgoGraph'.",
+				"Search across entity names, doc comments, and graph nodes. "+
+					"mode='keyword' (default): substring match. mode='fulltext': FTS5 BM25. "+
+					"mode='semantic': HyDE vector search. mode='exact': name lookup returning "+
+					"node refs (ID, type, file, line) — use to resolve entity names before get_context.",
 			),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Search term (case-insensitive)."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("Search mode: 'keyword' (default, exact/prefix/substring) or 'semantic' (FTS BM25 by concept)."),
+				mcp.Description("'keyword' (default), 'fulltext', 'semantic', or 'exact' (name lookup)."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic."),
+				mcp.Description("Maximum results to return (default 20, max 50). Used for fulltext/semantic."),
+			),
+			mcp.WithBoolean("hyde",
+				mcp.Description("HyDE hypothesis generation (default true). Only applies when mode='semantic'."),
+			),
+			mcp.WithString("format",
+				mcp.Description("Output format for mode='exact': 'compact' (default) or 'json'."),
 			),
 		),
-		s.handleSearch,
+		s.handleSearchDispatch,
 	)
 
-	// get_call_chain
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_call_chain",
-			mcp.WithDescription(
-				"Finds the shortest call path between two entities by following CALLS edges. "+
-					"Answers 'how does A reach B?' Use this to understand the execution path "+
-					"between entry points and deep implementation details.",
-			),
-			mcp.WithString("from",
-				mcp.Required(),
-				mcp.Description("Name of the starting entity (caller side)."),
-			),
-			mcp.WithString("to",
-				mcp.Required(),
-				mcp.Description("Name of the target entity (callee side)."),
-			),
-		),
-		s.handleGetCallChain,
-	)
+	// Sprint 25: get_call_chain absorbed into get_context(mode="path").
 
-	// annotate_node
-	s.mcp.AddTool(
+	// annotate (merges annotate_node, web_annotate, upsert_gap, get_gaps, get_entity_history)
+	s.addOrDefer(
 		mcp.NewTool(
-			"annotate_node",
+			"annotate",
 			mcp.WithDescription(
-				"Attaches a note to a graph node, visible to all agents via get_context. "+
-					"Use this as a shared whiteboard: Agent A can annotate a function with "+
-					"'known race condition here' and Agent B will see it in context queries. "+
-					"Annotations persist across sessions.",
+				"Unified annotation tool. action='add' (default): attach note to node. "+
+					"action='add_web': persist web findings as annotation. action='add_gap': record quality gap. "+
+					"action='list_gaps': query gaps. action='history': entity timeline.",
 			),
+			mcp.WithString("action",
+				mcp.Description("'add' (default), 'add_web', 'add_gap', 'list_gaps', 'history'."),
+			),
+			// add / add_web params
 			mcp.WithString("node_id",
-				mcp.Required(),
-				mcp.Description("The node ID to annotate (from find_entity or get_context)."),
+				mcp.Description("Node ID. Required for action=add/add_web/add_gap."),
 			),
 			mcp.WithString("note",
-				mcp.Required(),
-				mcp.Description("The annotation text."),
+				mcp.Description("Annotation text. Required for action=add, optional for add_web."),
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier for attribution."),
+				mcp.Description("Agent identifier for attribution."),
+			),
+			// add_web params
+			mcp.WithString("hits",
+				mcp.Description("JSON array of {title,url,snippet} web hits. action=add_web."),
+			),
+			// add_gap params
+			mcp.WithString("gap_id",
+				mcp.Description("Short stable slug for gap dedup. Required for action=add_gap."),
+			),
+			mcp.WithString("description",
+				mcp.Description("Gap description. Required for action=add_gap."),
+			),
+			mcp.WithString("severity",
+				mcp.Description("low|medium|high|critical. action=add_gap/list_gaps."),
+			),
+			mcp.WithString("status",
+				mcp.Description("open|fixed|wontfix. action=add_gap. list_gaps: open|fixed|wontfix|all."),
+			),
+			mcp.WithString("fix_notes",
+				mcp.Description("How the gap was fixed. action=add_gap with status=fixed."),
+			),
+			// list_gaps params
+			mcp.WithString("file",
+				mcp.Description("Filter gaps by file path. action=list_gaps. Disambiguate for action=history."),
+			),
+			// history params
+			mcp.WithString("entity",
+				mcp.Description("Entity name. Required for action=history."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Max timeline events. action=history. Default 50."),
 			),
 		),
-		s.handleAnnotateNode,
+		s.handleAnnotateDispatch,
 	)
 
+	// Sprint 24: link_entities, unlink_entities, confirm_edge removed.
+	// Graph edge management is no longer agent-facing.
+
 	// get_impact
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"get_impact",
 			mcp.WithDescription(
@@ -520,836 +1795,414 @@ func (s *Server) registerTools() {
 					"could break if the entity changes. "+
 					"Results grouped by depth: direct (depth 1, confidence 1.0), "+
 					"indirect (depth 2, confidence 0.6), peripheral (depth 3+, confidence 0.3). "+
-					"Answers: 'what breaks if I change X?'",
+					"Also returns implementor_impact (types that implement the root interface), "+
+					"cross_domain_impact: infrastructure resources (DEPLOYS), "+
+					"API endpoints (CONSUMES), config files (CONFIGURED_BY), doc sections "+
+					"(DOCUMENTS), and name-matched entities (MENTIONS) directly linked to the entity. "+
+					"Only cross-domain edges with confidence ≥ 0.6 or human-confirmed are included. "+
+					"Answers: 'what breaks if I change X?' — across code, infra, API, and docs. "+
+					"Use files= for PR blast-radius: pass comma-separated changed file paths to "+
+					"aggregate impact across all entities in those files.",
 			),
 			mcp.WithString("symbol",
-				mcp.Required(),
-				mcp.Description("Name of the entity to analyse (e.g. 'CarveEgoGraph')."),
+				mcp.Description("Name of the entity to analyse (e.g. 'CarveEgoGraph'). Required unless files= is provided."),
+			),
+			mcp.WithString("files",
+				mcp.Description("Comma-separated file paths for change-set impact analysis (PR blast radius). "+
+					"Aggregates impact across all entities in the specified files. Alternative to symbol=."),
 			),
 			mcp.WithNumber("depth",
 				mcp.Description("Max hop depth. Default 3, max 10."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response size in tokens (default 2000). When exceeded, peripheral (depth 3+) nodes are dropped first, then indirect (depth 2). Direct callers (depth 1) are always kept. Response includes truncated=true when trimmed."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Optional. Comma-separated federation aliases to also check sibling project dependents "+
+					"(e.g. 'app'). Returns cross-project callers alongside local ones."),
+			),
+			mcp.WithString("scope",
+				mcp.Description("Optional. 'review': enriched output for code review — adds blast_radius summary "+
+					"(direct/transitive/files/untested/high-risk counts), test_gaps (impacted entities with zero test coverage), "+
+					"risk_flags (entities with negative quality scores from historical signals), and failure_history "+
+					"(recent failure episodes related to this entity). One call replaces 10+ separate tool calls. "+
+					"Default: standard impact analysis."),
 			),
 		),
 		s.handleGetImpact,
 	)
 
+	// Sprint 25: get_entity_history absorbed into annotate(action="history").
+
 	// ── Agent Task Memory Tools ──────────────────────────────────────────────
 	// These tools give Synapses session continuity: plans and tasks agreed in
 	// one LLM conversation are stored in SQLite and surfaced to future sessions.
 
-	// create_plan
-	s.mcp.AddTool(
+	// tasks (merges create_plan, get_plans, get_pending_tasks, get_my_tasks, save_session_state, get_session_state, update_task, link_task_nodes)
+	s.addOrDefer(
 		mcp.NewTool(
-			"create_plan",
+			"tasks",
 			mcp.WithDescription(
-				"Saves a named plan with actionable tasks to persistent storage. "+
-					"Call this when the user approves an implementation plan so that future "+
-					"LLM sessions can resume the work via get_pending_tasks. "+
-					"Each task has a title, description, priority (p0–p3), and optional linked node IDs.",
+				"Unified task management. action='create_plan': save a plan with tasks. "+
+					"action='list_plans': overview of all plans. action='pending': list pending/in-progress tasks. "+
+					"action='update': change task status. action='save_state'/'get_state': session state. "+
+					"action='link_nodes': link task to graph nodes.",
 			),
-			mcp.WithString("title",
+			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("Short name for the plan, e.g. 'v1.0.1 context quality improvements'."),
+				mcp.Description("'create_plan', 'list_plans', 'pending', 'update', 'save_state', 'get_state', 'link_nodes'."),
+			),
+			// create_plan params
+			mcp.WithString("title",
+				mcp.Description("Plan title. Required for action=create_plan."),
 			),
 			mcp.WithString("description",
-				mcp.Description("Optional longer description of what the plan achieves."),
+				mcp.Description("Plan description. action=create_plan."),
 			),
 			mcp.WithString("tasks",
-				mcp.Required(),
-				mcp.Description(
-					`JSON array of task objects. Each: {"title":"...", "description":"...", "priority":"p0|p1|p2|p3", "linked_nodes":["nodeID",...]}.`,
-				),
+				mcp.Description("JSON array of task objects. Required for action=create_plan."),
 			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier, e.g. 'claude-code-session-1'. Recorded as plan creator."),
-			),
-		),
-		s.handleCreatePlan,
-	)
-
-	// get_pending_tasks
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_pending_tasks",
-			mcp.WithDescription(
-				"Returns all pending and in-progress tasks, ordered by priority (p0 first). "+
-					"Call this at the start of every session to discover what work was agreed "+
-					"in previous sessions and resume from exactly where the last session stopped.",
-			),
+			// pending params
 			mcp.WithString("plan_id",
-				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
+				mcp.Description("Filter by plan ID. action=pending."),
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Optional. Filter to tasks assigned to a specific agent."),
+				mcp.Description("Agent identifier. Filters tasks (pending), attribution (create_plan/update/save_state)."),
 			),
-		),
-		s.handleGetPendingTasks,
-	)
-
-	// save_session_state
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"save_session_state",
-			mcp.WithDescription(
-				"Saves the exact working state for an in-progress task so the next LLM session "+
-					"can resume from precisely where this session stopped. Call this at the end of "+
-					"a session or whenever significant progress is made. "+
-					"The state is included automatically in get_pending_tasks() for in_progress tasks.",
+			mcp.WithBoolean("suggest_next",
+				mcp.Description("Highlight top unblocked task. action=pending."),
 			),
-			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID from get_pending_tasks."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier."),
-			),
-			mcp.WithString("approach",
-				mcp.Description("Current strategy or approach being taken for this task."),
-			),
-			mcp.WithString("files_modified",
-				mcp.Description("JSON array of file paths modified so far, e.g. [\"internal/store/tasks.go\"]."),
-			),
-			mcp.WithString("completed_steps",
-				mcp.Description("JSON array of step descriptions already completed."),
-			),
-			mcp.WithString("remaining_steps",
-				mcp.Description("JSON array of step descriptions still to do."),
-			),
-			mcp.WithString("blockers",
-				mcp.Description("JSON array of blocker descriptions (empty if none)."),
-			),
-			mcp.WithString("decisions",
-				mcp.Description("JSON array of key decisions made during this session."),
-			),
-			mcp.WithString("context_snapshot",
-				mcp.Description("Free-form text snapshot of the current LLM context (key facts, state, etc.)."),
-			),
-		),
-		s.handleSaveSessionState,
-	)
-
-	// get_session_state
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_session_state",
-			mcp.WithDescription(
-				"Returns the saved session state for a task, enabling exact-moment resumption "+
-					"of work started in a previous LLM session. "+
-					"Note: get_pending_tasks() already includes session state for in_progress tasks inline; "+
-					"use this tool only when you need to fetch state for a specific task explicitly.",
-			),
-			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID to retrieve session state for."),
-			),
-		),
-		s.handleGetSessionState,
-	)
-
-	// update_task
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"update_task",
-			mcp.WithDescription(
-				"Updates the status of a task and optionally appends timestamped notes. "+
-					"Use this to mark tasks done as you complete them, "+
-					"or to leave context notes for the next LLM session.",
-			),
+			// update params
 			mcp.WithString("id",
-				mcp.Required(),
-				mcp.Description("The task ID returned by get_pending_tasks."),
+				mcp.Description("Task ID. Required for action=update."),
 			),
 			mcp.WithString("status",
-				mcp.Required(),
-				mcp.Description("New status: pending | in_progress | done | cancelled."),
+				mcp.Description("New status: pending|in_progress|done|cancelled. Required for action=update."),
 			),
 			mcp.WithString("notes",
-				mcp.Description("Optional notes to append (timestamped). Use to leave context for the next session."),
+				mcp.Description("Timestamped notes to append. action=update."),
 			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier. Recorded as last_updated_by."),
+			mcp.WithString("intent",
+				mcp.Description("Free-text intent visible to peers. action=update."),
+			),
+			// save_state params
+			mcp.WithString("task_id",
+				mcp.Description("Task ID. Required for action=save_state/get_state/link_nodes."),
+			),
+			mcp.WithString("approach",
+				mcp.Description("Current approach. action=save_state."),
+			),
+			mcp.WithString("files_modified",
+				mcp.Description("JSON array of modified files. action=save_state."),
+			),
+			mcp.WithString("completed_steps",
+				mcp.Description("JSON array of completed steps. action=save_state."),
+			),
+			mcp.WithString("remaining_steps",
+				mcp.Description("JSON array of remaining steps. action=save_state."),
+			),
+			mcp.WithString("blockers",
+				mcp.Description("JSON array of blockers. action=save_state."),
+			),
+			mcp.WithString("decisions",
+				mcp.Description("JSON array of decisions. action=save_state."),
+			),
+			mcp.WithString("context_snapshot",
+				mcp.Description("Free-form context snapshot. action=save_state."),
+			),
+			// link_nodes params
+			mcp.WithString("node_ids",
+				mcp.Description("JSON array of node ID strings. Required for action=link_nodes."),
 			),
 		),
-		s.handleUpdateTask,
+		s.handleTasksDispatch,
 	)
 
-	// handoff_task: transfer task ownership between agents with session state.
-	s.mcp.AddTool(
+	// end_session: captures session knowledge and optionally reports usage.
+	s.addOrDefer(
 		mcp.NewTool(
-			"handoff_task",
+			"end_session",
 			mcp.WithDescription(
-				"Transfers a task to another agent with context. The departing agent's session "+
-					"state is preserved so the receiving agent can resume seamlessly. Use this when "+
-					"handing off work between agents or LLM sessions.",
+				"Captures session knowledge and persists it as structured memories. "+
+					"Call at the end of a session to automatically extract: files touched, "+
+					"entities examined, tasks updated. Saves session-log, entity, and project "+
+					"memories that future sessions will see in session_init and get_context. "+
+					"This is how institutional knowledge accumulates across sessions. "+
+					"Optionally reports LLM token usage (absorbs report_usage) if model is provided. "+
+					"Returns effectiveness_report with session quality metrics: context_hit_rate, "+
+					"first_fetch_right/total_deliveries (how many context calls required no correction), "+
+					"tokens_saved, and prev_7d comparison to the last 7 days of sessions. "+
+					"Also includes a human-readable message field summarising the session. "+
+					"Read effectiveness_report.message after each session to track quality trends.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Required(),
+				mcp.Description("Self-declared agent identifier."),
 			),
 			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID to hand off."),
+				mcp.Description("Optional. Link session memories to this task."),
 			),
-			mcp.WithString("from_agent",
-				mcp.Required(),
-				mcp.Description("The agent currently owning the task."),
+			mcp.WithString("summary",
+				mcp.Description("Optional. High-level summary of what was accomplished. "+
+					"Saved as a project-tier memory visible to all future sessions."),
 			),
-			mcp.WithString("to_agent",
-				mcp.Required(),
-				mcp.Description("The agent receiving the task."),
+			mcp.WithString("model",
+				mcp.Description("Optional. Model name for usage reporting (e.g. 'claude-sonnet-4-6'). "+
+					"When provided, token usage is reported to pulse analytics (absorbs report_usage)."),
 			),
-			mcp.WithString("notes",
-				mcp.Description("Optional handoff notes explaining current state, blockers, or next steps."),
+			mcp.WithString("provider",
+				mcp.Description("Optional. Model provider: 'anthropic', 'openai', etc. Used with model for usage reporting."),
+			),
+			mcp.WithNumber("input_tokens",
+				mcp.Description("Optional. Total input tokens consumed during this session."),
+			),
+			mcp.WithNumber("output_tokens",
+				mcp.Description("Optional. Total output tokens generated during this session."),
+			),
+			mcp.WithNumber("cost_usd",
+				mcp.Description("Optional. Total USD cost for this session if known."),
 			),
 		),
-		s.handleHandoffTask,
+		s.handleEndSession,
 	)
+
+	// Sprint 25: get_session_state absorbed into tasks(action="get_state").
+	// Sprint 25: update_task absorbed into tasks(action="update").
 
 	// ── Coordination & Multi-Agent Tools ────────────────────────────────────
 
-	// get_plans
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_plans",
-			mcp.WithDescription(
-				"List all saved plans with task completion counts. "+
-					"Use this to get an overview of all active and completed work across sessions.",
-			),
-		),
-		s.handleGetPlans,
-	)
+	// Sprint 25: get_plans absorbed into tasks(action="list_plans").
+	// Sprint 25: link_task_nodes absorbed into tasks(action="link_nodes").
 
-	// get_my_tasks
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_my_tasks",
-			mcp.WithDescription(
-				"Returns unblocked pending tasks assigned to or created by a specific agent, "+
-					"with a suggested next task. Scoped to agent_id so each agent sees only its own work.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-			mcp.WithString("plan_id",
-				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
-			),
-		),
-		s.handleGetMyTasks,
-	)
-
-	// link_task_nodes
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"link_task_nodes",
-			mcp.WithDescription(
-				"Explicitly links a task to graph node IDs. "+
-					"Linked nodes get a relevance boost when get_context is called with task_id=. "+
-					"Replaces any existing links for the task.",
-			),
-			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID to link nodes to."),
-			),
-			mcp.WithString("node_ids",
-				mcp.Required(),
-				mcp.Description("JSON array of node ID strings, e.g. [\"repo::pkg/auth.go::AuthService\"]."),
-			),
-		),
-		s.handleLinkTaskNodes,
-	)
-
-	// get_agents
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_agents",
-			mcp.WithDescription(
-				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
-					"Useful for understanding who else is working in this repository.",
-			),
-		),
-		s.handleGetAgents,
-	)
-
-	// claim_work
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"claim_work",
-			mcp.WithDescription(
-				"Registers active work on a file, package, directory, or entity. "+
-					"Returns any conflicting claims by other agents immediately. "+
-					"Call before editing to coordinate with other agents. "+
-					"Claims expire automatically after ttl_minutes (default 30).",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-			mcp.WithString("scope",
-				mcp.Required(),
-				mcp.Description("Path or entity being claimed, e.g. 'internal/auth' or 'cmd/server/main.go'."),
-			),
-			mcp.WithString("scope_type",
-				mcp.Description("Type of scope: 'file', 'package', 'directory', 'entity'. Defaults to 'path'."),
-			),
-			mcp.WithNumber("ttl_minutes",
-				mcp.Description("How long to hold the claim in minutes. Defaults to 30."),
-			),
-		),
-		s.handleClaimWork,
-	)
-
-	// release_claims
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"release_claims",
-			mcp.WithDescription(
-				"Releases all active work claims for the given agent. "+
-					"Call this when done editing to immediately free scopes for other agents.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-		),
-		s.handleReleaseClaims,
-	)
-
-	// get_conflicts
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_conflicts",
-			mcp.WithDescription(
-				"Returns all work claims by other agents that overlap with the calling agent's current claims. "+
-					"Check this before starting large edits if you are working in a multi-agent environment.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent's self-declared identifier."),
-			),
-		),
-		s.handleGetConflicts,
-	)
-
-	// get_events
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_events",
-			mcp.WithDescription(
-				"Returns recent events from the pull-based event log: file_change, task_update, "+
-					"annotation_added, agent_activity. Poll with since_seq cursor (from session_init "+
-					"or the previous call's latest_seq) to get only new events.",
-			),
-			mcp.WithNumber("since_seq",
-				mcp.Description("Return events with seq greater than this value. Use 0 for all recent events."),
-			),
-			mcp.WithString("types",
-				mcp.Description("Comma-separated list of event types to filter by, e.g. 'file_change,task_update'. Omit for all types."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum events to return. Defaults to 50."),
-			),
-		),
-		s.handleGetEvents,
-	)
+	// Sprint 24: get_agents, get_events, send_message, get_messages removed.
+	// Cross-session awareness is now handled by the Work Ledger (ambient coordination).
 
 	// ── Rule Management Tools ────────────────────────────────────────────────
 
-	// upsert_rule
-	s.mcp.AddTool(
+	// rules (merges upsert_rule, delete_rule, get_rule_candidates, upsert_adr, get_adrs)
+	s.addOrDefer(
 		mcp.NewTool(
-			"upsert_rule",
+			"rules",
 			mcp.WithDescription(
-				"Create or update a dynamic architectural rule. "+
-					"Persisted to SQLite and active immediately — no daemon restart required. "+
-					"Subsequent validate_plan and get_violations calls enforce it. "+
-					"Use this when you detect a pattern that should be formalised as a constraint.",
+				"Unified rule and ADR management. action='upsert': create/update architectural rule. "+
+					"action='delete': remove rule. action='candidates': failure episodes not yet promoted. "+
+					"action='upsert_adr': create/update ADR. action='list_adrs': query ADRs.",
 			),
-			mcp.WithString("rule_id",
+			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("Unique identifier for the rule, e.g. 'no-db-in-handler'. Used to update an existing rule."),
+				mcp.Description("'upsert', 'delete', 'candidates', 'upsert_adr', 'list_adrs'."),
+			),
+			// upsert params
+			mcp.WithString("rule_id",
+				mcp.Description("Rule ID. Required for action=upsert/delete."),
 			),
 			mcp.WithString("description",
-				mcp.Required(),
-				mcp.Description("Human-readable explanation of what this rule prevents and why."),
+				mcp.Description("Rule/gap description. Required for action=upsert."),
 			),
 			mcp.WithString("severity",
-				mcp.Required(),
-				mcp.Description("'error' or 'warning'."),
+				mcp.Description("'error' or 'warning'. Required for action=upsert."),
 			),
 			mcp.WithString("edge_type",
-				mcp.Description("Edge type to forbid: CALLS, IMPORTS, IMPLEMENTS, etc. Empty = any edge type."),
+				mcp.Description("Edge type to forbid. action=upsert."),
 			),
 			mcp.WithString("from_file_pattern",
-				mcp.Description("Glob matched against the base name of the source file, e.g. '*/handlers/*'."),
+				mcp.Description("Source file glob. action=upsert."),
 			),
 			mcp.WithString("to_file_pattern",
-				mcp.Description("Glob matched against the base name of the target file, e.g. '*/db/*'."),
+				mcp.Description("Target file glob. action=upsert."),
 			),
 			mcp.WithString("to_name_pattern",
-				mcp.Description("Substring that must appear in the target entity name."),
+				mcp.Description("Target entity name substring. action=upsert."),
+			),
+			mcp.WithString("path_pattern",
+				mcp.Description("Comma-separated edge sequence for multi-hop checks. action=upsert."),
+			),
+			mcp.WithString("context_source",
+				mcp.Description("Provenance. Rejects 'external'/'generated'. action=upsert."),
+			),
+			// upsert_adr params
+			mcp.WithString("id",
+				mcp.Description("ADR ID (kebab-case). Required for action=upsert_adr."),
+			),
+			mcp.WithString("title",
+				mcp.Description("ADR title. Required for action=upsert_adr."),
+			),
+			mcp.WithString("decision",
+				mcp.Description("The decision made. Required for action=upsert_adr."),
+			),
+			mcp.WithString("status",
+				mcp.Description("proposed|accepted|deprecated|superseded. action=upsert_adr."),
+			),
+			mcp.WithString("context",
+				mcp.Description("Problem context. action=upsert_adr."),
+			),
+			mcp.WithString("consequences",
+				mcp.Description("Trade-offs. action=upsert_adr."),
+			),
+			mcp.WithArray("linked_files",
+				mcp.Description("File patterns for ADR. action=upsert_adr."),
+				mcp.Items(map[string]any{"type": "string"}),
+			),
+			// list_adrs params
+			mcp.WithString("file",
+				mcp.Description("File path to filter ADRs. action=list_adrs."),
 			),
 		),
-		s.handleUpsertRule,
+		s.handleRulesDispatch,
 	)
 
 	// ── Session Awareness Tools ──────────────────────────────────────────────
 
-	// get_working_state
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_working_state",
-			mcp.WithDescription(
-				"Returns recent file changes detected by the file watcher, answering "+
-					"'what was the developer just working on?' "+
-					"Also includes a git diff stat for the current working tree. "+
-					"Call this at session start to orient yourself to recent activity.",
-			),
-			mcp.WithNumber("window_minutes",
-				mcp.Description("Look-back window in minutes. Defaults to 15."),
-			),
-		),
-		s.handleGetWorkingState,
-	)
+	// Sprint 24: get_working_state absorbed into session_init.
 
-	// ── Web Tools (requires synapses-scout sidecar) ──────────────────────────
+	// ── Web Tools ─────────────────────────────────────────────────────────────
 
-	// web_search
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_search",
-			mcp.WithDescription(
-				"Searches the web via the synapses-scout sidecar and returns structured results. "+
-					"Use this to find framework docs, API references, error solutions, or any "+
-					"information that requires real-time data. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("The search query."),
-			),
-			mcp.WithNumber("max_results",
-				mcp.Description("Maximum results to return. Default 5."),
-			),
-			mcp.WithString("region",
-				mcp.Description("Optional region code for localised results, e.g. 'us-en'."),
-			),
-			mcp.WithString("timelimit",
-				mcp.Description("Optional time limit, e.g. 'd' (day), 'w' (week), 'm' (month)."),
-			),
-		),
-		s.handleWebSearch,
-	)
-
-	// web_fetch
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_fetch",
-			mcp.WithDescription(
-				"Fetches and extracts a URL (or performs a search if given a query) via "+
-					"synapses-scout, returning the content as Markdown. "+
-					"Use this to read documentation pages, GitHub READMEs, or any web content "+
-					"that an agent needs to reason about. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
-			),
-			mcp.WithString("input",
-				mcp.Required(),
-				mcp.Description("A URL to fetch or a plain-text search query (scout auto-routes)."),
-			),
-			mcp.WithBoolean("force_refresh",
-				mcp.Description("When true, bypasses the scout cache and re-fetches. Default false."),
-			),
-		),
-		s.handleWebFetch,
-	)
-
-	// web_annotate
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_annotate",
-			mcp.WithDescription(
-				"Persists web findings as a graph node annotation so they survive across sessions "+
-					"and appear in get_context for that node. "+
-					"This is the 'context sharing' pattern: web research becomes a first-class "+
-					"data object attached to a code entity, visible to all future agent sessions. "+
-					"Pass hits (JSON array from web_search) or a plain note string, or both.",
-			),
-			mcp.WithString("node_id",
-				mcp.Required(),
-				mcp.Description("The node ID to annotate (from find_entity or get_context)."),
-			),
-			mcp.WithString("note",
-				mcp.Description("Plain-text note summarising what was found. Used as-is or prepended to hits."),
-			),
-			mcp.WithString("hits",
-				mcp.Description("JSON array of search hits from web_search, e.g. [{\"title\":\"...\",\"url\":\"...\",\"snippet\":\"...\"}]."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier for attribution."),
-			),
-		),
-		s.handleWebAnnotate,
-	)
-
-	// web_deep_search
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"web_deep_search",
-			mcp.WithDescription(
-				"Performs an orchestrated multi-query search via synapses-scout: expands the "+
-					"original query into sub-queries, fans out searches, deduplicates, and returns "+
-					"a richer result set than web_search. Use this for research tasks where "+
-					"a single query is unlikely to capture all relevant results. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("The research query to expand and search."),
-			),
-			mcp.WithNumber("max_results",
-				mcp.Description("Maximum deduplicated results to return. Default 10."),
-			),
-			mcp.WithString("region",
-				mcp.Description("Optional region code for localised results, e.g. 'us-en'."),
-			),
-			mcp.WithString("timelimit",
-				mcp.Description("Optional time limit, e.g. 'd' (day), 'w' (week), 'm' (month)."),
-			),
-		),
-		s.handleWebDeepSearch,
-	)
+	// Sprint 25: web_annotate absorbed into annotate(action="add_web").
 
 	// lookup_docs
-	s.mcp.AddTool(
+	s.addOrDefer(
 		mcp.NewTool(
 			"lookup_docs",
 			mcp.WithDescription(
-				"One-shot documentation lookup: searches the web and fetches the top result in a "+
-					"single call. Use this BEFORE writing code that uses external packages or APIs "+
-					"to verify you have the current API — training data may be outdated. "+
-					"Faster than calling web_search then web_fetch separately. "+
-					"Requires scout.url in synapses.json (default: http://localhost:11436).",
+				"Returns cached Go package documentation or arbitrary URL content from the "+
+					"local Synapses doc cache. Package docs are version-pinned from go.mod and "+
+					"never expire — re-fetched only when go.mod changes. URL content is cached "+
+					"for 24 hours. Use this to verify API signatures before writing code. "+
+					"Provide exactly one of: package=, url=, or entity=.",
 			),
-			mcp.WithString("query",
-				mcp.Required(),
+			mcp.WithString("package",
 				mcp.Description(
-					"What to look up. Include the package name, topic, and language for best results. "+
-						"Examples: 'openai python chat completions API', 'react hooks useState', "+
-						"'docker compose v2 CLI flags', 'langchain LCEL chain syntax'.",
+					"Go import path to look up, e.g. 'github.com/mark3labs/mcp-go'. "+
+						"Returns docs at the version pinned in go.mod.",
 				),
 			),
-			mcp.WithNumber("max_chars",
-				mcp.Description("Maximum characters of page content to return. Default 6000 (~1500 tokens)."),
+			mcp.WithString("url",
+				mcp.Description("Arbitrary URL to fetch and cache (24h TTL)."),
+			),
+			mcp.WithString("entity",
+				mcp.Description(
+					"Code entity name (function, struct, file). Returns docs for all external "+
+						"packages imported by that entity.",
+				),
 			),
 		),
 		s.handleLookupDocs,
 	)
 
-	// upsert_adr
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"upsert_adr",
-			mcp.WithDescription(
-				"Creates or updates an Architectural Decision Record (ADR) in the brain. "+
-					"ADRs are persistent cold-memory entries for significant design choices — "+
-					"they appear in get_context compact output when linked_files match the entity's file. "+
-					"Requires brain.url to be configured in synapses.json.",
-			),
-			mcp.WithString("id",
-				mcp.Required(),
-				mcp.Description("Unique identifier for the ADR, e.g. 'adr-001-no-cgo'. Use kebab-case."),
-			),
-			mcp.WithString("title",
-				mcp.Required(),
-				mcp.Description("Short, declarative title of the decision, e.g. 'No CGo — use modernc/sqlite'."),
-			),
-			mcp.WithString("decision",
-				mcp.Required(),
-				mcp.Description("The decision made, in 1-3 sentences."),
-			),
-			mcp.WithString("status",
-				mcp.Description("One of: proposed, accepted, deprecated, superseded. Defaults to 'proposed'."),
-			),
-			mcp.WithString("context",
-				mcp.Description("Problem context and forces that led to this decision."),
-			),
-			mcp.WithString("consequences",
-				mcp.Description("Consequences and trade-offs of this decision."),
-			),
-			mcp.WithArray("linked_files",
-				mcp.Description("File path patterns to associate with this ADR (e.g. [\"internal/auth/\", \"cmd/server.go\"]). Used by get_adrs(file=) to surface relevant ADRs for a given file."),
-				mcp.Items(map[string]any{"type": "string"}),
-			),
-		),
-		s.handleUpsertADR,
-	)
+	// Sprint 25: upsert_adr absorbed into rules(action="upsert_adr").
 
-	// prepare_context — intent-based context assembly (replaces multi-tool chains).
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"prepare_context",
-			mcp.WithDescription(
-				"Intent-based context assembly. Declare WHAT you need and a target; "+
-					"Synapses composes the right context in one round-trip. "+
-					"Replaces chains like get_context→get_impact→get_violations.\n"+
-					"Intents: 'modify' (safe-edit briefing), 'understand' (structure), "+
-					"'review' (quality/risk), 'debug' (call-path trace), "+
-					"'add' (conventions for new code), 'plan' (dry-run scope assessment).",
-			),
-			mcp.WithString("intent",
-				mcp.Required(),
-				mcp.Description("'modify' | 'understand' | 'review' | 'debug' | 'add' | 'plan'"),
-			),
-			mcp.WithString("target",
-				mcp.Required(),
-				mcp.Description("Entity name, file path suffix, or search query."),
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to disambiguate entity names."),
-			),
-			mcp.WithString("task_id",
-				mcp.Description("Optional task ID for relevance boosting."),
-			),
-			mcp.WithNumber("token_budget",
-				mcp.Description("Max tokens for the response. Defaults vary by intent (1500–3500)."),
-			),
-		),
-		s.handlePrepareContext,
-	)
+	// Sprint 25: prepare_context absorbed into get_context(mode="intent").
 
 	// ── Agent Message Bus ────────────────────────────────────────────────────
-	// Phase 1: direct + broadcast messaging between ephemeral agent sessions.
-	// Transport: SQLite (not HTTP) — agents are ephemeral, need a broker.
-	// Semantics: A2A-lite (topic-based, task-linked payloads, lifecycle: unread→read).
+	// Sprint 24: send_message, get_messages removed — replaced by Work Ledger.
 
-	// send_message
-	s.mcp.AddTool(
+	// memory (merges remember, recall, get_episodes)
+	s.addOrDefer(
 		mcp.NewTool(
-			"send_message",
+			"memory",
 			mcp.WithDescription(
-				"Sends a message from one agent to another, or broadcasts it to all agents. "+
-					"Use this to notify peers about API changes, task blockers, or plan updates. "+
-					"to_agent omitted = broadcast. payload must be valid JSON.",
+				"Unified episodic memory. action='save': record a decision/failure episode. "+
+					"action='search': FTS5/semantic search across memories (with query) or chronological browse (without). "+
+					"action='list': chronological episode browser with filters.",
 			),
-			mcp.WithString("from_agent",
+			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("Self-declared sender identity (e.g. 'backend-claude')."),
+				mcp.Description("'save', 'search', or 'list'."),
 			),
-			mcp.WithString("topic",
-				mcp.Required(),
-				mcp.Description("Message topic, e.g. 'api_changed', 'task_blocked', 'plan_updated'."),
-			),
-			mcp.WithString("payload",
-				mcp.Description("JSON payload with message details. Defaults to '{}'. Example: '{\"endpoint\":\"/api/users\",\"change\":\"added role field\"}'."),
-			),
-			mcp.WithString("to_agent",
-				mcp.Description("Target agent ID. Omit (or leave empty) to broadcast to all agents."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Optional repo context identifier (e.g. 'my-backend'). Used for cross-project coordination."),
-			),
-		),
-		s.handleSendMessage,
-	)
-
-	// get_messages
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_messages",
-			mcp.WithDescription(
-				"Retrieves messages from the agent message bus visible to the calling agent. "+
-					"Includes direct messages and broadcasts (to_agent omitted). "+
-					"Use since_seq cursor for efficient polling. unread_only=true by default.",
-			),
+			// action=save params
 			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The calling agent's ID. Only messages addressed to this agent or broadcast are returned."),
-			),
-			mcp.WithNumber("since_seq",
-				mcp.Description("Return messages with seq greater than this value. Use 0 or omit for all. Use latest_seq from previous call as cursor."),
-			),
-			mcp.WithString("topic_filter",
-				mcp.Description("Optional. Only return messages with this exact topic (e.g. 'api_changed')."),
-			),
-			mcp.WithString("unread_only",
-				mcp.Description("If 'true' (default), only return unread messages. Pass 'false' to retrieve all messages including already-read ones."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum messages to return. Defaults to 50."),
-			),
-		),
-		s.handleGetMessages,
-	)
-
-	// mark_read
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"mark_read",
-			mcp.WithDescription(
-				"Marks a message as read by the calling agent. "+
-					"Idempotent — calling it on an already-read message is safe. "+
-					"Call this after processing a message so it no longer appears in get_messages(unread_only=true).",
-			),
-			mcp.WithString("message_id",
-				mcp.Required(),
-				mcp.Description("The message ID to mark as read (from get_messages response)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent marking the message as read."),
-			),
-		),
-		s.handleMarkRead,
-	)
-
-	// remember
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"remember",
-			mcp.WithDescription(
-				"Records a decision or failure as an episode in persistent memory. "+
-					"Use episode_type='failure' + outcome='failure' to populate the Hall of Shame "+
-					"so check_plan_safety() can warn future agents. "+
-					"Use episode_type='decision' for general architectural choices.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("Self-declared agent identifier (e.g. 'claude-code-session-1')."),
+				mcp.Description("Agent identifier. Required for action=save."),
 			),
 			mcp.WithString("decision",
-				mcp.Required(),
-				mcp.Description("The decision made or failure observed. Concise, 1-2 sentences."),
+				mcp.Description("Decision or failure text. Required for action=save."),
 			),
 			mcp.WithString("episode_type",
-				mcp.Description("One of: decision (default), failure, pattern, rule_proposal."),
+				mcp.Description("decision (default), failure, pattern, rule_proposal."),
 			),
 			mcp.WithString("outcome",
-				mcp.Description("One of: success, failure, partial, unknown (default)."),
+				mcp.Description("success, failure, partial, unknown (default). action=save."),
 			),
 			mcp.WithString("rationale",
-				mcp.Description("Why this decision was made or why it failed (1-3 sentences)."),
+				mcp.Description("Why this decision was made. action=save."),
 			),
 			mcp.WithString("trigger",
-				mcp.Description("What prompted this episode, e.g. 'modifying auth_handler.go'."),
+				mcp.Description("What prompted this episode. action=save."),
 			),
 			mcp.WithString("affected_files",
-				mcp.Description("JSON array of file paths involved, e.g. '[\"cmd/server/main.go\"]'."),
+				mcp.Description("JSON array of file paths. action=save."),
 			),
 			mcp.WithString("affected_nodes",
-				mcp.Description("JSON array of graph node IDs involved (from find_entity or get_context)."),
+				mcp.Description("JSON array of graph node IDs for scope. action=save."),
 			),
 			mcp.WithString("tags",
-				mcp.Description("JSON array of tags for filtering, e.g. '[\"auth\",\"breaking\"]'."),
+				mcp.Description("JSON array of tags (save) or comma-separated (search/list)."),
 			),
 			mcp.WithString("project_id",
-				mcp.Description("Repo context (leave empty to use current project)."),
+				mcp.Description("Repo context filter."),
 			),
-		),
-		s.handleRemember,
-	)
-
-	// recall
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"recall",
-			mcp.WithDescription(
-				"Searches episodic memory using FTS5 BM25 for episodes matching the query. "+
-					"Returns the top-N most relevant episodes (best match first). "+
-					"Also surfaces any dynamic_rules that were derived from similar past failures. "+
-					"Use this before starting work on a component you haven't touched recently.",
+			mcp.WithString("anchor_nodes",
+				mcp.Description("JSON array of node IDs for staleness tracking. action=save."),
 			),
+			mcp.WithString("memory_importance",
+				mcp.Description("Importance level: 'pinned' or float string. action=save. Default '1.0'."),
+			),
+			// action=search params
 			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Natural language search query, e.g. 'auth handler redirect loop'."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Filter to episodes for this project (empty = all projects)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Filter to episodes recorded by this agent (empty = all agents)."),
-			),
-			mcp.WithString("episode_type",
-				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
+				mcp.Description("Search query. Omit for chronological browse. action=search."),
 			),
 			mcp.WithString("outcome_filter",
-				mcp.Description("Filter by outcome: success, failure, partial, unknown (empty = all)."),
+				mcp.Description("Filter by outcome. action=search only."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Max results. Default 5 (search), 20 (list/browse)."),
+			),
+			mcp.WithBoolean("include_stale",
+				mcp.Description("Include invalidated memories. Default false. action=search."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated federation aliases for cross-project search."),
+			),
+			mcp.WithString("as_of",
+				mcp.Description("Point-in-time query (RFC3339). action=search."),
+			),
+			mcp.WithString("since",
+				mcp.Description("Lower time bound (RFC3339). action=search."),
+			),
+			mcp.WithString("until",
+				mcp.Description("Upper time bound (RFC3339). action=search."),
+			),
+			mcp.WithNumber("depth",
+				mcp.Description("Graph traversal depth (default 2, max 4). action=search."),
+			),
+			// action=list params
+			mcp.WithNumber("since_days",
+				mcp.Description("Only episodes from last N days. action=list."),
 			),
 		),
-		s.handleRecall,
+		s.handleMemoryDispatch,
 	)
 
-	// get_episodes
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_episodes",
-			mcp.WithDescription(
-				"Lists recent episodes without search, ordered by creation time (newest first). "+
-					"Use recall() for semantic search. Use this to browse recent decisions or failures.",
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Filter to this project (empty = all)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Filter to this agent (empty = all)."),
-			),
-			mcp.WithString("episode_type",
-				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
-			),
-			mcp.WithString("tags",
-				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'."),
-			),
-		),
-		s.handleGetEpisodes,
-	)
+	// Sprint 25: check_plan_safety absorbed into validate(phase="safety").
 
-	// check_plan_safety
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"check_plan_safety",
-			mcp.WithDescription(
-				"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
-					"Returns a Recovery Packet if a similar past failure is found — the agent decides relevance. "+
-					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout. "+
-					"Call this BEFORE validate_plan() when touching sensitive components.",
-			),
-			mcp.WithString("plan_description",
-				mcp.Required(),
-				mcp.Description("Natural language description of what you plan to do, e.g. 'modify auth_provider.dart login flow without fallback'."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Self-declared agent identifier (used to record the interjection event)."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Repo context for scoping the failure search (empty = all projects)."),
-			),
-		),
-		s.handleCheckPlanSafety,
-	)
+	// Sprint 25: get_rule_candidates absorbed into rules(action="candidates").
+	// Sprint 25: get_adrs absorbed into rules(action="list_adrs").
 
-	// get_rule_candidates
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_rule_candidates",
-			mcp.WithDescription(
-				"Returns failure episodes that have appeared ≥N times and have not yet been promoted to a dynamic_rule. "+
-					"Use this to close the feedback loop: review candidates, call upsert_rule() to enforce the pattern, "+
-					"then call mark_episode_promoted() to mark the episode as promoted.",
-			),
-		),
-		s.handleGetRuleCandidates,
-	)
+	// Sprint 24: get_decision_log moved to MCP Resource synapses://decision-log
 
-	// get_adrs
-	s.mcp.AddTool(
-		mcp.NewTool(
-			"get_adrs",
-			mcp.WithDescription(
-				"Returns Architectural Decision Records (ADRs) from the brain. "+
-					"ADRs are persistent cold-memory entries for significant design choices. "+
-					"When a file param is provided, returns only accepted ADRs whose linked_files patterns match. "+
-					"Requires brain.url to be configured in synapses.json.",
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to filter ADRs by linked_files patterns. Returns only accepted ADRs that match."),
-			),
-		),
-		s.handleGetADRs,
-	)
+	// Sprint 24: set_sdlc_phase, set_quality_mode absorbed into session_init params.
 
+	// Sprint 25: plan_context absorbed into validate(phase="full").
+
+	// ── Graph Query ─────────────────────────────────────────────────────────
+
+	// Sprint 24: query_graph moved to MCP Resource synapses://query/{q}
+
+	// ── Knowledge Export ─────────────────────────────────────────────────────
+
+	// Sprint 24: export_knowledge, benchmark removed from MCP tools.
+	// rank_candidates: REST-only (not in tools/list) — called by RepoBench-R benchmark binary.
+	s.toolHandlersMu.Lock()
+	s.toolHandlers["rank_candidates"] = s.handleRankCandidates
+	s.toolHandlers["benchmark"] = s.handleBenchmark
+	s.toolHandlersMu.Unlock()
 }

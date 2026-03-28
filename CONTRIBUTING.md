@@ -4,7 +4,7 @@ Thank you for your interest in contributing to Synapses! We welcome pull request
 
 ## Prerequisites
 
-- **Go 1.21+** — Download from [golang.org](https://golang.org/dl)
+- **Go 1.22+** — Download from [golang.org](https://golang.org/dl)
 - **make** — Standard build tool
 - **golangci-lint** — Linter (v2.10+): `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`
 
@@ -40,6 +40,36 @@ All PRs must pass linting. Run these before pushing:
 make fmt && make vet && make lint && make test
 ```
 
+## Project Structure
+
+```
+synapses/
+├── cmd/synapses/                       # Binary entry point — CLI commands, daemon, proxy
+│   ├── main.go                         # Command dispatch
+│   ├── daemon_serve.go                 # Singleton daemon + HTTP server (port 11435)
+│   ├── daemon.go                       # Service install/uninstall (launchd/systemd)
+│   ├── registry.go                     # Project registry (singleflight, in-memory)
+│   ├── projects.go                     # Project persistence (~/.synapses/projects.json)
+│   ├── proxy.go                        # Stdio proxy (bridges agent ↔ daemon via Unix socket)
+│   ├── init.go                         # `synapses init` — interactive setup wizard
+│   ├── socket_activation_darwin.go     # launchd socket activation (pure Go, no cgo)
+│   ├── socket_activation_linux.go      # systemd socket activation
+│   ├── socket_activation_other.go      # Fallback (no-op) for unsupported platforms
+│   └── selfupdate.go                   # Self-update logic (GitHub Releases)
+├── internal/
+│   ├── brain/          # In-process LLM layer (Ollama / local GGUF)
+│   ├── graph/          # In-memory code graph (nodes, edges, BFS)
+│   ├── mcp/            # MCP server — tool registration and handlers
+│   │   ├── server.go       # Server constructor, hooks, tool registration
+│   │   ├── rate_limiter.go # Agent-scoped token bucket rate limiting
+│   │   └── loop_guard.go   # Suffix cycle detection (catches A-B-A-B patterns)
+│   ├── parser/         # 49+ language parsers (tree-sitter)
+│   ├── store/          # SQLite persistence (graph, episodic memory, tasks)
+│   ├── embed/          # ONNX embedding model (all-MiniLM-L6-v2)
+│   ├── scout/          # HTTP client for synapses-scout sidecar
+│   └── watcher/        # fsnotify-based incremental re-indexer
+```
+
 ## Architecture Guidelines
 
 These principles guide all contributions:
@@ -62,6 +92,15 @@ if err := client.Call(); err != nil {
 **No Circular Imports** — Use `interface{}` fields to decouple. Example: `mcp.Server` uses `interface{}` for brain/scout to avoid import cycles.
 
 **Columnar Index** — The `GraphIndex` is built asynchronously. BFS falls back to pointer-based navigation until ready. See `internal/graph/index.go`.
+
+**Daemon Reliability** — The singleton daemon serves ALL projects. A crash affects every connected agent. Follow these rules:
+
+- **Never panic in tool handlers.** Return `mcp.NewToolResultError(msg)` instead. mcp-go's `WithRecovery()` is enabled as a safety net, but it's a fallback, not a strategy.
+- **Use `defer recover()` in HTTP handlers.** The `/mcp` route already has this. If you add new routes that can call into project-specific code, wrap them the same way.
+- **Socket activation is the production path.** The daemon detects launchd/systemd activated sockets at startup. If you change the listener setup in `daemon_serve.go`, preserve the `trySocketActivation()` → `net.Listen()` fallback chain.
+- **Persist project registrations.** Call `go saveKnownProject(absPath)` after any successful `GetOrSet` that initializes a project. This enables eager warming on next daemon restart.
+- **Rate limits are agent-scoped.** Buckets are keyed by `agent_id:project_id`, not MCP session ID. Don't assume a new session means a new rate limit budget.
+- **Loop guard detects cycles.** The suffix cycle detection algorithm catches patterns of any length (1-10). If you modify `loop_guard.go`, run `TestLoopGuardSession_cycleDetection` to verify alternating patterns are still caught.
 
 ## Adding a New MCP Tool
 

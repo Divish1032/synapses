@@ -2,6 +2,10 @@
 // from an Ollama-compatible or OpenAI-compatible HTTP endpoint.
 // A nil *Client is safe — all methods return (nil, nil) so callers can use
 // the zero value without checking for configuration.
+//
+// Supported endpoint formats (auto-detected from URL):
+//   - OpenAI (/v1/embeddings) — batch-capable, request {"model":...,"input":...}
+//   - Ollama (/api/embeddings) — serial-only, request {"model":...,"prompt":...}
 package embed
 
 import (
@@ -9,62 +13,72 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
 )
 
+// HTTPDoer is the interface for making HTTP requests.
+// *http.Client satisfies this interface. Expose it so callers can inject
+// custom transports (retry, tracing, rate-limiting) or test doubles without
+// needing a real network. This is the same pattern used by AWS SDK v2,
+// google-cloud-go, and stripe-go.
+type HTTPDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
 // Client calls an embedding endpoint to convert text into float32 vectors.
-// Supports three formats, auto-detected from the endpoint URL:
-//   - Brain  (/v1/embed)        — synapses-intelligence native (Ollama-free)
-//   - OpenAI (/v1/embeddings)   — OpenAI-compatible
-//   - Ollama (/api/embeddings)  — Ollama native
+// Supports two formats, auto-detected from the endpoint URL:
+//   - OpenAI (/v1/embeddings)   — OpenAI-compatible, supports batch
+//   - Ollama (/api/embeddings)  — Ollama native, serial-only
 //
 // A nil Client is safe to use — Embed returns (nil, nil).
 type Client struct {
-	endpoint string
-	model    string
-	http     *http.Client
+	endpoint   string
+	model      string
+	httpClient HTTPDoer
+}
+
+// Option is a functional option for Client construction.
+type Option func(*Client)
+
+// WithHTTPDoer replaces the default *http.Client with a custom HTTPDoer.
+// Use this to inject retry wrappers, custom transports, or test doubles.
+//
+//	// Production: add tracing
+//	embed.NewClient(url, model, embed.WithHTTPDoer(tracedClient))
+//
+//	// Tests: inject a mock without needing a real HTTP server
+//	embed.NewClient(url, model, embed.WithHTTPDoer(myMock))
+func WithHTTPDoer(d HTTPDoer) Option {
+	return func(c *Client) { c.httpClient = d }
 }
 
 // NewClient creates a Client for the given endpoint. Returns nil if endpoint
 // is empty (embedding disabled). model defaults to "nomic-embed-text" when
 // empty, which produces 768-dimensional vectors and is available in Ollama
 // without any extra setup.
-func NewClient(endpoint, model string) *Client {
+func NewClient(endpoint, model string, opts ...Option) *Client {
 	if endpoint == "" {
 		return nil
 	}
 	if model == "" {
 		model = "nomic-embed-text"
 	}
-	return &Client{
-		endpoint: endpoint,
-		model:    model,
-		http:     &http.Client{Timeout: 10 * time.Second},
+	c := &Client{
+		endpoint:   endpoint,
+		model:      model,
+		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
-}
-
-// NewBrainClient creates a Client that calls synapses-intelligence's native
-// POST /v1/embed endpoint. This requires no Ollama — embeddings are generated
-// by a llama-server subprocess managed by the brain sidecar.
-//
-// brainURL is the base URL of the brain server, e.g. "http://localhost:11435".
-// Returns nil if brainURL is empty.
-func NewBrainClient(brainURL string) *Client {
-	if brainURL == "" {
-		return nil
+	for _, o := range opts {
+		o(c)
 	}
-	return &Client{
-		endpoint: strings.TrimRight(brainURL, "/") + "/v1/embed",
-		model:    "nomic-embed-text-v1.5.Q4_K_M",
-		http:     &http.Client{Timeout: 10 * time.Second},
-	}
+	return c
 }
 
 // Embed returns a vector embedding for text.
 // The format is auto-detected from the endpoint URL:
-//   - "/v1/embed"       → Brain format  (synapses-intelligence native)
 //   - "/v1/embeddings"  → OpenAI format
 //   - otherwise         → Ollama format
 //
@@ -74,18 +88,13 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		return nil, nil
 	}
 
-	isBrain := strings.HasSuffix(c.endpoint, "/v1/embed")
-	isOpenAI := !isBrain && strings.Contains(c.endpoint, "/v1/embeddings")
+	isOpenAI := strings.Contains(c.endpoint, "/v1/embeddings")
 
 	var bodyMap map[string]interface{}
-	switch {
-	case isBrain:
-		// Brain format: {"input": "text"}
-		bodyMap = map[string]interface{}{"input": text}
-	case isOpenAI:
+	if isOpenAI {
 		// OpenAI format: {"model": "...", "input": "text"}
 		bodyMap = map[string]interface{}{"model": c.model, "input": text}
-	default:
+	} else {
 		// Ollama format: {"model": "...", "prompt": "text"}
 		bodyMap = map[string]interface{}{"model": c.model, "prompt": text}
 	}
@@ -101,7 +110,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("embed request: %w", err)
 	}
@@ -123,10 +132,14 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 		if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
 			return nil, fmt.Errorf("empty embedding from endpoint")
 		}
-		return out.Data[0].Embedding, nil
+		normed := normalizeL2(out.Data[0].Embedding)
+		if normed == nil {
+			return nil, fmt.Errorf("embedding contains NaN/Inf values")
+		}
+		return normed, nil
 	}
 
-	// Brain format and Ollama format both use {"embedding": [float, ...]}
+	// Ollama format: {"embedding": [float, ...]}
 	var out struct {
 		Embedding []float32 `json:"embedding"`
 	}
@@ -136,11 +149,15 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if len(out.Embedding) == 0 {
 		return nil, fmt.Errorf("empty embedding from endpoint")
 	}
-	return out.Embedding, nil
+	normed := normalizeL2(out.Embedding)
+	if normed == nil {
+		return nil, fmt.Errorf("embedding contains NaN/Inf values")
+	}
+	return normed, nil
 }
 
 // EmbedBatch returns vector embeddings for a batch of texts in one HTTP round-trip.
-// Supports Brain batch format ({"input": [...]}) and OpenAI batch format.
+// Supports OpenAI batch format ({"model":...,"input":[...]}).
 // Ollama does not support batch — falls back to serial Embed() calls.
 // Returns (nil, nil) if the client is nil or texts is empty.
 func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
@@ -148,20 +165,14 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		return nil, nil
 	}
 
-	isBrain := strings.HasSuffix(c.endpoint, "/v1/embed")
-	isOpenAI := !isBrain && strings.Contains(c.endpoint, "/v1/embeddings")
+	isOpenAI := strings.Contains(c.endpoint, "/v1/embeddings")
 
-	if !isBrain && !isOpenAI {
+	if !isOpenAI {
 		// Ollama doesn't support batch — fall back to serial.
 		return c.embedSerial(ctx, texts)
 	}
 
-	var bodyMap map[string]interface{}
-	if isBrain {
-		bodyMap = map[string]interface{}{"input": texts}
-	} else {
-		bodyMap = map[string]interface{}{"model": c.model, "input": texts}
-	}
+	bodyMap := map[string]interface{}{"model": c.model, "input": texts}
 
 	body, err := json.Marshal(bodyMap)
 	if err != nil {
@@ -174,7 +185,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("embed batch request: %w", err)
 	}
@@ -184,36 +195,27 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		return nil, fmt.Errorf("embed batch endpoint returned %d", resp.StatusCode)
 	}
 
-	if isOpenAI {
-		var out struct {
-			Data []struct {
-				Embedding []float32 `json:"embedding"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return nil, fmt.Errorf("decode batch embed response: %w", err)
-		}
-		if len(out.Data) != len(texts) {
-			return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Data), len(texts))
-		}
-		vecs := make([][]float32, len(out.Data))
-		for i, d := range out.Data {
-			vecs[i] = d.Embedding
-		}
-		return vecs, nil
-	}
-
-	// Brain format: {"embeddings": [[...], ...]}
+	// OpenAI batch format: {"data": [{"embedding": [...]}, ...]}
 	var out struct {
-		Embeddings [][]float32 `json:"embeddings"`
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode batch embed response: %w", err)
 	}
-	if len(out.Embeddings) != len(texts) {
-		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Embeddings), len(texts))
+	if len(out.Data) != len(texts) {
+		return nil, fmt.Errorf("batch response length mismatch: got %d, want %d", len(out.Data), len(texts))
 	}
-	return out.Embeddings, nil
+	vecs := make([][]float32, len(out.Data))
+	for i, d := range out.Data {
+		normed := normalizeL2(d.Embedding)
+		if normed == nil {
+			return nil, fmt.Errorf("batch embedding[%d] contains NaN/Inf values", i)
+		}
+		vecs[i] = normed
+	}
+	return vecs, nil
 }
 
 // embedSerial falls back to individual Embed() calls for endpoints that don't
@@ -230,18 +232,45 @@ func (c *Client) embedSerial(ctx context.Context, texts []string) ([][]float32, 
 	return vecs, nil
 }
 
+// normalizeL2 returns a unit-length copy of v. Returns v unchanged if already
+// normalized (within tolerance) or if the vector has zero magnitude.
+func normalizeL2(v []float32) []float32 {
+	if len(v) == 0 {
+		return v
+	}
+	for _, x := range v {
+		if math.IsNaN(float64(x)) || math.IsInf(float64(x), 0) {
+			return nil
+		}
+	}
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	norm := math.Sqrt(sum)
+	if math.IsNaN(norm) || math.IsInf(norm, 0) {
+		return nil
+	}
+	if norm == 0 {
+		return nil
+	}
+	if norm > 0.999 && norm < 1.001 {
+		return v
+	}
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = float32(float64(x) / norm)
+	}
+	return out
+}
+
+// WarmUp is a no-op for the HTTP client embedder (model is managed by the remote server).
+func (c *Client) WarmUp(_ context.Context) error { return nil }
+
 // Model returns the configured embedding model name.
 func (c *Client) Model() string {
 	if c == nil {
 		return ""
 	}
 	return c.model
-}
-
-// Endpoint returns the configured embedding endpoint URL.
-func (c *Client) Endpoint() string {
-	if c == nil {
-		return ""
-	}
-	return c.endpoint
 }

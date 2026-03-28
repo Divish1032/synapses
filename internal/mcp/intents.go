@@ -2,28 +2,49 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// tokensUsed estimates the token count of s using the ~4 chars/token heuristic.
-func tokensUsed(b *strings.Builder) int { return b.Len() / 4 }
+// tokensUsed estimates the token count of s.
+// Code-heavy responses (identifiers, brackets, punctuation) tokenize more
+// densely than prose: ~3.5 chars/token measured vs the naive 4 chars/token.
+// Using 3.5 (integer: *2/7) gives a conservative estimate — we'd rather
+// prune a few tokens early than silently over-budget on code contexts.
+func tokensUsed(b *strings.Builder) int { return b.Len() * 2 / 7 }
+
+// applyIntentCarveConfig stamps intent-specific edge weights and directional
+// bias onto a CarveConfig returned by s.config.CarveConfig(). The per-intent
+// weight maps are pre-allocated package-level vars (graph/types.go) — zero
+// allocation. IntentID is set so the subgraph cache stores intent results
+// separately, preventing cross-intent cache collisions.
+func applyIntentCarveConfig(cfg *graph.CarveConfig, intent string) {
+	cfg.EdgeWeights = graph.IntentCarveWeights(intent)
+	cfg.DirectionBoost = graph.IntentDirectionBoost(intent)
+	cfg.IntentID = intent
+}
 
 // aggregatedImpact runs ImpactAnalysis and, for struct/interface nodes, aggregates
 // impact across all methods (same logic as handleGetImpact). This ensures plan/modify/review
 // intents show meaningful blast radius for struct types.
 func (s *Server) aggregatedImpact(node *graph.Node, depth int) *graph.ImpactResult {
 	if node.Type == graph.NodeStruct || node.Type == graph.NodeInterface {
-		methods := s.graph.FindByPattern(node.Name)
+		methods := s.graph.FindByPatternLimit(node.Name, 100)
 		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
 		seen := make(map[graph.NodeID]bool)
 		for _, m := range methods {
@@ -103,6 +124,33 @@ type resolvedTarget struct {
 	isConcept  bool // fell through to semantic search (no graph match)
 }
 
+// resolvedFileBaseline computes the baseline token cost for a resolved entity.
+// Baseline = sum of unique source file sizes / 4 across the best node and all
+// candidates. Returns 0 when the resolution failed (concept/nil).
+func resolvedFileBaseline(r *resolvedTarget) int {
+	if r == nil || r.isConcept {
+		return 0
+	}
+	seen := make(map[string]bool, len(r.candidates)+1)
+	var total int64
+	addFile := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		if fi, err := os.Stat(path); err == nil {
+			total += fi.Size()
+		}
+	}
+	if r.bestNode != nil {
+		addFile(r.bestNode.File)
+	}
+	for _, n := range r.candidates {
+		addFile(n.File)
+	}
+	return int(total / 4)
+}
+
 // resolveTarget maps a free-form target string to graph nodes.
 // Resolution order:
 //  1. Exact entity name (FindByName)
@@ -130,7 +178,7 @@ func (s *Server) resolveTarget(target, fileHint string) *resolvedTarget {
 	}
 
 	if len(nodes) > 0 {
-		best := pickBestNode(nodes, s.graph)
+		best := pickBestNode(nodes, s.graph, target)
 		return &resolvedTarget{bestNode: best, candidates: nodes}
 	}
 
@@ -146,9 +194,9 @@ func (s *Server) resolveTarget(target, fileHint string) *resolvedTarget {
 	}
 
 	// 4. Pattern / substring match.
-	nodes = s.graph.FindByPattern(target)
+	nodes = s.graph.FindByPatternLimit(target, 50)
 	if len(nodes) > 0 {
-		best := pickBestNode(nodes, s.graph)
+		best := pickBestNode(nodes, s.graph, target)
 		return &resolvedTarget{bestNode: best, candidates: nodes}
 	}
 
@@ -238,15 +286,20 @@ func (s *Server) handlePrepareContext(
 	target := stringArg(req, "target")
 	fileHint := stringArg(req, "file")
 	taskID := stringArg(req, "task_id")
+	projectsParam := stringArg(req, "projects")
 
 	if target == "" {
-		return mcp.NewToolResultError("target is required"), nil
+		return mcp.NewToolResultError("target is required (e.g., 'AuthService', 'handleLogin')"), nil
 	}
 	if intent == "" {
 		intent = "understand"
 	}
 
 	tokenBudget := intentDefaultBudget(intent)
+	// Sprint 11: apply model-based budget multiplier to the default budget.
+	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+		tokenBudget = int(float64(tokenBudget) * mult)
+	}
 	if b, ok := req.GetArguments()["token_budget"].(float64); ok && b > 0 {
 		tokenBudget = int(b)
 	}
@@ -254,6 +307,31 @@ func (s *Server) handlePrepareContext(
 	resolved := s.resolveTarget(target, fileHint)
 
 	if resolved.isConcept {
+		// When projects= is specified and local resolution failed, try sibling stores.
+		if projectsParam != "" && s.federationResolver != nil {
+			var aliases []string
+			if projectsParam != "*" {
+				for _, a := range strings.Split(projectsParam, ",") {
+					if a = strings.TrimSpace(a); a != "" {
+						aliases = append(aliases, a)
+					}
+				}
+			}
+			fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
+			fedResults := s.federationResolver.FindEntities(fedCtx, target, aliases, 5)
+			fedCancel()
+			if len(fedResults) > 0 {
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "## Not found locally: %q\n\nFound in sibling projects:\n", target)
+				for _, fr := range fedResults {
+					for _, r := range fr.Results {
+						fmt.Fprintf(&sb, "- [%s] %s::%s\n", fr.Alias, fr.Alias, r.Name)
+					}
+				}
+				sb.WriteString("\nUse get_context(entity=\"Name\", projects=\"alias\") to explore.")
+				return mcp.NewToolResultText(sb.String()), nil
+			}
+		}
 		// No graph match at all — return helpful hint.
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"## No Match: %q\n\nNo entity or file found matching %q.\n"+
@@ -285,7 +363,50 @@ func (s *Server) handlePrepareContext(
 		s.assembleUnderstandContext(ctx, &b, resolved, taskID, tokenBudget)
 	}
 
-	return mcp.NewToolResultText(strings.TrimSpace(b.String())), nil
+	// Sprint 6.7: passive context delivery instrumentation for Sprint 11 feedback loop.
+	// Fire-and-forget — no latency added to hot path. agent_id not part of prepare_context
+	// API so it is left empty; session_id provides the session correlation anchor.
+	mcpSessID := SessionIDFromContext(ctx)
+	synapseSessionID := s.getSynapseSessionID(mcpSessID)
+	if s.store != nil {
+		cd := store.ContextDelivery{
+			SessionID: synapseSessionID,
+			ToolName:  "prepare_context",
+			Entity:    target,
+		}
+		s.goBackground(func() { s.store.InsertContextDelivery(cd) })
+	}
+
+	// Pulse: emit context delivery event for prepare_context so it is
+	// visible in analytics (previously only get_context was instrumented).
+	responseText := strings.TrimSpace(b.String())
+	if pc := s.getPulseClient(); pc != nil {
+		responseBytes := len(responseText)
+		projID := s.projectID
+		sessID := synapseSessionID
+		intentCopy := intent
+		entityCopy := target
+		// Baseline = sum of unique source file sizes / 4 for files behind the
+		// resolved entity. This is the cost the agent would pay reading those
+		// files with cat/grep instead of using prepare_context.
+		baselineTokens := resolvedFileBaseline(resolved)
+		s.goBackground(func() {
+			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+				ToolName:       "prepare_context",
+				ProjectID:      projID,
+				Entity:         entityCopy,
+				ResponseBytes:  responseBytes,
+				ResponseTokens: responseBytes / 4,
+				BaselineTokens: baselineTokens,
+				DurationMs:     0, // not tracked at this level
+				SessionID:      sessID,
+				Intent:         intentCopy,
+				EntityFound:    true,
+			})
+		})
+	}
+
+	return mcp.NewToolResultText(responseText), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +425,7 @@ func (s *Server) assembleModifyContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 2
+	applyIntentCarveConfig(&cfg, "modify")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -348,18 +470,7 @@ func (s *Server) assembleModifyContext(
 		b.WriteString("No compile-time callers tracked (may be invoked via interface or dispatcher).\n")
 	}
 
-	// Architecture rules.
-	rules := matchRulesForFile(s.config, node.File)
-	b.WriteString("\n## Architecture Rules\n")
-	if len(rules) == 0 {
-		b.WriteString("OK: no rules apply to this file\n")
-	} else {
-		for _, r := range rules {
-			fmt.Fprintf(b, "%s [%s]: %s\n", strings.ToUpper(r.Severity), r.RuleID, r.Description)
-		}
-	}
-
-	// Optional tier 1: Dependencies (callees) — strip first when budget is tight.
+	// Dependencies (callees) — always relevant, write directly.
 	if budgetLeft(b, budget) > 200 && len(dc.Callees) > 0 {
 		names := make([]string, 0, len(dc.Callees))
 		for _, c := range dc.Callees {
@@ -368,20 +479,13 @@ func (s *Server) assembleModifyContext(
 		fmt.Fprintf(b, "\n## Dependencies (callees)\n%s\n", strings.Join(names, " · "))
 	}
 
-	// Optional tier 1: Brain warnings + concerns.
-	if budgetLeft(b, budget) > 150 {
-		writeWarnings(b, pkt)
-	}
-
-	// Optional tier 1: Agent annotations.
-	if budgetLeft(b, budget) > 150 {
-		writeAnnotations(b, dc.Annotations, node.ID)
-	}
-
-	// Optional tier 2: Pre-edit checklist (compact — always fits if we got here).
+	// Pre-edit checklist — always relevant, write directly.
 	if budgetLeft(b, budget) > 80 {
 		b.WriteString("\n## Pre-Edit Checklist\n")
-		callerCount := impact.TotalAffected
+		callerCount := 0
+		if impact != nil {
+			callerCount = impact.TotalAffected
+		}
 		if callerCount == 0 {
 			callerCount = len(dc.Callers)
 		}
@@ -394,6 +498,15 @@ func (s *Server) assembleModifyContext(
 			fmt.Fprintf(b, "- ⚠ No test file found — consider adding tests before changing\n")
 		}
 	}
+
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	// Each collector runs in parallel with its own recover boundary.
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, pkt, nil)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Historical failures, full impact analysis",
+	})
+	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleUnderstandContext builds the "understand" intent response:
@@ -408,6 +521,7 @@ func (s *Server) assembleUnderstandContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 2
+	applyIntentCarveConfig(&cfg, "understand")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -438,6 +552,15 @@ func (s *Server) assembleUnderstandContext(
 		detailLevel = "summary"
 	}
 	b.WriteString(serializeCompact(dc, detailLevel))
+
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	understandWhich := map[string]bool{"gaps": true, "annotations": true, "cross_project": true}
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, nil, understandWhich)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Full impact analysis, historical failures, peer activity",
+	})
+	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleReviewContext builds the "review" intent response:
@@ -452,6 +575,7 @@ func (s *Server) assembleReviewContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 1
+	applyIntentCarveConfig(&cfg, "review")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -487,50 +611,45 @@ func (s *Server) assembleReviewContext(
 		fmt.Fprintf(b, "Summary: %s\n", pkt.RootSummary)
 	}
 
-	// Concerns from brain.
-	if pkt != nil && (len(pkt.Concerns) > 0 || len(pkt.GraphWarnings) > 0) {
-		b.WriteString("\n## Concerns\n")
-		for _, c := range pkt.Concerns {
-			fmt.Fprintf(b, "- %s\n", c)
-		}
-		for _, w := range pkt.GraphWarnings {
-			fmt.Fprintf(b, "- %s\n", w)
-		}
+	// Coupling metrics — core content, always shown.
+	fanIn := s.graph.Fanin(node.ID)
+	b.WriteString("\n## Coupling\n")
+	fmt.Fprintf(b, "Fan-in (callers): %d | Callees: %d | Related: %d\n",
+		fanIn, len(dc.Callees), len(dc.Related))
+	if hasTests := fileHasTests(node.File); hasTests {
+		b.WriteString("Test coverage: test file exists\n")
+	} else {
+		b.WriteString("Test coverage: NO test file found\n")
 	}
 
-	// Rule violations.
-	rules := matchRulesForFile(s.config, node.File)
-	if len(rules) > 0 {
-		b.WriteString("\n## Violations\n")
-		for _, r := range rules {
-			fmt.Fprintf(b, "%s [%s]: %s\n", strings.ToUpper(r.Severity), r.RuleID, r.Description)
-		}
-	}
-
-	// Blast radius (broad: depth 3) — struct aggregation applied.
+	// Blast radius — core content, always shown.
 	impact := s.aggregatedImpact(node, 3)
-	fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
-		impact.TotalAffected, len(impact.AffectedFiles))
-	for _, tier := range impact.Tiers {
-		names := make([]string, 0, len(tier.Nodes))
-		for _, ref := range tier.Nodes {
-			names = append(names, ref.Name)
+	if impact != nil {
+		fmt.Fprintf(b, "\n## Blast Radius (%d total across %d files)\n",
+			impact.TotalAffected, len(impact.AffectedFiles))
+		for _, tier := range impact.Tiers {
+			names := make([]string, 0, len(tier.Nodes))
+			for _, ref := range tier.Nodes {
+				names = append(names, ref.Name)
+			}
+			label := strings.ToUpper(tier.Label)
+			fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
 		}
-		label := strings.ToUpper(tier.Label)
-		fmt.Fprintf(b, "%s (%d): %s\n", label, tier.TotalNodes, strings.Join(names, ", "))
-	}
-	if len(impact.Tiers) == 0 {
-		b.WriteString("No compile-time callers tracked.\n")
-	}
-
-	// Optional: Agent annotations (strip when budget is tight).
-	if budgetLeft(b, budget) > 150 && s.store != nil {
-		nodeIDs := []string{string(node.ID)}
-		if annMap, annErr := s.store.GetAnnotationsForNodes(nodeIDs); annErr == nil {
-			writeAnnotations(b, annMap, node.ID)
+		if len(impact.Tiers) == 0 && fanIn == 0 {
+			b.WriteString("No compile-time callers tracked.\n")
 		}
+	} else {
+		b.WriteString("\n## Blast Radius\nNo compile-time callers tracked (may be invoked via interface or dispatcher).\n")
 	}
 	_ = dc // used for pkt building above
+
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, pkt, nil)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Historical failures, full peer activity, violation audit log",
+	})
+	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleDebugContext builds the "debug" intent response:
@@ -545,6 +664,7 @@ func (s *Server) assembleDebugContext(
 	node := resolved.bestNode
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 3
+	applyIntentCarveConfig(&cfg, "debug")
 
 	sg, err := s.graph.CarveEgoGraph(node.ID, cfg)
 	if err != nil {
@@ -590,7 +710,7 @@ func (s *Server) assembleDebugContext(
 		}
 	}
 
-	// Optional tier 2: Related state + annotations.
+	// Related state — core content for debug.
 	if budgetLeft(b, budget) > 100 {
 		b.WriteString("\n## Related State\n")
 		if fileHasTests(node.File) {
@@ -598,20 +718,16 @@ func (s *Server) assembleDebugContext(
 		} else {
 			b.WriteString("Test file: none\n")
 		}
-		if pkt != nil && len(pkt.GraphWarnings) > 0 {
-			for _, w := range pkt.GraphWarnings {
-				fmt.Fprintf(b, "⚠ %s\n", w)
-			}
-		}
 	}
 
-	// Annotations can hold past debugging notes.
-	if budgetLeft(b, budget) > 150 && s.store != nil {
-		nodeIDs := []string{string(node.ID)}
-		if annMap, annErr := s.store.GetAnnotationsForNodes(nodeIDs); annErr == nil {
-			writeAnnotations(b, annMap, node.ID)
-		}
-	}
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	debugWhich := map[string]bool{"brain": true, "annotations": true, "cross_project": true}
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, pkt, debugWhich)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Full impact analysis, architecture rules, quality gaps",
+	})
+	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // assembleAddContext builds the "add" intent response:
@@ -678,7 +794,7 @@ func (s *Server) assembleAddContext(
 // Returns the list of files, interfaces, rules, and risk level for a proposed
 // change WITHOUT giving code context. "Think before you leap."
 func (s *Server) assemblePlanContext(
-	_ context.Context,
+	ctx context.Context,
 	b *strings.Builder,
 	resolved *resolvedTarget,
 	_ string,
@@ -746,12 +862,15 @@ func (s *Server) assemblePlanContext(
 		}
 	}
 
-	// Interface contracts.
+	// Interface contracts — carve once and reuse for both interface listing and ifaceCount.
 	cfg := s.config.CarveConfig()
 	cfg.MaxDepth = 1
-	if sg, sgErr := s.graph.CarveEgoGraph(node.ID, cfg); sgErr == nil {
+	applyIntentCarveConfig(&cfg, "plan")
+	planSG, _ := s.graph.CarveEgoGraph(node.ID, cfg)
+
+	if planSG != nil {
 		var interfaces []string
-		for _, cn := range sg.Nodes {
+		for _, cn := range planSG.Nodes {
 			if cn.Node.Type == graph.NodeInterface {
 				rfIface := strings.TrimPrefix(cn.Node.File, prefix)
 				interfaces = append(interfaces, fmt.Sprintf("%s (%s:%d)", cn.Node.Name, rfIface, cn.Node.Line))
@@ -766,15 +885,6 @@ func (s *Server) assemblePlanContext(
 		}
 	}
 
-	// Architecture rules.
-	rules := matchRulesForFile(s.config, node.File)
-	if len(rules) > 0 {
-		b.WriteString("\n## Architecture Rules\n")
-		for _, r := range rules {
-			fmt.Fprintf(b, "- %s: %s\n", r.RuleID, r.Description)
-		}
-	}
-
 	// Scope assessment and risk.
 	b.WriteString("\n## Scope Assessment\n")
 	directCallers := 0
@@ -786,8 +896,8 @@ func (s *Server) assemblePlanContext(
 		testMark = "1"
 	}
 	ifaceCount := 0
-	if sg, sgErr := s.graph.CarveEgoGraph(node.ID, cfg); sgErr == nil {
-		for _, cn := range sg.Nodes {
+	if planSG != nil {
+		for _, cn := range planSG.Nodes {
 			if cn.Node.Type == graph.NodeInterface {
 				ifaceCount++
 			}
@@ -808,11 +918,20 @@ func (s *Server) assemblePlanContext(
 	// Optional: Recommendation (strip only if extremely tight).
 	if budgetLeft(b, budget) > 50 {
 		b.WriteString("\n## Recommendation\n")
-		fmt.Fprintf(b, "Consider using claim_work(scope=%q) before starting.\n", relFile)
+		fmt.Fprintf(b, "Run validate_plan() before implementing changes to %s.\n", relFile)
 		if risk == "HIGH" {
 			b.WriteString("HIGH risk: run prepare_context(intent=\"modify\") before editing.\n")
 		}
 	}
+
+	// ── Tiered supplementary sections (Phase 6 component pipeline) ───────
+	planWhich := map[string]bool{"violations": true, "gaps": true, "cross_project": true}
+	sections, debugResults := s.collectTieredSections(ctx, s.getLastAgent(), string(node.ID), node.File, nil, planWhich)
+	sections = append(sections, tieredSection{
+		Tier: "available", Heading: "Full impact analysis, historical failures",
+	})
+	renderTiered(b, sections, budget)
+	appendDebugIfBudget(b, debugResults, budget)
 }
 
 // ---------------------------------------------------------------------------
@@ -822,68 +941,31 @@ func (s *Server) assemblePlanContext(
 // buildBrainPacket assembles a ContextPacket from the brain client.
 // Checks the 30s packet cache first; falls back to nil if brain unavailable.
 // This is extracted here so both handleGetContext and intent assemblers share it.
+// Returns a cached packet if available, otherwise kicks off async enrichment
+// and returns nil (caller proceeds without brain enrichment).
 func (s *Server) buildBrainPacket(
-	ctx context.Context,
+	_ context.Context,
 	node *graph.Node,
 	dc *directionalContext,
 	taskID string,
 ) *brain.ContextPacket {
 	bc := s.getBrainClient()
 	if bc == nil {
+		dc.BrainHint = "not configured — add brain.url to synapses.json for semantic enrichment"
+		dc.BrainStatus = "unavailable"
 		return nil
 	}
 
 	cacheKey := fmt.Sprintf("%s:%d", node.Name, 2)
-	if cached := s.getPacketFromCache(cacheKey); cached != nil {
-		return cached.(*brain.ContextPacket)
+	if pkt := s.getPacketFromCache(cacheKey); pkt != nil {
+		return pkt
 	}
 
-	calleeNames := make([]string, 0, len(dc.Callees))
-	for _, c := range dc.Callees {
-		calleeNames = append(calleeNames, c.Node.Name)
-	}
-	callerNames := make([]string, 0, len(dc.Callers))
-	for _, c := range dc.Callers {
-		callerNames = append(callerNames, c.Node.Name)
-	}
-
-	rules := matchRulesForFile(s.config, node.File)
-
-	var claims []brain.ClaimInput
-	if s.store != nil {
-		if allClaims, err := s.store.GetAllClaims(); err == nil {
-			for _, c := range allClaims {
-				claims = append(claims, brain.ClaimInput{
-					AgentID:   c.AgentID,
-					Scope:     c.Scope,
-					ScopeType: c.ScopeType,
-					ExpiresAt: c.ExpiresAt.Format(time.RFC3339),
-				})
-			}
-		}
-	}
-
-	pkt := bc.BuildContextPacket(ctx, brain.ContextPacketRequest{
-		Snapshot: brain.SnapshotInput{
-			RootNodeID:      string(node.ID),
-			RootName:        node.Name,
-			RootType:        string(node.Type),
-			RootFile:        node.File,
-			RootDoc:         node.Metadata["doc"],
-			CalleeNames:     calleeNames,
-			CallerNames:     callerNames,
-			ApplicableRules: rules,
-			ActiveClaims:    claims,
-			TaskID:          taskID,
-			HasTests:        fileHasTests(node.File),
-			FanIn:           s.graph.Fanin(node.ID),
-		},
-		EnableLLM: s.config.Brain.EnableLLM,
-	})
-	if pkt != nil {
-		s.setPacketCache(cacheKey, pkt)
-	}
-	return pkt
+	// Async enrichment: fire background goroutine, return nil for this call.
+	dc.BrainHint = "enrichment in progress (~2-5s) — call get_context(entity=\"" + node.Name + "\") again for LLM-enriched summary"
+	dc.BrainStatus = "pending"
+	s.goBackground(func() { s.asyncEnrichContext(bc, cacheKey, dc, node, taskID) })
+	return nil
 }
 
 // writeWarnings appends brain warnings/concerns to b, prefixed with ⚠.
@@ -946,3 +1028,629 @@ func formatAge(createdAt string) string {
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
+
+// handlePlanContext is the single-call pre-implementation gate. It runs three
+// checks in one round-trip that agents normally chain manually:
+//  1. check_plan_safety  — searches failure episodes for past matches (500ms cap)
+//  2. validate_plan      — checks proposed changes against architectural rules
+//  3. prepare_context(intent=plan) — scope assessment: files, interfaces, risk level
+//
+// Verdict field summarises the overall result:
+//   - "clear"      — no past failures, no violations
+//   - "warnings"   — past failure match found (review rationale)
+//   - "violations" — architectural rules broken
+//   - "blocked"    — both warnings and violations present
+func (s *Server) handlePlanContext(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	target := stringArg(req, "target")
+	if target == "" {
+		return mcp.NewToolResultError("target is required (e.g., 'AuthService', 'handleLogin')"), nil
+	}
+	fileHint := stringArg(req, "file")
+	taskID := stringArg(req, "task_id")
+	changesRaw := stringArg(req, "changes")
+	planDesc := stringArg(req, "plan_description")
+
+	result := map[string]interface{}{}
+
+	// ── 1. Episodic safety check ─────────────────────────────────────────
+	var safetyStatus string
+	if s.store != nil {
+		desc := planDesc
+		if desc == "" {
+			desc = target
+		}
+		safetyCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		ep, safetyErr := s.store.CheckPlanSafetyCtx(safetyCtx, desc, "")
+		cancel()
+		if safetyErr == nil && ep != nil {
+			safetyStatus = "warnings"
+			result["safety_check"] = map[string]interface{}{
+				"status": "warning",
+				"match": map[string]interface{}{
+					"episode_id": ep.ID,
+					"decision":   ep.Decision,
+					"outcome":    ep.Outcome,
+					"rationale":  ep.Rationale,
+				},
+				"message": fmt.Sprintf("⚠ Past failure match: %q (outcome: %s). Review rationale before proceeding.", ep.Decision, ep.Outcome),
+			}
+		} else if safetyCtx.Err() != nil {
+			safetyStatus = "clear"
+			result["safety_check"] = map[string]interface{}{"status": "clear", "note": "timed out (>500ms)"}
+		} else {
+			safetyStatus = "clear"
+			result["safety_check"] = map[string]interface{}{"status": "clear"}
+		}
+	}
+
+	// ── 2. Structural validation ──────────────────────────────────────────
+	var violationsStatus string
+	if changesRaw != "" {
+		var changes []ProposedChange
+		if err := json.Unmarshal([]byte(changesRaw), &changes); err == nil {
+			overlay := cloneGraph(s.graph)
+			var skipped []string
+			for _, change := range changes {
+				if change.AddsCallTo == "" {
+					continue
+				}
+				callees := overlay.FindByName(change.AddsCallTo)
+				if len(callees) == 0 {
+					skipped = append(skipped, fmt.Sprintf("%q not in graph — skipped", change.AddsCallTo))
+					continue
+				}
+				sources := overlay.FindByFile(change.File)
+				if len(sources) == 0 {
+					skipped = append(skipped, fmt.Sprintf("file %q not in graph — skipped", change.File))
+					continue
+				}
+				for _, callee := range callees {
+					overlay.AddEdge(&graph.Edge{From: sources[0].ID, To: callee.ID, Type: graph.EdgeCalls})
+				}
+			}
+			s.rulesMu.RLock()
+			violations := s.config.CheckViolations(overlay)
+			s.rulesMu.RUnlock()
+
+			if len(violations) > 0 {
+				violationsStatus = "violations"
+				result["validation"] = map[string]interface{}{
+					"status":     "violations_found",
+					"violations": violations,
+				}
+			} else {
+				violationsStatus = "ok"
+				validation := map[string]interface{}{"status": "ok"}
+				if len(skipped) > 0 {
+					validation["skipped"] = skipped
+				}
+				result["validation"] = validation
+			}
+		}
+	}
+
+	// ── 3. Scope assessment via plan intent ───────────────────────────────
+	resolved := s.resolveTarget(target, fileHint)
+	if !resolved.isConcept {
+		tokenBudget := 2000
+		// Sprint 11: apply model-based budget multiplier.
+		if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
+			tokenBudget = int(float64(tokenBudget) * mult)
+		}
+		var scopeBuilder strings.Builder
+		s.assemblePlanContext(ctx, &scopeBuilder, resolved, taskID, tokenBudget)
+		if scopeBuilder.Len() > 0 {
+			result["scope_context"] = scopeBuilder.String()
+		}
+	}
+
+	// ── Verdict ───────────────────────────────────────────────────────────
+	hasViolations := violationsStatus == "violations"
+	hasWarnings := safetyStatus == "warnings"
+	switch {
+	case hasViolations && hasWarnings:
+		result["verdict"] = "blocked"
+		result["verdict_message"] = "⛔ Both past failures and architectural violations detected. Do not proceed without resolving violations and reviewing the failure history."
+	case hasViolations:
+		result["verdict"] = "violations"
+		result["verdict_message"] = "⛔ Architectural violations detected. Fix before implementing."
+	case hasWarnings:
+		result["verdict"] = "warnings"
+		result["verdict_message"] = "⚠ Past failure match found. Review the safety_check entry — agent decides relevance."
+	default:
+		result["verdict"] = "clear"
+		result["verdict_message"] = "✓ No past failures, no architectural violations. Safe to proceed."
+	}
+
+	// Pulse: emit context delivery event for plan_context.
+	if pc := s.getPulseClient(); pc != nil {
+		mcpSessID := SessionIDFromContext(ctx)
+		sessID := s.getSynapseSessionID(mcpSessID)
+		projID := s.projectID
+		entityCopy := target
+		baselineTokens := resolvedFileBaseline(resolved)
+		// Estimate response size from the result map.
+		respBytes, _ := json.Marshal(result)
+		responseBytes := len(respBytes)
+		s.goBackground(func() {
+			pc.RecordContextDelivery(pulse.ContextDeliveryEvent{
+				ToolName:       "plan_context",
+				ProjectID:      projID,
+				Entity:         entityCopy,
+				ResponseBytes:  responseBytes,
+				ResponseTokens: responseBytes / 4,
+				BaselineTokens: baselineTokens,
+				SessionID:      sessID,
+				Intent:         "plan",
+				EntityFound:    true,
+			})
+		})
+	}
+
+	return jsonResult(result)
+}
+
+// ── Tiered visibility ────────────────────────────────────────────────────
+// Tiered visibility applies to ALL prepare_context responses, not just
+// federation-enriched ones. Every supplementary section is tagged with a
+// visibility tier:
+//   - critical: always shown, never budget-trimmed
+//   - relevant: 1-line summary within budget, agent decides to explore
+//   - available: single hint line pointing to discover_tools
+//
+// The core BFS context (header + ego-graph) is always rendered first.
+// Tiered sections are rendered after, in priority order.
+
+// ── Component Pipeline (Phase 6, Section 8.4) ────────────────────────────────
+//
+// Each supplementary section (violations, gaps, annotations, cross-project,
+// brain) is collected via a componentCollector that runs with:
+//   - its own recover() boundary (panic in one never crashes the response)
+//   - a per-component timeout (never blocks the agent)
+//   - latency tracking for the _debug section
+//
+// Components run in parallel when multiple are needed for the same intent.
+
+// componentCollector is a function that produces zero or more tiered sections.
+// It receives a context with a per-component timeout already applied.
+type componentCollector func(ctx context.Context) []tieredSection
+
+// componentSpec defines one pluggable unit of context assembly with its own timeout.
+type componentSpec struct {
+	name      string
+	collector componentCollector
+	timeoutMs int // per-component deadline (design doc Section 8.4)
+}
+
+// componentResult is the output of one collector goroutine.
+type componentResult struct {
+	Name      string
+	Sections  []tieredSection
+	LatencyMs int64
+	TimedOut  bool
+	Panicked  bool
+}
+
+// componentHealthTracker tracks per-component failure counts for auto-disable.
+// Per-agent scoped — concurrent agents don't interfere with each other.
+// Components that panic or timeout 3+ times in a session are auto-disabled.
+type componentHealthTracker struct {
+	mu       sync.Mutex
+	failures map[string]map[string]int // agentID → componentName → count
+}
+
+func (h *componentHealthTracker) recordFailure(agentID, name string) {
+	h.mu.Lock()
+	if h.failures == nil {
+		h.failures = make(map[string]map[string]int)
+	}
+	if h.failures[agentID] == nil {
+		h.failures[agentID] = make(map[string]int)
+	}
+	h.failures[agentID][name]++
+	h.mu.Unlock()
+}
+
+func (h *componentHealthTracker) isDisabled(agentID, name string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.failures == nil {
+		return false
+	}
+	return h.failures[agentID][name] >= 3
+}
+
+func (h *componentHealthTracker) reset(agentID string) {
+	h.mu.Lock()
+	if h.failures != nil {
+		delete(h.failures, agentID)
+	}
+	h.mu.Unlock()
+}
+
+// runComponents executes component specs in parallel with per-component recover
+// boundaries and individual timeouts. Returns collected sections and debug info.
+//
+// Benchmark: 5 collectors with noop work = ~4.3μs, 3.1KB allocs (Apple M3 Pro).
+// Goroutine overhead is negligible even under 50 concurrent prepare_context calls.
+func runComponents(ctx context.Context, health *componentHealthTracker, agentID string, specs []componentSpec) ([]tieredSection, []componentResult) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	ch := make(chan componentResult, len(specs))
+	for _, spec := range specs {
+		if health != nil && health.isDisabled(agentID, spec.name) {
+			ch <- componentResult{Name: spec.name, TimedOut: true}
+			continue
+		}
+		go func(sp componentSpec) {
+			start := time.Now()
+			compCtx, cancel := context.WithTimeout(ctx, time.Duration(sp.timeoutMs)*time.Millisecond)
+			defer cancel()
+
+			var res componentResult
+			res.Name = sp.name
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						res.Panicked = true
+						if health != nil {
+							health.recordFailure(agentID, sp.name)
+						}
+					}
+				}()
+				res.Sections = sp.collector(compCtx)
+			}()
+			res.LatencyMs = time.Since(start).Milliseconds()
+			if compCtx.Err() != nil && len(res.Sections) == 0 {
+				res.TimedOut = true
+				if health != nil {
+					health.recordFailure(agentID, sp.name)
+				}
+			}
+			ch <- res
+		}(spec)
+	}
+
+	var allSections []tieredSection
+	var debugResults []componentResult
+	for i := 0; i < len(specs); i++ {
+		res := <-ch
+		debugResults = append(debugResults, res)
+		allSections = append(allSections, res.Sections...)
+	}
+	return allSections, debugResults
+}
+
+// buildDebugMarkdown creates a human-readable _debug section from component results.
+// Returns "" if no debug info worth showing.
+func buildDebugMarkdown(results []componentResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+	// Sort by name for deterministic output.
+	sort.Slice(results, func(i, j int) bool { return results[i].Name < results[j].Name })
+
+	var b strings.Builder
+	b.WriteString("## _debug\n- latencies: ")
+	first := true
+	for _, r := range results {
+		if r.LatencyMs > 0 {
+			if !first {
+				b.WriteString(" | ")
+			}
+			fmt.Fprintf(&b, "%s: %dms", r.Name, r.LatencyMs)
+			first = false
+		}
+	}
+	if first {
+		b.WriteString("(none)")
+	}
+	b.WriteString("\n")
+
+	var timedOut, panicked []string
+	for _, r := range results {
+		if r.TimedOut {
+			timedOut = append(timedOut, r.Name)
+		}
+		if r.Panicked {
+			panicked = append(panicked, r.Name)
+		}
+	}
+	if len(timedOut) > 0 {
+		fmt.Fprintf(&b, "- timed_out: %s\n", strings.Join(timedOut, ", "))
+	}
+	if len(panicked) > 0 {
+		fmt.Fprintf(&b, "- panicked: %s\n", strings.Join(panicked, ", "))
+	}
+	if len(timedOut) == 0 && len(panicked) == 0 {
+		b.WriteString("- timed_out: none | panicked: none\n")
+	}
+	return b.String()
+}
+
+// collectTieredSections runs applicable supplementary collectors in parallel
+// using the component pipeline. Per-component timeouts from design doc Section 8.4.
+// The which parameter selects which collectors to run (nil = all).
+func (s *Server) collectTieredSections(ctx context.Context, agentID, nodeID, nodeFile string, pkt *brain.ContextPacket, which map[string]bool) ([]tieredSection, []componentResult) {
+	cfg2 := s.config
+	st := s.store
+	allSpecs := []componentSpec{
+		{name: "violations", timeoutMs: 50, collector: func(_ context.Context) []tieredSection {
+			if vs := collectViolationSection(cfg2, nodeFile); vs != nil {
+				return []tieredSection{*vs}
+			}
+			return nil
+		}},
+		{name: "gaps", timeoutMs: 50, collector: func(_ context.Context) []tieredSection {
+			if gs := collectGapSection(st, nodeID); gs != nil {
+				return []tieredSection{*gs}
+			}
+			return nil
+		}},
+		{name: "brain", timeoutMs: 200, collector: func(_ context.Context) []tieredSection {
+			if bs := collectBrainSection(pkt); bs != nil {
+				return []tieredSection{*bs}
+			}
+			return nil
+		}},
+		{name: "annotations", timeoutMs: 50, collector: func(_ context.Context) []tieredSection {
+			if as := collectAnnotationSection(st, nodeID); as != nil {
+				return []tieredSection{*as}
+			}
+			return nil
+		}},
+		{name: "cross_project", timeoutMs: 500, collector: func(cCtx context.Context) []tieredSection {
+			return s.collectCrossProjectSections(cCtx, nodeID)
+		}},
+	}
+	// Filter to requested components if which is specified.
+	var specs []componentSpec
+	if which != nil {
+		for _, sp := range allSpecs {
+			if which[sp.name] {
+				specs = append(specs, sp)
+			}
+		}
+	} else {
+		specs = allSpecs
+	}
+	return runComponents(ctx, &s.componentHealth, agentID, specs)
+}
+
+// appendDebugIfBudget writes the _debug section if there's budget remaining.
+func appendDebugIfBudget(b *strings.Builder, debugResults []componentResult, budget int) {
+	if md := buildDebugMarkdown(debugResults); md != "" {
+		if budgetLeft(b, budget) > 50 {
+			fmt.Fprintf(b, "\n%s", md)
+		}
+	}
+}
+
+// tieredSection represents one supplementary section in a prepare_context
+// response, tagged with its visibility tier for budget-aware rendering.
+type tieredSection struct {
+	Tier    string // "critical" | "relevant" | "available"
+	Heading string // section heading (e.g., "⚠ Alerts", "Quality Gaps")
+	Content string // pre-rendered content for this section
+}
+
+// renderTiered writes tiered sections to the builder in priority order:
+// all critical sections first (never trimmed), then relevant sections
+// (within budget), then a single available hint if any sections exist.
+func renderTiered(b *strings.Builder, sections []tieredSection, budget int) {
+	if len(sections) == 0 {
+		return
+	}
+
+	// Critical: always shown, never trimmed.
+	for _, s := range sections {
+		if s.Tier == "critical" {
+			fmt.Fprintf(b, "\n## %s\n%s", s.Heading, s.Content)
+		}
+	}
+
+	// Relevant: 1-line summaries within budget.
+	for _, s := range sections {
+		if s.Tier == "relevant" && budgetLeft(b, budget) > 50 {
+			fmt.Fprintf(b, "\n## %s\n%s", s.Heading, s.Content)
+		}
+	}
+
+	// Available: single hint line if there are any available-tier sections.
+	var availNames []string
+	for _, s := range sections {
+		if s.Tier == "available" {
+			availNames = append(availNames, s.Heading)
+		}
+	}
+	if len(availNames) > 0 && budgetLeft(b, budget) > 30 {
+		fmt.Fprintf(b, "\n## More Available\n- %s → discover_tools(query=\"...\")\n",
+			strings.Join(availNames, ", "))
+	}
+}
+
+// collectViolationSection builds a tiered section for architecture rule
+// violations. Violations with severity "error" are critical; "warning" is relevant.
+func collectViolationSection(cfg *config.Config, file string) *tieredSection {
+	rules := matchRulesForFile(cfg, file)
+	if len(rules) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	hasCritical := false
+	for _, r := range rules {
+		fmt.Fprintf(&sb, "%s [%s]: %s\n", strings.ToUpper(r.Severity), r.RuleID, r.Description)
+		if r.Severity == "error" {
+			hasCritical = true
+		}
+	}
+	tier := "relevant"
+	if hasCritical {
+		tier = "critical"
+	}
+	return &tieredSection{Tier: tier, Heading: "Architecture Rules", Content: sb.String()}
+}
+
+// collectGapSection builds a tiered section for open quality gaps on an entity.
+func collectGapSection(st *store.Store, nodeID string) *tieredSection {
+	if st == nil {
+		return nil
+	}
+	gaps, err := st.GetGaps(store.GapFilter{NodeID: nodeID, Status: "open"})
+	if err != nil || len(gaps) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, g := range gaps {
+		sev := g.Severity
+		if sev == "" {
+			sev = "medium"
+		}
+		fmt.Fprintf(&sb, "- [%s] %s: %s\n", sev, g.GapID, g.Description)
+	}
+	tier := "relevant"
+	for _, g := range gaps {
+		if g.Severity == "critical" || g.Severity == "high" {
+			tier = "critical"
+			break
+		}
+	}
+	return &tieredSection{Tier: tier, Heading: fmt.Sprintf("Quality Gaps (%d open)", len(gaps)), Content: sb.String()}
+}
+
+// collectBrainSection builds a tiered section for brain warnings/concerns.
+func collectBrainSection(pkt *brain.ContextPacket) *tieredSection {
+	if pkt == nil {
+		return nil
+	}
+	var items []string
+	for _, w := range pkt.GraphWarnings {
+		items = append(items, w)
+	}
+	for _, c := range pkt.Concerns {
+		items = append(items, c)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, item := range items {
+		fmt.Fprintf(&sb, "- %s\n", item)
+	}
+	return &tieredSection{Tier: "relevant", Heading: "Warnings & Concerns", Content: sb.String()}
+}
+
+// collectAnnotationSection builds a tiered section for agent annotations.
+func collectAnnotationSection(st *store.Store, nodeID string) *tieredSection {
+	if st == nil {
+		return nil
+	}
+	annMap, err := st.GetAnnotationsForNodes([]string{nodeID})
+	if err != nil || len(annMap) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, anns := range annMap {
+		for _, ann := range anns {
+			fmt.Fprintf(&sb, "- %s\n", ann.Note)
+		}
+	}
+	if sb.Len() == 0 {
+		return nil
+	}
+	return &tieredSection{Tier: "relevant", Heading: "Agent Notes", Content: sb.String()}
+}
+
+// collectCrossProjectSection builds tiered sections for cross-project deps.
+func (s *Server) collectCrossProjectSections(ctx context.Context, entityID string) []tieredSection {
+	if s.federationResolver == nil || s.store == nil {
+		return nil
+	}
+	fedCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	deps := s.federationResolver.GetDepsForEntity(fedCtx, entityID, s.store)
+	if len(deps) == 0 {
+		return nil
+	}
+
+	var sections []tieredSection
+	var criticalDeps, relevantDeps []federation.CrossProjectDepStatus
+	for _, dep := range deps {
+		if dep.Drifted {
+			criticalDeps = append(criticalDeps, dep)
+		} else {
+			relevantDeps = append(relevantDeps, dep)
+		}
+	}
+
+	if len(criticalDeps) > 0 {
+		var sb strings.Builder
+		for _, dep := range criticalDeps {
+			fmt.Fprintf(&sb, "- BREAKING: %s::%s — %s\n", dep.Project, dep.Entity, dep.DiffSummary)
+		}
+		sections = append(sections, tieredSection{
+			Tier: "critical", Heading: "⚠ Cross-Project Alerts", Content: sb.String(),
+		})
+	}
+
+	if len(relevantDeps) > 0 {
+		var sb strings.Builder
+		for _, dep := range relevantDeps {
+			// Enrich with brain summary if available.
+			summary := s.federationResolver.GetEntitySummary(fedCtx, dep.Project, dep.Entity)
+			if summary != "" {
+				fmt.Fprintf(&sb, "- %s::%s — %s\n", dep.Project, dep.Entity, truncateStr(summary, 120))
+			} else {
+				fmt.Fprintf(&sb, "- %s::%s (%s) [current]\n", dep.Project, dep.Entity, dep.File)
+			}
+		}
+		sections = append(sections, tieredSection{
+			Tier:    "relevant",
+			Heading: fmt.Sprintf("Cross-Project Dependencies (%d current)", len(relevantDeps)),
+			Content: sb.String(),
+		})
+	}
+
+	// Memory hints: check if sibling projects have memories about any dep entity.
+	// Only unique entity names to avoid redundant searches.
+	entityNames := make(map[string]bool, len(deps))
+	for _, dep := range deps {
+		entityNames[dep.Entity] = true
+	}
+	for entityName := range entityNames {
+		if fedCtx.Err() != nil {
+			break
+		}
+		hints := s.federationResolver.SearchMemoriesForEntity(fedCtx, entityName, nil)
+		if len(hints) > 0 {
+			var sb strings.Builder
+			for _, h := range hints {
+				fmt.Fprintf(&sb, "- [%s] %s → recall(query=%q, projects=%q)\n",
+					h.Alias, h.Summary, h.Query, h.Alias)
+			}
+			sections = append(sections, tieredSection{
+				Tier:    "relevant",
+				Heading: fmt.Sprintf("Related Memories (%d from sibling projects)", len(hints)),
+				Content: sb.String(),
+			})
+			break // one memory hint section is enough
+		}
+	}
+
+	return sections
+}
+
+// truncateStr truncates s to max characters, adding "..." if truncated.
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}
+
+

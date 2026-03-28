@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 //go:embed tsresolver.js
@@ -83,21 +84,15 @@ func ResolveTSTypesCallEdges(g *graph.Graph, root string) (int, error) {
 		}
 	}
 
-	// Pre-populate dedup set from existing CALLS edges so we never create
-	// duplicates of what the tree-sitter resolver already emitted.
+	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }
-	seen := make(map[edgeKey]bool, g.EdgeCount())
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeCalls {
-			seen[edgeKey{e.From, e.To}] = true
-		}
-	}
+	seen := make(map[edgeKey]bool)
 
 	added := 0
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		if added >= maxTSEdges {
-			fmt.Fprintf(os.Stderr,
+			logutil.Warn(
 				"synapses/ts-types: edge cap (%d) reached in Go reader — draining remaining output\n",
 				maxTSEdges)
 			// Drain remaining stdout so the subprocess can exit cleanly.
@@ -118,7 +113,7 @@ func ResolveTSTypesCallEdges(g *graph.Graph, root string) (int, error) {
 		}
 
 		k := edgeKey{callerID, calleeID}
-		if !seen[k] {
+		if !seen[k] && !g.HasEdge(callerID, calleeID, graph.EdgeCalls) {
 			seen[k] = true
 			g.AddEdge(&graph.Edge{
 				From: callerID,
@@ -132,7 +127,7 @@ func ResolveTSTypesCallEdges(g *graph.Graph, root string) (int, error) {
 	// Wait for the subprocess to exit. Non-zero exit is non-fatal — the
 	// resolver already wrote its error to stderr.
 	if err := cmd.Wait(); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses/ts-types: node exited with error: %v\n", err)
+		logutil.Error("synapses/ts-types: node exited with error: %v\n", err)
 	}
 
 	return added, nil

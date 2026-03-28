@@ -8,12 +8,12 @@
 #   brew install SynapsesOS/tap/synapses
 
 class Synapses < Formula
-  desc "Graph-based code intelligence MCP server with 24 tools, 18-language support"
+  desc "Graph-based code intelligence MCP server for AI coding agents"
   homepage "https://github.com/SynapsesOS/synapses"
   license "MIT"
 
   # Version is updated automatically by the release workflow.
-  version "0.7.1"
+  version "0.8.0"
 
   on_macos do
     if Hardware::CPU.arm?

@@ -1,0 +1,671 @@
+package parser
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+func newMarkdownTestGraph() *graph.Graph {
+	g := graph.New("test")
+	g.SetRoot("/repo")
+	return g
+}
+
+func TestMarkdownParser_Extensions(t *testing.T) {
+	p := NewMarkdownParser()
+	exts := p.Extensions()
+	want := map[string]bool{".md": true, ".markdown": true, ".mdx": true}
+	for _, ext := range exts {
+		if !want[ext] {
+			t.Errorf("unexpected extension %q", ext)
+		}
+		delete(want, ext)
+	}
+	for ext := range want {
+		t.Errorf("missing extension %q", ext)
+	}
+}
+
+func TestMarkdownParser_EmptyFile(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	if err := p.Parse(g, "/repo/README.md", []byte("")); err != nil {
+		t.Fatal(err)
+	}
+	// Should only have the file node.
+	nodes := g.AllNodes()
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node (file), got %d", len(nodes))
+	}
+	if nodes[0].Type != graph.NodeFile {
+		t.Errorf("expected NodeFile, got %s", nodes[0].Type)
+	}
+	if nodes[0].Domain != graph.DomainDocs {
+		t.Errorf("expected DomainDocs, got %q", nodes[0].Domain)
+	}
+}
+
+func TestMarkdownParser_SingleHeading(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Introduction\n\nThis is the intro text.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.AllNodes()
+	// file + 1 section
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(nodes))
+	}
+
+	var sec *graph.Node
+	for _, n := range nodes {
+		if n.Type == graph.NodeSection {
+			sec = n
+		}
+	}
+	if sec == nil {
+		t.Fatal("no Section node found")
+	}
+	if sec.Metadata["title"] != "Introduction" {
+		t.Errorf("title = %q, want %q", sec.Metadata["title"], "Introduction")
+	}
+	if sec.Metadata["depth"] != "1" {
+		t.Errorf("depth = %q, want %q", sec.Metadata["depth"], "1")
+	}
+	if sec.Domain != graph.DomainDocs {
+		t.Errorf("domain = %q, want %q", sec.Domain, graph.DomainDocs)
+	}
+	if sec.Line != 1 {
+		t.Errorf("line = %d, want 1", sec.Line)
+	}
+	if !strings.Contains(sec.Metadata["body_preview"], "This is the intro text") {
+		t.Errorf("body_preview missing body text: %q", sec.Metadata["body_preview"])
+	}
+}
+
+func TestMarkdownParser_NestedHeadings(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte(`# Top
+## Sub A
+Some text.
+## Sub B
+### Sub B.1
+Deep text.
+# Another Top
+`)
+	if err := p.Parse(g, "/repo/DOC.md", src); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 5 {
+		t.Fatalf("expected 5 sections, got %d", len(sections))
+	}
+
+	// Verify CONTAINS edges form correct hierarchy.
+	fileNodeID := g.MakeNodeID("/repo/DOC.md", "/repo/DOC.md")
+	topID := g.MakeNodeID("/repo/DOC.md", "DOC.md § Top")
+	subAID := g.MakeNodeID("/repo/DOC.md", "DOC.md § Sub A")
+	subBID := g.MakeNodeID("/repo/DOC.md", "DOC.md § Sub B")
+	subB1ID := g.MakeNodeID("/repo/DOC.md", "DOC.md § Sub B.1")
+	anotherTopID := g.MakeNodeID("/repo/DOC.md", "DOC.md § Another Top")
+
+	assertEdge(t, g, fileNodeID, topID, graph.EdgeContains)
+	assertEdge(t, g, topID, subAID, graph.EdgeContains)
+	assertEdge(t, g, topID, subBID, graph.EdgeContains)
+	assertEdge(t, g, subBID, subB1ID, graph.EdgeContains)
+	assertEdge(t, g, fileNodeID, anotherTopID, graph.EdgeContains)
+}
+
+func TestMarkdownParser_LinksTo(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+
+	// Create the target file node first so the edge won't be silently dropped.
+	targetID := g.MakeNodeID("/repo/other.md", "/repo/other.md")
+	g.AddNode(&graph.Node{
+		ID:   targetID,
+		Type: graph.NodeFile,
+		Name: "other.md",
+		File: "/repo/other.md",
+		Line: 1,
+	})
+
+	src := []byte("# Docs\nSee [other docs](other.md) and [external](https://example.com).\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	assertEdge(t, g, fileNodeID, targetID, graph.EdgeLinksTo)
+
+	// Should NOT have a LINKS_TO edge for the external URL.
+	edges := g.OutEdges(fileNodeID)
+	for _, e := range edges {
+		if e.Type == graph.EdgeLinksTo && strings.Contains(string(e.To), "example.com") {
+			t.Error("external link should not create LINKS_TO edge")
+		}
+	}
+}
+
+func TestMarkdownParser_NoHeadingWithoutSpace(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// "#NoSpace" is NOT a valid ATX heading per CommonMark.
+	src := []byte("#NoSpace\n## Valid Heading\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (only valid heading), got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "Valid Heading" {
+		t.Errorf("title = %q, want %q", sections[0].Metadata["title"], "Valid Heading")
+	}
+}
+
+func TestMarkdownParser_BodyTruncation(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	longBody := strings.Repeat("x", 3000)
+	src := []byte("# Section\n" + longBody + "\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	if len(sections[0].Metadata["body"]) > 2000 {
+		t.Errorf("body should be truncated to 2000, got %d", len(sections[0].Metadata["body"]))
+	}
+	if len(sections[0].Metadata["body_preview"]) > 200 {
+		t.Errorf("body_preview should be truncated to 200, got %d", len(sections[0].Metadata["body_preview"]))
+	}
+}
+
+func TestMarkdownParser_H6Depth(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("###### Deep Heading\nBody text.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	if sections[0].Metadata["depth"] != "6" {
+		t.Errorf("depth = %q, want %q", sections[0].Metadata["depth"], "6")
+	}
+}
+
+func TestMarkdownParser_ClosingHashes(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("## Title With Closing ##\nBody.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	if sections[0].Metadata["title"] != "Title With Closing" {
+		t.Errorf("title = %q, want %q", sections[0].Metadata["title"], "Title With Closing")
+	}
+}
+
+func TestMarkdownParser_SelfRefAnchorLink(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Top\nSee [section](#top) for more.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	// Self-referencing anchor links (#top) should not create LINKS_TO edges.
+	fileNodeID := g.MakeNodeID("/repo/test.md", "/repo/test.md")
+	edges := g.OutEdges(fileNodeID)
+	for _, e := range edges {
+		if e.Type == graph.EdgeLinksTo {
+			t.Error("self-referencing anchor link should not create LINKS_TO edge")
+		}
+	}
+}
+
+func TestMarkdownParser_FencedCodeBlockHeadingSkipped(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// The # inside the fenced block must NOT be parsed as a section heading.
+	src := []byte("# Real Section\nSome text.\n```yaml\n# This is YAML comment, not a heading\nkey: value\n```\n## Sub Section\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (Real Section + Sub Section), got %d", len(sections))
+	}
+	for _, s := range sections {
+		if s.Metadata["title"] == "This is YAML comment, not a heading" {
+			t.Error("heading inside fenced code block should not create a section")
+		}
+	}
+}
+
+func TestMarkdownParser_DuplicateHeadingNames(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Two sections with the same title → should get disambiguated names, no data loss.
+	src := []byte("# Introduction\nFirst intro.\n# Introduction\nSecond intro.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (disambiguated), got %d", len(sections))
+	}
+	titles := make(map[string]bool)
+	for _, s := range sections {
+		titles[s.Metadata["title"]] = true
+	}
+	if !titles["Introduction"] {
+		t.Error("first section should have title 'Introduction'")
+	}
+	if !titles["Introduction (2)"] {
+		t.Error("second duplicate section should be disambiguated to 'Introduction (2)'")
+	}
+}
+
+func TestMarkdownParser_TildeFenceBlock(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// ~~~-fenced blocks should also suppress heading detection inside.
+	src := []byte("# Top\n~~~\n# Not a heading\n~~~\n## Sub\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (Top + Sub), got %d", len(sections))
+	}
+}
+
+func TestMarkdownParser_YAMLFrontmatter(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: My Docs\ndate: 2024-01-01\n---\n# Real Heading\nBody text.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (frontmatter skipped), got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "Real Heading" {
+		t.Errorf("title = %q, want 'Real Heading'", sections[0].Metadata["title"])
+	}
+}
+
+func TestMarkdownParser_TOMLFrontmatter(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("+++\ntitle = \"My Docs\"\n+++\n# Heading\nContent.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (TOML frontmatter skipped), got %d", len(sections))
+	}
+}
+
+func TestMarkdownParser_SetextH1(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("My Title\n========\nSome body text.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 setext H1 section, got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "My Title" {
+		t.Errorf("title = %q, want 'My Title'", sections[0].Metadata["title"])
+	}
+	if sections[0].Metadata["depth"] != "1" {
+		t.Errorf("depth = %q, want '1'", sections[0].Metadata["depth"])
+	}
+	if !strings.Contains(sections[0].Metadata["body_preview"], "Some body text") {
+		t.Errorf("body_preview missing body: %q", sections[0].Metadata["body_preview"])
+	}
+}
+
+func TestMarkdownParser_SetextH2(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("Subtitle\n--------\nBody here.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 setext H2 section, got %d", len(sections))
+	}
+	if sections[0].Metadata["depth"] != "2" {
+		t.Errorf("depth = %q, want '2'", sections[0].Metadata["depth"])
+	}
+}
+
+func TestMarkdownParser_SetextAndATXMixed(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("Top Section\n===========\nIntro.\n## Sub Heading\nDetails.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections, got %d", len(sections))
+	}
+}
+
+func TestMarkdownParser_FrontmatterThenSetextH1(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: Doc\n---\nReal Title\n==========\nContent.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section (frontmatter skipped, setext parsed), got %d", len(sections))
+	}
+	if sections[0].Metadata["title"] != "Real Title" {
+		t.Errorf("title = %q, want 'Real Title'", sections[0].Metadata["title"])
+	}
+}
+
+func TestMarkdownParser_FrontmatterTitleExtracted(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: \"FlatGraph Architecture\"\nauthor: foo\n---\n# Intro\nBody.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	var fileNode *graph.Node
+	for _, n := range g.AllNodes() {
+		if n.ID == fileNodeID {
+			fileNode = n
+			break
+		}
+	}
+	if fileNode == nil {
+		t.Fatal("file node not found")
+	}
+	if fileNode.Metadata["frontmatter_title"] != "FlatGraph Architecture" {
+		t.Errorf("frontmatter_title = %q, want %q", fileNode.Metadata["frontmatter_title"], "FlatGraph Architecture")
+	}
+}
+
+func TestMarkdownParser_TOMLFrontmatterTitleExtracted(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("+++\ntitle = \"Walker Subsystem\"\n+++\n# Docs\nContent.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	for _, n := range g.AllNodes() {
+		if n.ID == fileNodeID {
+			if n.Metadata["frontmatter_title"] != "Walker Subsystem" {
+				t.Errorf("frontmatter_title = %q, want %q", n.Metadata["frontmatter_title"], "Walker Subsystem")
+			}
+			return
+		}
+	}
+	t.Fatal("file node not found")
+}
+
+func TestMarkdownParser_FrontmatterTagsExtracted(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: \"Rate Limiter\"\ntags: [rate-limiting, throttling, reliability]\ncategory: infrastructure\n---\n# Overview\nBody.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	fileNode := g.GetNode(fileNodeID)
+	if fileNode == nil {
+		t.Fatal("file node not found")
+	}
+	if fileNode.Metadata["frontmatter_title"] != "Rate Limiter" {
+		t.Errorf("frontmatter_title = %q, want %q", fileNode.Metadata["frontmatter_title"], "Rate Limiter")
+	}
+	if fileNode.Metadata["frontmatter_category"] != "infrastructure" {
+		t.Errorf("frontmatter_category = %q, want %q", fileNode.Metadata["frontmatter_category"], "infrastructure")
+	}
+	wantTags := "rate-limiting,throttling,reliability"
+	if fileNode.Metadata["frontmatter_tags"] != wantTags {
+		t.Errorf("frontmatter_tags = %q, want %q", fileNode.Metadata["frontmatter_tags"], wantTags)
+	}
+}
+
+func TestMarkdownParser_FrontmatterNoTags(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("---\ntitle: Simple\n---\n# Heading\nBody.\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	fileNodeID := g.MakeNodeID("/repo/README.md", "/repo/README.md")
+	fileNode := g.GetNode(fileNodeID)
+	if fileNode == nil {
+		t.Fatal("file node not found")
+	}
+	if _, ok := fileNode.Metadata["frontmatter_tags"]; ok {
+		t.Error("frontmatter_tags should not be set when no tags in frontmatter")
+	}
+}
+
+func TestMarkdownParser_CodeBlockExtraction(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Quick Start\n\nInstall Flask:\n\n```python\nfrom flask import Flask\napp = Flask(__name__)\n```\n\nThen run it:\n\n```bash\npython app.py\n```\n")
+	if err := p.Parse(g, "/repo/README.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks metadata missing")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatalf("failed to unmarshal code_blocks: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 code blocks, got %d", len(blocks))
+	}
+	if blocks[0].Language != "python" {
+		t.Errorf("block 0 language = %q, want python", blocks[0].Language)
+	}
+	if !strings.Contains(blocks[0].Content, "from flask import Flask") {
+		t.Errorf("block 0 content missing expected code: %q", blocks[0].Content)
+	}
+	if blocks[1].Language != "bash" {
+		t.Errorf("block 1 language = %q, want bash", blocks[1].Language)
+	}
+}
+
+func TestMarkdownParser_CodeBlockMaxFivePerSection(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Create a section with 7 code blocks — only first 5 should be kept.
+	var sb strings.Builder
+	sb.WriteString("# Many Blocks\n\n")
+	for i := 0; i < 7; i++ {
+		sb.WriteString("```go\nfunc F" + string(rune('A'+i)) + "() {}\n```\n\n")
+	}
+	if err := p.Parse(g, "/repo/test.md", []byte(sb.String())); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 5 {
+		t.Errorf("expected max 5 code blocks, got %d", len(blocks))
+	}
+}
+
+func TestMarkdownParser_CodeBlockEmptySkipped(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Section\n\n```python\n   \n```\n\n```go\nfmt.Println(\"hi\")\n```\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	var blocks []codeBlock
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("code_blocks missing — the non-empty block should be captured")
+	}
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 {
+		t.Errorf("expected 1 code block (empty one skipped), got %d", len(blocks))
+	}
+}
+
+func TestMarkdownParser_CodeBlockTruncation(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	longCode := strings.Repeat("x", 3000)
+	src := []byte("# Section\n\n```go\n" + longCode + "\n```\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks[0].Content) > 2000 {
+		t.Errorf("code block content should be truncated to 2000, got %d", len(blocks[0].Content))
+	}
+}
+
+func TestMarkdownParser_UnclosedFenceNotCaptured(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Unclosed fence — should not produce a code block, body includes it as prose.
+	src := []byte("# Section\n\n```python\nprint('hello')\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if sections[0].Metadata["code_blocks"] != "" {
+		t.Error("unclosed fence should not produce code_blocks metadata")
+	}
+}
+
+func TestMarkdownParser_CodeBlockBeforeFirstHeading(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// Code block appears before any heading — should be silently dropped, not panic.
+	src := []byte("```python\nprint('hello')\n```\n\n# First Heading\nBody.\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatalf("expected 1 section, got %d", len(sections))
+	}
+	// The code block before the heading should NOT be attached to the section.
+	if sections[0].Metadata["code_blocks"] != "" {
+		t.Error("code block before first heading should not be attached to any section")
+	}
+}
+
+func TestMarkdownParser_ClosingFenceWithExtraText(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	// "```python" followed by "```extra" — the extra text means it's NOT a valid closing fence.
+	// The block should remain unclosed and not produce a code_blocks entry.
+	src := []byte("# Section\n\n```python\nprint('hi')\n```extra\nmore text\n```\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	cbJSON := sections[0].Metadata["code_blocks"]
+	if cbJSON == "" {
+		t.Fatal("expected a code block (```extra is not a closing fence, ``` at end is)")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(cbJSON), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	// The content should include "print('hi')", "```extra", "more text" since
+	// ```extra is not a valid closer. The real ``` at the end closes it.
+	if len(blocks) != 1 {
+		t.Fatalf("expected 1 code block, got %d", len(blocks))
+	}
+	if !strings.Contains(blocks[0].Content, "```extra") {
+		t.Errorf("content should include the non-closing fence line: %q", blocks[0].Content)
+	}
+}
+
+func TestMarkdownParser_TildeFenceWithLanguage(t *testing.T) {
+	g := newMarkdownTestGraph()
+	p := NewMarkdownParser()
+	src := []byte("# Section\n\n~~~javascript\nconsole.log('hi');\n~~~\n")
+	if err := p.Parse(g, "/repo/test.md", src); err != nil {
+		t.Fatal(err)
+	}
+	sections := g.FindByType(graph.NodeSection)
+	if len(sections) != 1 {
+		t.Fatal("expected 1 section")
+	}
+	var blocks []codeBlock
+	if err := json.Unmarshal([]byte(sections[0].Metadata["code_blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if blocks[0].Language != "javascript" {
+		t.Errorf("language = %q, want javascript", blocks[0].Language)
+	}
+}
+
+// assertEdge checks that an edge exists from→to with the given type.
+func assertEdge(t *testing.T, g *graph.Graph, from, to graph.NodeID, edgeType graph.EdgeType) {
+	t.Helper()
+	edges := g.OutEdges(from)
+	for _, e := range edges {
+		if e.To == to && e.Type == edgeType {
+			return
+		}
+	}
+	t.Errorf("missing edge %s --%s--> %s", from, edgeType, to)
+}

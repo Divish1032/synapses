@@ -1,0 +1,731 @@
+// daemon_admin.go — Phase 0 admin API endpoints for the web console.
+//
+// These endpoints replace Tauri IPC commands with standard REST so the
+// web console (browser or Tauri) can manage the daemon.
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
+	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
+)
+
+// validateOllamaURL checks that the Ollama URL uses http(s) and points to
+// localhost only, preventing SSRF via user-controlled brain.json configuration.
+// Covers the full 127.0.0.0/8 loopback range, IPv6 ::1, IPv6-mapped IPv4,
+// and rejects non-HTTP schemes (gopher://, file://, etc.).
+func validateOllamaURL(rawURL string) error {
+	if rawURL == "" {
+		return fmt.Errorf("empty ollama URL")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid ollama URL")
+	}
+	// Restrict to http/https only.
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("missing hostname in ollama URL")
+	}
+	// If it parses as an IP, accept only loopback addresses.
+	// net.ParseIP handles 127.0.0.0/8, ::1, and ::ffff:127.0.0.1.
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return fmt.Errorf("ollama URL must point to localhost")
+		}
+		return nil
+	}
+	// For hostnames, accept only the exact string "localhost".
+	if host != "localhost" {
+		return fmt.Errorf("ollama URL must point to localhost")
+	}
+	return nil
+}
+
+// newOllamaHTTPClient returns an HTTP client hardened against SSRF:
+//   - Dial-time IP validation ensures the resolved address is loopback,
+//     eliminating DNS-rebinding / TOCTOU attacks.
+//   - Port validation restricts connections to user ports (1024-65535) or
+//     the Ollama default (11434), preventing access to privileged services.
+//   - Redirect following is disabled.
+func newOllamaHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout: 5 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			host, portStr, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("ssrf: invalid address %q", address)
+			}
+
+			// Validate the resolved IP is loopback (runs AFTER DNS resolution).
+			ip := net.ParseIP(host)
+			if ip == nil {
+				return fmt.Errorf("ssrf: could not parse IP %q", host)
+			}
+			if !ip.IsLoopback() {
+				return fmt.Errorf("ssrf: dial to non-loopback address %s blocked", ip)
+			}
+
+			// Validate port: allow user ports (1024-65535).
+			// Note: Ollama default port 11434 > 1023, so no special case needed.
+			port, err := strconv.Atoi(portStr)
+			if err != nil || port <= 0 || port > 65535 {
+				return fmt.Errorf("ssrf: invalid port %q", portStr)
+			}
+			if port < 1024 {
+				return fmt.Errorf("ssrf: privileged port %d blocked", port)
+			}
+
+			return nil
+		},
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{DialContext: dialer.DialContext},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse // prevent SSRF via redirect
+		},
+	}
+}
+
+// registerAdminEndpoints adds the Phase 0 management API to mux.
+// reg is the project registry (for reindex).
+func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProject func(string) (*ProjectInstance, error), shutdownFn ...func()) {
+	// shutdownFn is an optional graceful shutdown callback that replaces os.Exit(0).
+	doShutdown := func() { logutil.Warn("synapses: shutdown requested but no graceful handler registered\n") } // safe fallback — never hard-exit
+	if len(shutdownFn) > 0 && shutdownFn[0] != nil {
+		doShutdown = shutdownFn[0]
+	}
+
+	// ── GET /api/admin/version — binary version info ─────────────────────────
+	mux.HandleFunc("/api/admin/version", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "use GET", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version":  version,
+			"go":       runtime.Version(),
+			"os":       runtime.GOOS,
+			"arch":     runtime.GOARCH,
+			"projects": len(reg.All()),
+		}) //nolint:errcheck
+	})
+
+	// ── GET /api/admin/services — list in-process services ───────────────────
+	mux.HandleFunc("/api/admin/services", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "use GET", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// The daemon runs brain, scout, and pulse in-process. Report status.
+		services := []map[string]interface{}{
+			{
+				"name":   "daemon",
+				"port":   11435,
+				"status": "healthy",
+			},
+		}
+		json.NewEncoder(w).Encode(services) //nolint:errcheck
+	})
+
+	// ── POST /api/admin/services/{name}/restart — daemon restart ─────────────
+	mux.HandleFunc("/api/admin/services/", func(w http.ResponseWriter, r *http.Request) {
+		// Route: /api/admin/services/{name}/restart or /stop
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/admin/services/"), "/")
+		if len(parts) < 2 || r.Method != http.MethodPost {
+			http.Error(w, "use POST /api/admin/services/{name}/restart or /stop", http.StatusMethodNotAllowed)
+			return
+		}
+		action := parts[1]
+		w.Header().Set("Content-Type", "application/json")
+		switch action {
+		case "restart":
+			// Daemon self-restart: spawn a new instance and exit.
+			// The service manager (launchd/systemd) or the caller restarts us.
+			json.NewEncoder(w).Encode(map[string]string{"status": "restarting"}) //nolint:errcheck
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				logutil.Info("synapses: daemon restart requested via API\n")
+				doShutdown()
+			}()
+		case "stop":
+			json.NewEncoder(w).Encode(map[string]string{"status": "stopping"}) //nolint:errcheck
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				logutil.Info("synapses: daemon stop requested via API\n")
+				doShutdown()
+			}()
+		default:
+			http.Error(w, "unknown action: "+action, http.StatusBadRequest)
+		}
+	})
+
+	// ── GET /api/admin/agents/detect — detect installed AI agents ────────────
+	mux.HandleFunc("/api/admin/agents/detect", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		agents := detectInstalledAgents()
+		json.NewEncoder(w).Encode(agents) //nolint:errcheck
+	})
+
+	// ── POST /api/admin/agents/connect — write MCP config for agent ──────────
+	mux.HandleFunc("/api/admin/agents/connect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Agent       string `json:"agent"`
+			ProjectPath string `json:"project_path"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "bad request: invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if req.Agent == "" || req.ProjectPath == "" {
+			http.Error(w, "agent and project_path required", http.StatusBadRequest)
+			return
+		}
+		absPath, err := canonicalPath(req.ProjectPath)
+		if err != nil {
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path", http.StatusBadRequest)
+			return
+		}
+		results := connectAgents(absPath, []string{req.Agent})
+		w.Header().Set("Content-Type", "application/json")
+		if len(results) > 0 && results[0].Err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": mcpsrv.StripInternalPaths(results[0].Err.Error())}) //nolint:errcheck
+			return
+		}
+		resp := map[string]interface{}{"status": "ok"}
+		if len(results) > 0 {
+			resp["files"] = results[0].Files
+		}
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	})
+
+	// ── GET /api/admin/agents/check — check MCP config for agent ─────────────
+	mux.HandleFunc("/api/admin/agents/check", func(w http.ResponseWriter, r *http.Request) {
+		editor := r.URL.Query().Get("editor")
+		projectPath := r.URL.Query().Get("project_path")
+		if editor == "" || projectPath == "" {
+			http.Error(w, "editor and project_path query params required", http.StatusBadRequest)
+			return
+		}
+		absPath, err := canonicalPath(projectPath)
+		if err != nil {
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path", http.StatusBadRequest)
+			return
+		}
+		projectPath = absPath
+		configured := checkMCPConfigured(editor, projectPath)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"configured": configured}) //nolint:errcheck
+	})
+
+	// ── GET /api/admin/config — read synapses.json + brain.json ──────────────
+	mux.HandleFunc("/api/admin/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			home, _ := synapsesHome()
+			result := map[string]interface{}{}
+			// Read brain.json
+			if data, err := os.ReadFile(filepath.Join(home, "brain.json")); err == nil {
+				var brain interface{}
+				if json.Unmarshal(data, &brain) == nil {
+					result["brain"] = brain
+				}
+			}
+			// Read app_settings.json
+			if data, err := os.ReadFile(filepath.Join(home, "app_settings.json")); err == nil {
+				var settings interface{}
+				if json.Unmarshal(data, &settings) == nil {
+					result["app_settings"] = settings
+				}
+			}
+			json.NewEncoder(w).Encode(result) //nolint:errcheck
+
+		case http.MethodPut:
+			var body map[string]json.RawMessage
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+				http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			home, err := synapsesHome()
+			if err != nil {
+				http.Error(w, "cannot find data dir: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
+				return
+			}
+			// Write brain.json
+			if raw, ok := body["brain"]; ok {
+				var check interface{}
+				if json.Unmarshal(raw, &check) != nil {
+					http.Error(w, "brain: invalid JSON", http.StatusBadRequest)
+					return
+				}
+				if err := os.WriteFile(filepath.Join(home, "brain.json"), raw, 0o600); err != nil {
+					http.Error(w, "write brain.json: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
+					return
+				}
+			}
+			// Write app_settings.json
+			if raw, ok := body["app_settings"]; ok {
+				if err := os.WriteFile(filepath.Join(home, "app_settings.json"), raw, 0o600); err != nil {
+					http.Error(w, "write app_settings.json: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
+					return
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+
+		default:
+			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// ── GET /api/admin/logs — tail daemon log ────────────────────────────────
+	mux.HandleFunc("/api/admin/logs", func(w http.ResponseWriter, r *http.Request) {
+		n := 100
+		if v := r.URL.Query().Get("n"); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				n = parsed
+			}
+		}
+		if n <= 0 || n > 10000 {
+			n = 100
+		}
+		logPath, err := singletonLogPath()
+		if err != nil {
+			http.Error(w, "log path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
+			return
+		}
+		lines := tailFile(logPath, n)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"lines": lines}) //nolint:errcheck
+	})
+
+	// ── GET /api/admin/ollama — Ollama status + models ───────────────────────
+	mux.HandleFunc("/api/admin/ollama", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		ollamaURL := "http://localhost:11434"
+		// Try to read from brain.json
+		if home, err := synapsesHome(); err == nil {
+			if data, err := os.ReadFile(filepath.Join(home, "brain.json")); err == nil {
+				var cfg map[string]interface{}
+				if json.Unmarshal(data, &cfg) == nil {
+					if u, ok := cfg["ollama_url"].(string); ok && u != "" {
+						ollamaURL = u
+					}
+				}
+			}
+		}
+		if err := validateOllamaURL(ollamaURL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		client := newOllamaHTTPClient(3 * time.Second)
+		result := map[string]interface{}{"running": false}
+
+		// Check version
+		if resp, err := client.Get(ollamaURL + "/api/version"); err == nil {
+			var ver map[string]interface{}
+			if json.NewDecoder(resp.Body).Decode(&ver) == nil {
+				result["running"] = true
+				result["version"] = ver["version"]
+			}
+			io.Copy(io.Discard, resp.Body) //nolint:errcheck
+			resp.Body.Close()
+		}
+
+		// List models
+		if result["running"] == true {
+			if resp, err := client.Get(ollamaURL + "/api/tags"); err == nil {
+				var tags map[string]interface{}
+				if json.NewDecoder(resp.Body).Decode(&tags) == nil {
+					if models, ok := tags["models"]; ok {
+						result["models"] = models
+					}
+				}
+				io.Copy(io.Discard, resp.Body) //nolint:errcheck
+				resp.Body.Close()
+			}
+		}
+
+		json.NewEncoder(w).Encode(result) //nolint:errcheck
+	})
+
+	// ── POST /api/admin/ollama/pull — pull model with SSE progress ───────────
+	mux.HandleFunc("/api/admin/ollama/pull", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.Model == "" {
+			http.Error(w, "model field required", http.StatusBadRequest)
+			return
+		}
+
+		ollamaURL := "http://localhost:11434"
+		if home, err := synapsesHome(); err == nil {
+			if data, err := os.ReadFile(filepath.Join(home, "brain.json")); err == nil {
+				var cfg map[string]interface{}
+				if json.Unmarshal(data, &cfg) == nil {
+					if u, ok := cfg["ollama_url"].(string); ok && u != "" {
+						ollamaURL = u
+					}
+				}
+			}
+		}
+		if err := validateOllamaURL(ollamaURL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Stream pull progress as SSE
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		bodyJSON, _ := json.Marshal(map[string]interface{}{"model": req.Model, "stream": true})
+		ollamaClient := newOllamaHTTPClient(30 * time.Minute)
+		resp, err := ollamaClient.Post(ollamaURL+"/api/pull", "application/json", strings.NewReader(string(bodyJSON)))
+		if err != nil {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{"error": mcpsrv.StripInternalPaths(err.Error())}))
+			flusher.Flush()
+			return
+		}
+		defer resp.Body.Close()
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+		fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"status": "done"}))
+		flusher.Flush()
+	})
+
+	// ── POST /api/admin/projects/reindex — trigger reindex ───────────────────
+	mux.HandleFunc("/api/admin/projects/reindex", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.Path == "" {
+			http.Error(w, "path field required", http.StatusBadRequest)
+			return
+		}
+		absPath, err := canonicalPath(req.Path)
+		if err != nil {
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+		if err := isValidProjectPath(absPath); err != nil {
+			http.Error(w, "invalid project path", http.StatusBadRequest)
+			return
+		}
+
+		// Full reindex: tear down the existing project instance (closes store,
+		// watcher, MCP server) and reinitialise from scratch. This re-parses
+		// all source files, rebuilds the graph, and restarts the watcher.
+		reg.Delete(absPath)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "reindexing", "path": absPath}) //nolint:errcheck
+
+		// Reinitialise in background so the HTTP response returns immediately.
+		go func() {
+			if _, err := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+				return initProject(absPath)
+			}); err != nil {
+				logutil.Warn("reindex %s failed: %v\n", absPath, err)
+			} else {
+				logutil.Info("reindex %s complete\n", absPath)
+			}
+		}()
+	})
+
+	// ── GET/PUT /api/admin/projects/config — read/write project synapses.json ─
+	mux.HandleFunc("/api/admin/projects/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method {
+		case http.MethodGet:
+			projPath := r.URL.Query().Get("path")
+			if projPath == "" {
+				http.Error(w, `{"error":"path query param required"}`, http.StatusBadRequest)
+				return
+			}
+			absPath, err := canonicalPath(projPath)
+			if err != nil {
+				http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+				return
+			}
+			if err := isValidProjectPath(absPath); err != nil {
+				http.Error(w, `{"error":"invalid project path"}`, http.StatusBadRequest)
+				return
+			}
+			cfgPath := filepath.Join(absPath, "synapses.json")
+			data, err := os.ReadFile(cfgPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// Return empty config — project has no synapses.json yet
+					json.NewEncoder(w).Encode(map[string]interface{}{"config": map[string]interface{}{}}) //nolint:errcheck
+					return
+				}
+				http.Error(w, `{"error":"read config: `+mcpsrv.StripInternalPaths(err.Error())+`"}`, http.StatusInternalServerError)
+				return
+			}
+			var parsed interface{}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				http.Error(w, `{"error":"parse config: `+err.Error()+`"}`, http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"config": parsed}) //nolint:errcheck
+
+		case http.MethodPut:
+			var req struct {
+				Path   string          `json:"path"`
+				Config json.RawMessage `json:"config"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.Path == "" {
+				http.Error(w, `{"error":"path and config required"}`, http.StatusBadRequest)
+				return
+			}
+			absPath, err := canonicalPath(req.Path)
+			if err != nil {
+				http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+				return
+			}
+			if err := isValidProjectPath(absPath); err != nil {
+				http.Error(w, `{"error":"invalid project path"}`, http.StatusBadRequest)
+				return
+			}
+			// Validate JSON
+			var check interface{}
+			if json.Unmarshal(req.Config, &check) != nil {
+				http.Error(w, `{"error":"invalid config JSON"}`, http.StatusBadRequest)
+				return
+			}
+			// Pretty-print for readability
+			pretty, _ := json.MarshalIndent(check, "", "  ")
+			cfgPath := filepath.Join(absPath, "synapses.json")
+			if err := os.WriteFile(cfgPath, pretty, 0o644); err != nil {
+				http.Error(w, `{"error":"write config: `+mcpsrv.StripInternalPaths(err.Error())+`"}`, http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
+
+		default:
+			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// ── GET/POST /api/admin/update-check — update status ────────────────────
+	mux.HandleFunc("/api/admin/update-check", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			// Return cached update state.
+			state := getUpdateState()
+			if state == nil {
+				state = &UpdateState{
+					CurrentVersion:  version,
+					UpdateAvailable: false,
+					CheckedAt:       "",
+				}
+			}
+			// Override with live pending version (may be fresher than file).
+			if v := getPendingUpdateVersion(); v != "" {
+				state.UpdateAvailable = true
+				state.LatestVersion = v
+			}
+			json.NewEncoder(w).Encode(state) //nolint:errcheck
+
+		case http.MethodPost:
+			// Force a fresh check.
+			state := checkForUpdate()
+			if state == nil {
+				state = &UpdateState{
+					CurrentVersion:  version,
+					UpdateAvailable: false,
+					Error:           "check skipped (dev build)",
+				}
+			}
+			json.NewEncoder(w).Encode(state) //nolint:errcheck
+
+		default:
+			http.Error(w, "use GET or POST", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+// checkMCPConfigured checks if the given editor has MCP config for synapses.
+func checkMCPConfigured(editor, projectPath string) bool {
+	var configPath string
+	switch editor {
+	case "claude":
+		configPath = filepath.Join(projectPath, ".mcp.json")
+	case "cursor":
+		configPath = filepath.Join(projectPath, ".cursor", "mcp.json")
+	case "windsurf":
+		configPath = filepath.Join(projectPath, ".windsurf", "mcp_config.json")
+	case "antigravity":
+		configPath = filepath.Join(projectPath, ".agent", "mcp.json")
+	case "zed":
+		configPath = filepath.Join(projectPath, ".zed", "settings.json")
+	default:
+		return false
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	// Parse JSON and check for "synapses" key in mcpServers object.
+	var config map[string]interface{}
+	if json.Unmarshal(data, &config) != nil {
+		return false
+	}
+	// Check nested mcpServers.synapses (common format for Claude, Cursor, etc.)
+	if servers, ok := config["mcpServers"].(map[string]interface{}); ok {
+		if _, found := servers["synapses"]; found {
+			return true
+		}
+	}
+	// Zed uses a different structure — fall back to string check for "synapses".
+	return strings.Contains(string(data), "synapses")
+}
+
+// tailFile reads the last n lines from a file using seek-from-end to avoid
+// loading the entire file into memory for large log files.
+func tailFile(path string, n int) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return []string{}
+	}
+	defer f.Close()
+
+	// For small files (< 1 MB), just read everything.
+	info, err := f.Stat()
+	if err != nil {
+		return []string{}
+	}
+	const seekThreshold = 1 * 1024 * 1024 // 1 MB
+
+	if info.Size() > seekThreshold {
+		// Seek from end: read the last chunk and extract lines.
+		// Start with 64KB * n/100 estimate, grow if needed.
+		chunkSize := int64(n) * 1024
+		if chunkSize < 64*1024 {
+			chunkSize = 64 * 1024
+		}
+		if chunkSize > info.Size() {
+			chunkSize = info.Size()
+		}
+		for attempt := 0; attempt < 3; attempt++ {
+			offset := info.Size() - chunkSize
+			if offset < 0 {
+				offset = 0
+			}
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				break
+			}
+			var lines []string
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				lines = append(lines, scanner.Text())
+			}
+			// If we started mid-file, the first line may be partial — skip it.
+			if offset > 0 && len(lines) > 0 {
+				lines = lines[1:]
+			}
+			if len(lines) >= n || offset == 0 {
+				if len(lines) > n {
+					lines = lines[len(lines)-n:]
+				}
+				return lines
+			}
+			// Too few lines; double chunk size and retry.
+			// Break early if we've already covered the entire file — no point
+			// reading it again on the next iteration.
+			if chunkSize >= info.Size() {
+				break
+			}
+			chunkSize *= 2
+			if chunkSize > info.Size() {
+				chunkSize = info.Size()
+			}
+		}
+	}
+
+	// Fallback: rewind to the beginning (the seek-based loop above may have
+	// advanced the file cursor) and read all lines.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return []string{}
+	}
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines
+}
+
+// mustJSON marshals v to JSON, or returns "{}" on error.
+func mustJSON(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}

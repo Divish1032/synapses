@@ -1,15 +1,16 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
-)
 
-var idCounter uint64
+	"github.com/SynapsesOS/synapses/internal/logutil"
+)
 
 // Plan is a named collection of related tasks created during an LLM session.
 // It persists in SQLite so future sessions can resume the agreed work.
@@ -20,6 +21,9 @@ type Plan struct {
 	CreatedBy   string `json:"created_by,omitempty"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
+	// CompletedAt is set (unix seconds) when all tasks in the plan reach done/cancelled.
+	// Zero means still active.
+	CompletedAt int64 `json:"completed_at,omitempty"`
 }
 
 // Task is a single actionable work item belonging to a plan.
@@ -36,6 +40,12 @@ type Task struct {
 	Notes         string   `json:"notes"`        // append-only notes from each session
 	AssignedTo    string   `json:"assigned_to,omitempty"`
 	LastUpdatedBy string   `json:"last_updated_by,omitempty"`
+	// R21: Commit tracking — populated when git is available in the project root.
+	// StartCommit is the HEAD SHA captured when the task was set to in_progress.
+	// CommitsSinceStart is the git log since StartCommit, captured at done time.
+	// Both are empty when git is unavailable. Commits are repo-wide (not per-agent).
+	StartCommit       string   `json:"start_commit,omitempty"`
+	CommitsSinceStart []string `json:"commits_since_start,omitempty"`
 	// Computed fields — not stored in DB; set by GetPendingTasks.
 	Blocked   bool     `json:"blocked,omitempty"`
 	BlockedBy []string `json:"blocked_by,omitempty"`
@@ -85,54 +95,59 @@ func (t *TaskInput) UnmarshalJSON(data []byte) error {
 // PlanSummary is a plan with task completion counts, used by GetPlans.
 type PlanSummary struct {
 	Plan
-	TotalTasks   int `json:"total_tasks"`
-	PendingTasks int `json:"pending_tasks"`
-	DoneTasks    int `json:"done_tasks"`
+	TotalTasks   int  `json:"total_tasks"`
+	PendingTasks int  `json:"pending_tasks"`
+	DoneTasks    int  `json:"done_tasks"`
+	IsCompleted  bool `json:"is_completed"` // true when all tasks are done/cancelled
 }
 
 // CreatePlan persists a plan and its initial tasks atomically.
 // agentID is optional — if non-empty it records which agent created the plan.
 // Returns the plan ID.
-func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput) (string, error) {
-	planID := newID()
+// CreatePlan persists a plan and its initial tasks atomically. agentID is optional —
+// if non-empty it records which agent created the plan. Returns the plan ID and
+// the IDs of all created tasks (for session-task linkage).
+func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput) (planID string, taskIDs []string, err error) {
+	planID = newID()
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return "", fmt.Errorf("begin tx: %w", err)
+	tx, txErr := s.knowledgeDB.Begin()
+	if txErr != nil {
+		return "", nil, fmt.Errorf("begin tx: %w", txErr)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	_, err = tx.Exec(
+	_, txErr = tx.Exec(
 		`INSERT INTO plans (id, title, description, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		planID, title, description, agentID, now, now,
 	)
-	if err != nil {
-		return "", fmt.Errorf("insert plan: %w", err)
+	if txErr != nil {
+		return "", nil, fmt.Errorf("insert plan: %w", txErr)
 	}
 
 	for _, t := range tasks {
 		taskID := newID()
+		taskIDs = append(taskIDs, taskID)
 		priority := t.Priority
 		if priority == "" {
 			priority = "p2"
 		}
 		linked, _ := json.Marshal(t.LinkedNodes)
 		deps, _ := json.Marshal(t.DependsOn)
-		_, err = tx.Exec(
+		_, txErr = tx.Exec(
 			`INSERT INTO tasks (id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', ?, ?)`,
 			taskID, planID, t.Title, t.Description, priority, string(linked), string(deps), now, now,
 		)
-		if err != nil {
-			return "", fmt.Errorf("insert task %q: %w", t.Title, err)
+		if txErr != nil {
+			return "", nil, fmt.Errorf("insert task %q: %w", t.Title, txErr)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit: %w", err)
+	if txErr = tx.Commit(); txErr != nil {
+		return "", nil, fmt.Errorf("commit: %w", txErr)
 	}
-	return planID, nil
+	return planID, taskIDs, nil
 }
 
 // GetPendingTasks returns all tasks with status 'pending' or 'in_progress',
@@ -143,7 +158,7 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	query := `
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
 		FROM tasks
 		WHERE status IN ('pending', 'in_progress')
 	`
@@ -160,9 +175,10 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	}
 	query += ` ORDER BY
 		CASE priority WHEN 'p0' THEN 0 WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END,
-		created_at ASC`
+		created_at ASC
+		LIMIT 500`
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query pending tasks: %w", err)
 	}
@@ -178,7 +194,7 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	if agentID != "" {
 		for _, t := range tasks {
 			if t.AssignedTo == "" {
-				_, _ = s.db.Exec(
+				_, _ = s.knowledgeDB.Exec(
 					`UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ? AND (assigned_to = '' OR assigned_to IS NULL)`,
 					agentID, time.Now().UTC(), t.ID,
 				)
@@ -227,6 +243,60 @@ func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	return tasks, nil
 }
 
+// FindTasksByNodeID searches tasks where linked_nodes contains the given node ID.
+// Returns up to limit results ordered by most recently updated first.
+// Wraps the search term in JSON double quotes so "Auth" does NOT false-match
+// "AuthService" — the closing quote acts as an exact-entry boundary.
+func (s *Store) FindTasksByNodeID(nodeID string, limit int) ([]Task, error) {
+	if nodeID == "" || limit <= 0 {
+		return nil, nil
+	}
+	pattern := `%"` + escapeLike(nodeID) + `"%`
+	rows, err := s.knowledgeDB.Query(`
+		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
+		FROM tasks
+		WHERE linked_nodes LIKE ? ESCAPE '\'
+		ORDER BY updated_at DESC
+		LIMIT ?`, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find tasks by node: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		var linkedJSON, depsJSON, commitsJSON string
+		if err := rows.Scan(
+			&t.ID, &t.PlanID, &t.Title, &t.Description,
+			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
+			&t.AssignedTo, &t.LastUpdatedBy,
+			&t.CreatedAt, &t.UpdatedAt,
+			&t.StartCommit, &commitsJSON,
+		); err != nil {
+			return nil, fmt.Errorf("scan task by node: %w", err)
+		}
+		if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+		}
+		if t.LinkedNodes == nil {
+			t.LinkedNodes = []string{}
+		}
+		if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+		}
+		if t.DependsOn == nil {
+			t.DependsOn = []string{}
+		}
+		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal commits for task %q: %v\n", t.ID, err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 // UpdateLinkedNodes replaces the linked_nodes for a task with nodeIDs.
 // Call with the full desired set (existing + newly detected); deduplication is
 // the caller's responsibility. Used by handleLinkTaskNodes and autoLinkNodes.
@@ -235,7 +305,7 @@ func (s *Store) UpdateLinkedNodes(taskID string, nodeIDs []string) error {
 		nodeIDs = []string{}
 	}
 	linked, _ := json.Marshal(nodeIDs)
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`UPDATE tasks SET linked_nodes = ?, updated_at = ? WHERE id = ?`,
 		string(linked), time.Now().UTC().Format(time.RFC3339), taskID,
 	)
@@ -245,52 +315,127 @@ func (s *Store) UpdateLinkedNodes(taskID string, nodeIDs []string) error {
 // UpdateTask changes the status and optionally appends notes to a task.
 // agentID is optional — if non-empty it is recorded as the last_updated_by agent.
 // Appended notes are prefixed with a timestamp so they form an audit trail.
-// Returns the IDs of tasks that became unblocked as a result of this update
-// (only meaningful when status == "done").
-func (s *Store) UpdateTask(id, status, appendNotes, agentID string) ([]string, error) {
+// Returns:
+//   - unblocked: task IDs that became unblocked (only meaningful when status=="done")
+//   - planCompleted: true when this update caused the parent plan to auto-complete
+//     (all tasks in the plan are now done/cancelled)
+func (s *Store) UpdateTask(id, status, appendNotes, agentID string) (unblocked []string, planCompleted bool, err error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
+	// When transitioning to in_progress, also stamp assigned_to so that
+	// get_session_state can look up failure episodes for the right agent (F12).
+	assignedTo := ""
+	if status == "in_progress" && agentID != "" {
+		assignedTo = agentID
+	}
+
 	if appendNotes != "" {
-		var existing string
-		row := s.db.QueryRow(`SELECT notes FROM tasks WHERE id = ?`, id)
-		if err := row.Scan(&existing); err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("read task notes: %w", err)
-		}
 		newNote := fmt.Sprintf("[%s] %s", now, appendNotes)
-		if existing != "" {
-			existing = existing + "\n" + newNote
+		// Atomic SQL append — avoids the read-modify-write TOCTOU race that
+		// previously lost notes under concurrent access.
+		notesExpr := `CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END`
+		if assignedTo != "" {
+			if _, execErr := s.knowledgeDB.Exec(
+				`UPDATE tasks SET status = ?, notes = `+notesExpr+`, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, newNote, newNote, assignedTo, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
 		} else {
-			existing = newNote
-		}
-		if _, err := s.db.Exec(
-			`UPDATE tasks SET status = ?, notes = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
-			status, existing, agentID, now, id,
-		); err != nil {
-			return nil, err
+			if _, execErr := s.knowledgeDB.Exec(
+				`UPDATE tasks SET status = ?, notes = `+notesExpr+`, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, newNote, newNote, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
 		}
 	} else {
-		if _, err := s.db.Exec(
-			`UPDATE tasks SET status = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
-			status, agentID, now, id,
-		); err != nil {
-			return nil, err
+		if assignedTo != "" {
+			if _, execErr := s.knowledgeDB.Exec(
+				`UPDATE tasks SET status = ?, assigned_to = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, assignedTo, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
+		} else {
+			if _, execErr := s.knowledgeDB.Exec(
+				`UPDATE tasks SET status = ?, last_updated_by = ?, updated_at = ? WHERE id = ?`,
+				status, agentID, now, id,
+			); execErr != nil {
+				return nil, false, execErr
+			}
 		}
 	}
 
-	// If marking done, find tasks that depended on this task and are now unblocked.
-	if status != "done" {
-		return nil, nil
+	// For terminal statuses, run both dependency unblocking and plan completion checks.
+	if status == "done" || status == "cancelled" {
+		// Fetch the plan_id of this task so we can check plan completion.
+		var planID string
+		_ = s.knowledgeDB.QueryRow(`SELECT plan_id FROM tasks WHERE id = ?`, id).Scan(&planID)
+
+		if status == "done" {
+			unblocked, err = s.findNewlyUnblocked(id)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		planCompleted, err = checkAndCompletePlan(s.knowledgeDB, planID)
+		if err != nil {
+			return unblocked, false, err
+		}
 	}
-	return s.findNewlyUnblocked(id)
+	return unblocked, planCompleted, nil
+}
+
+// checkAndCompletePlan marks a plan as completed if every task in it has
+// reached a terminal status (done or cancelled). It is idempotent: a plan
+// that is already completed (completed_at != 0) is never double-stamped.
+// Returns true when the plan was just transitioned to completed.
+func checkAndCompletePlan(db *rwDB, planID string) (bool, error) {
+	if planID == "" {
+		return false, nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("check plan completion: begin tx: %w", err)
+	}
+	defer tx.Rollback() // no-op after successful Commit
+
+	// A plan completes when it has at least one task and all tasks are terminal.
+	var totalTasks, openTasks int
+	row := tx.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN status NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0)
+		FROM tasks WHERE plan_id = ?`, planID)
+	if err := row.Scan(&totalTasks, &openTasks); err != nil {
+		return false, fmt.Errorf("check plan completion: %w", err)
+	}
+	if totalTasks == 0 || openTasks > 0 {
+		return false, nil
+	}
+	// Stamp completed_at atomically — only rows that are still active (0) are updated.
+	res, err := tx.Exec(
+		`UPDATE plans SET completed_at = ? WHERE id = ? AND completed_at = 0`,
+		time.Now().Unix(), planID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark plan complete: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("mark plan complete: commit: %w", err)
+	}
+	return n > 0, nil
 }
 
 // findNewlyUnblocked returns IDs of pending tasks that had `completedID` as
 // their only blocking dependency (i.e. all other deps are now done too).
 func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 	// Find all pending/in_progress tasks that depend on completedID.
-	rows, err := s.db.Query(
-		`SELECT id, depends_on FROM tasks WHERE status IN ('pending','in_progress') AND depends_on LIKE ?`,
-		"%"+completedID+"%",
+	rows, err := s.knowledgeDB.Query(
+		`SELECT id, depends_on FROM tasks WHERE status IN ('pending','in_progress') AND depends_on LIKE ? ESCAPE '\'`,
+		"%"+escapeLike(completedID)+"%",
 	)
 	if err != nil {
 		return nil, err
@@ -308,7 +453,9 @@ func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 			return nil, err
 		}
 		var deps []string
-		_ = json.Unmarshal([]byte(depsJSON), &deps)
+		if err := json.Unmarshal([]byte(depsJSON), &deps); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", tid, err)
+		}
 		// Filter to only tasks that actually list completedID.
 		for _, d := range deps {
 			if d == completedID {
@@ -355,29 +502,66 @@ func (s *Store) findNewlyUnblocked(completedID string) ([]string, error) {
 	return unblocked, nil
 }
 
+// SetTaskStartCommit records the git HEAD SHA captured when a task was set to in_progress.
+// It is a no-op (not an error) when sha is empty, ensuring graceful degradation when
+// git is unavailable.
+func (s *Store) SetTaskStartCommit(taskID, sha string) error {
+	if sha == "" {
+		return nil
+	}
+	_, err := s.knowledgeDB.Exec(
+		`UPDATE tasks SET start_commit = ?, updated_at = ? WHERE id = ?`,
+		sha, time.Now().UTC().Format(time.RFC3339), taskID,
+	)
+	return err
+}
+
+// SetTaskCommits stores the git log lines captured at task completion.
+// commits may be nil (no commits made, or git unavailable) — stored as '[]'.
+// This is a write-once operation per task: called once at update_task(done).
+func (s *Store) SetTaskCommits(taskID string, commits []string) error {
+	if commits == nil {
+		commits = []string{}
+	}
+	raw, _ := json.Marshal(commits)
+	_, err := s.knowledgeDB.Exec(
+		`UPDATE tasks SET commits = ?, updated_at = ? WHERE id = ?`,
+		string(raw), time.Now().UTC().Format(time.RFC3339), taskID,
+	)
+	return err
+}
+
 // GetTask retrieves a single task by ID. Returns an error wrapping sql.ErrNoRows if not found.
 func (s *Store) GetTask(id string) (*Task, error) {
-	row := s.db.QueryRow(`
+	row := s.knowledgeDB.QueryRow(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
 		FROM tasks WHERE id = ?`, id)
 	var t Task
-	var linkedJSON, depsJSON string
+	var linkedJSON, depsJSON, commitsJSON string
 	if err := row.Scan(
 		&t.ID, &t.PlanID, &t.Title, &t.Description,
 		&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 		&t.AssignedTo, &t.LastUpdatedBy,
 		&t.CreatedAt, &t.UpdatedAt,
+		&t.StartCommit, &commitsJSON,
 	); err != nil {
 		return nil, fmt.Errorf("get task %q: %w", id, err)
 	}
-	_ = json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes)
+	if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+	}
 	if t.LinkedNodes == nil {
 		t.LinkedNodes = []string{}
 	}
-	_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
+	if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+	}
 	if t.DependsOn == nil {
 		t.DependsOn = []string{}
+	}
+	if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
 	}
 	return &t, nil
 }
@@ -398,7 +582,7 @@ func (s *Store) taskStatusByID(ids []string) (map[string]string, error) {
 		placeholders = append(placeholders, '?')
 		args[i] = id
 	}
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id, status FROM tasks WHERE id IN (`+string(placeholders)+`)`,
 		args...,
 	)
@@ -419,8 +603,9 @@ func (s *Store) taskStatusByID(ids []string) (map[string]string, error) {
 
 // GetPlans returns all plans with task completion summaries, ordered by creation time desc.
 func (s *Store) GetPlans() ([]PlanSummary, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT p.id, p.title, p.description, p.created_by, p.created_at, p.updated_at,
+		       p.completed_at,
 		       COUNT(t.id)                                           AS total,
 		       SUM(CASE WHEN t.status IN ('pending','in_progress') THEN 1 ELSE 0 END) AS pending,
 		       SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END)  AS done
@@ -436,14 +621,16 @@ func (s *Store) GetPlans() ([]PlanSummary, error) {
 
 	var summaries []PlanSummary
 	for rows.Next() {
-		var s PlanSummary
+		var ps PlanSummary
 		if err := rows.Scan(
-			&s.ID, &s.Title, &s.Description, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt,
-			&s.TotalTasks, &s.PendingTasks, &s.DoneTasks,
+			&ps.ID, &ps.Title, &ps.Description, &ps.CreatedBy, &ps.CreatedAt, &ps.UpdatedAt,
+			&ps.CompletedAt,
+			&ps.TotalTasks, &ps.PendingTasks, &ps.DoneTasks,
 		); err != nil {
 			return nil, err
 		}
-		summaries = append(summaries, s)
+		ps.IsCompleted = ps.CompletedAt != 0
+		summaries = append(summaries, ps)
 	}
 	return summaries, rows.Err()
 }
@@ -453,37 +640,46 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		var linkedJSON, depsJSON string
+		var linkedJSON, depsJSON, commitsJSON string
 		if err := rows.Scan(
 			&t.ID, &t.PlanID, &t.Title, &t.Description,
 			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 			&t.AssignedTo, &t.LastUpdatedBy,
 			&t.CreatedAt, &t.UpdatedAt,
+			&t.StartCommit, &commitsJSON,
 		); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes)
+		if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
+		}
 		if t.LinkedNodes == nil {
 			t.LinkedNodes = []string{}
 		}
-		_ = json.Unmarshal([]byte(depsJSON), &t.DependsOn)
+		if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
+		}
 		if t.DependsOn == nil {
 			t.DependsOn = []string{}
+		}
+		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
 		}
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
 }
 
-// newID generates a short random ID for plans and tasks.
-// Uses time + random suffix — collision probability is negligible for local use.
+// newID generates a cryptographically random ID for plans and tasks.
+// Uses 16 bytes of crypto/rand, hex-encoded (32 chars). Existing stored IDs
+// (which used time+counter format) remain valid — the format is opaque.
 func newID() string {
-	// Combine timestamp with counter to ensure uniqueness even on systems with
-	// coarse timer resolution (like Windows). The counter ensures that multiple
-	// IDs generated within the same nanosecond are still unique.
-	ts := time.Now().UnixNano()
-	counter := atomic.AddUint64(&idCounter, 1)
-	return fmt.Sprintf("%x-%x", ts, counter)
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Fallback: should never happen on modern OS.
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 // --- Session State (exact-moment task resumption) ---
@@ -522,7 +718,7 @@ func (s *Store) UpsertSessionState(state SessionState) error {
 		id = state.ID
 	}
 
-	_, err := s.db.Exec(`
+	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO session_state
 			(id, task_id, agent_id, approach, files_modified, completed_steps,
 			 remaining_steps, blockers, decisions, context_snapshot, created_at, updated_at)
@@ -547,7 +743,7 @@ func (s *Store) UpsertSessionState(state SessionState) error {
 
 // GetSessionState returns the session state for a task, or nil if none exists.
 func (s *Store) GetSessionState(taskID string) (*SessionState, error) {
-	row := s.db.QueryRow(`
+	row := s.knowledgeDB.QueryRow(`
 		SELECT id, task_id, agent_id, approach,
 		       files_modified, completed_steps, remaining_steps,
 		       blockers, decisions, context_snapshot, created_at, updated_at
@@ -567,11 +763,21 @@ func (s *Store) GetSessionState(taskID string) (*SessionState, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(filesJSON), &st.FilesModified)
-	_ = json.Unmarshal([]byte(completedJSON), &st.CompletedSteps)
-	_ = json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps)
-	_ = json.Unmarshal([]byte(blockersJSON), &st.Blockers)
-	_ = json.Unmarshal([]byte(decisionsJSON), &st.Decisions)
+	if err := json.Unmarshal([]byte(filesJSON), &st.FilesModified); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(completedJSON), &st.CompletedSteps); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(blockersJSON), &st.Blockers); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
+	}
+	if err := json.Unmarshal([]byte(decisionsJSON), &st.Decisions); err != nil {
+		logutil.Debug("synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
+	}
 	return &st, nil
 }
 
@@ -588,7 +794,7 @@ func (s *Store) GetSessionStateForTasks(taskIDs []string) (map[string]*SessionSt
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	rows, err := s.db.Query(
+	rows, err := s.knowledgeDB.Query(
 		`SELECT id, task_id, agent_id, approach,
 		        files_modified, completed_steps, remaining_steps,
 		        blockers, decisions, context_snapshot, created_at, updated_at
@@ -611,11 +817,21 @@ func (s *Store) GetSessionStateForTasks(taskIDs []string) (map[string]*SessionSt
 		); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(filesJSON), &st.FilesModified)
-		_ = json.Unmarshal([]byte(completedJSON), &st.CompletedSteps)
-		_ = json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps)
-		_ = json.Unmarshal([]byte(blockersJSON), &st.Blockers)
-		_ = json.Unmarshal([]byte(decisionsJSON), &st.Decisions)
+		if err := json.Unmarshal([]byte(filesJSON), &st.FilesModified); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal files_modified for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(completedJSON), &st.CompletedSteps); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal completed_steps for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(remainingJSON), &st.RemainingSteps); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal remaining_steps for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(blockersJSON), &st.Blockers); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal blockers for session state %q: %v\n", st.ID, err)
+		}
+		if err := json.Unmarshal([]byte(decisionsJSON), &st.Decisions); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal decisions for session state %q: %v\n", st.ID, err)
+		}
 		result[st.TaskID] = &st
 	}
 	return result, rows.Err()

@@ -22,12 +22,13 @@ func newGenericParser() *genericParser {
 
 			// ── Frontend ──────────────────────────────────────────────────────
 			".html", ".htm", // HTML
-			".css", ".scss", ".sass", ".less", ".styl", // Stylesheets
+			// NOTE: .css → CSSParser; .scss .sass → SCSSParser
+			".less", ".styl", // Stylesheets (no deep parser yet)
 			".astro", // Astro framework
 			".mdx",   // MDX (Markdown + JSX)
 			".wasm",  // WebAssembly
 
-			// ── Systems (no smacker grammar) ─────────────────────────────────
+			// ── Systems (no dedicated parser) ─────────────────────────────────
 			// NOTE: .c .h .ino → CParser; .cpp .cc .cxx .hpp .hh .hxx .mm → CppParser
 			//       .cs → CSharpParser; .rs → RustParser; .swift → SwiftParser
 			".zig",       // Zig
@@ -35,18 +36,17 @@ func newGenericParser() *genericParser {
 			".asm", ".s", // Assembly
 
 			// ── Mobile ───────────────────────────────────────────────────────
-			// NOTE: .swift → SwiftParser; .mm → CppParser
-			".dart",     // Dart (Flutter)
+			// NOTE: .swift → SwiftParser; .mm → CppParser; .dart → DartParser
 			".m",        // Objective-C (C grammar is close but not identical)
 			".xcconfig", // Xcode config
 
 			// ── Scripting / Dynamic ──────────────────────────────────────────
 			// NOTE: .rb → RubyParser; .php → PHPParser; .lua → LuaParser
-			".r", ".R", // R
+			// NOTE: .r .R → RParser; .ps1 .psm1 .psd1 → PowerShellParser
 			".jl",        // Julia
 			".pl", ".pm", // Perl
-			".sh", ".bash", ".zsh", ".fish", // Shell scripts
-			".ps1", ".psm1", // PowerShell
+			// NOTE: .sh .bash .zsh → BashParser
+			".fish", // Shell scripts (no deep parser yet)
 			".bat", ".cmd", // Windows batch
 
 			// ── Data Science / Notebooks ─────────────────────────────────────
@@ -55,17 +55,14 @@ func newGenericParser() *genericParser {
 			".qmd", // Quarto
 
 			// ── Functional ───────────────────────────────────────────────────
-			// NOTE: .ex .exs → ElixirParser
-			".erl", ".hrl", // Erlang
-			".hs", ".lhs", // Haskell
-			".clj", ".cljs", ".cljc", ".edn", // Clojure
-			".fs", ".fsi", ".fsx", // F#
-			".ml", ".mli", // OCaml
+			// NOTE: .ex .exs → ElixirParser; .ml .mli → OCamlParser
+			// NOTE: .erl .hrl → ErlangParser; .hs .lhs → HaskellParser
+			// NOTE: .clj .cljs .cljc .edn → ClojureParser; .fs .fsi .fsx → FSharpParser
 			".lisp", ".cl", ".el", // Lisp / Common Lisp / Emacs Lisp
 			".scm", ".ss", // Scheme
 
 			// ── Database / Query ─────────────────────────────────────────────
-			".sql",            // SQL (generic)
+			// NOTE: .sql → SQLParser
 			".psql", ".pgsql", // PostgreSQL
 			".mysql",       // MySQL
 			".sqlite",      // SQLite
@@ -80,12 +77,11 @@ func newGenericParser() *genericParser {
 			".wsdl", ".xsd", // XML Schema / SOAP
 
 			// ── DevOps / Infrastructure ──────────────────────────────────────
-			".yaml", ".yml", // YAML (k8s, CI/CD, Docker Compose)
-			".dockerfile", ".containerfile", // Dockerfile variants
-			".tf", ".tfvars", // Terraform
-			".hcl",   // HCL (Vault, Consul, Packer)
-			".bicep", // Azure Bicep
-			".nix",   // Nix expressions
+			// NOTE: .yaml .yml → YAMLParser; .dockerfile → DockerfileParser
+			// NOTE: .tf .tfvars .hcl → HCLParser
+			".containerfile", // Dockerfile variants
+			".bicep",         // Azure Bicep
+			".nix",           // Nix expressions
 
 			// ── Config / Data ────────────────────────────────────────────────
 			".json", ".jsonc", ".json5", // JSON / JSON with comments
@@ -98,9 +94,8 @@ func newGenericParser() *genericParser {
 			".dotenv",     // Dotenv variants
 
 			// ── Web templates ─────────────────────────────────────────────────
-			// NOTE: .vue .svelte handled as generic (no smacker grammar)
-			".vue",          // Vue SFC
-			".svelte",       // Svelte
+			// NOTE: .svelte → SvelteParser
+			".vue", // Vue SFC
 			".erb",          // Ruby ERB templates
 			".ejs",          // EJS templates
 			".jinja", ".j2", // Jinja2 templates
@@ -112,8 +107,8 @@ func newGenericParser() *genericParser {
 			".blade", // Laravel Blade
 
 			// ── Documentation ─────────────────────────────────────────────────
-			".md", ".markdown", // Markdown
-			".rst",           // reStructuredText
+			// NOTE: .md .markdown .mdx → MarkdownParser
+			// NOTE: .rst .txt → PlaintextParser
 			".tex", ".latex", // LaTeX
 			".adoc", ".asciidoc", // AsciiDoc
 

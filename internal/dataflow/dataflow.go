@@ -51,11 +51,15 @@ func AnnotateGraph(g *graph.Graph, cfg *config.Config) int {
 		if role == "" {
 			continue
 		}
-		if n.Metadata == nil {
-			n.Metadata = make(map[string]string)
-		}
-		n.Metadata["data_role"] = role
-		n.Metadata["data_label"] = label
+		// Mutate metadata under the graph write lock to avoid data races
+		// with concurrent readers (e.g. CarveEgoGraph).
+		g.UpdateNodeMetadata(n.ID, func(nn *graph.Node) {
+			if nn.Metadata == nil {
+				nn.Metadata = make(map[string]string)
+			}
+			nn.Metadata["data_role"] = role
+			nn.Metadata["data_label"] = label
+		})
 		if role == "source" {
 			sources = append(sources, n)
 		} else {
@@ -73,15 +77,10 @@ func AnnotateGraph(g *graph.Graph, cfg *config.Config) int {
 		sinkSet[s.ID] = true
 	}
 
-	// Phase 2: Pre-populate seen set from existing DATA_FLOWS edges (safe on re-index).
+	// Phase 2: BFS from each source; create DATA_FLOWS edges to reachable sinks.
+	// The seen set deduplicates across sources within this call; AddEdge
+	// handles dedup against pre-existing edges in the graph.
 	seen := make(map[edgeKey]bool)
-	for _, e := range g.AllEdges() {
-		if e.Type == graph.EdgeDataFlows {
-			seen[edgeKey{e.From, e.To}] = true
-		}
-	}
-
-	// Phase 3: BFS from each source; create DATA_FLOWS edges to reachable sinks.
 	created := 0
 	for _, src := range sources {
 		reachable := bfsReachableSinks(g, src.ID, sinkSet, maxHops)
@@ -228,7 +227,14 @@ func matchesPattern(n *graph.Node, p config.DataFlowPattern) bool {
 
 // bfsReachableSinks does a forward BFS from sourceID following only CALLS edges,
 // up to maxHops deep. Returns the IDs of any sink nodes encountered.
+// The outEdges adjacency is snapshotted once under a single RLock to avoid
+// O(visited) lock acquisitions during BFS traversal.
 func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.NodeID]bool, maxHops int) []graph.NodeID {
+	const maxVisited = 10_000 // cap total nodes to prevent runaway traversal on fan-out graphs
+
+	// Snapshot the CALLS adjacency in a single lock window to avoid per-step locking.
+	adj := g.SnapshotCallsAdjacency()
+
 	type qItem struct {
 		id  graph.NodeID
 		hop int
@@ -239,28 +245,31 @@ func bfsReachableSinks(g *graph.Graph, sourceID graph.NodeID, sinkSet map[graph.
 	queue := []qItem{{sourceID, 0}}
 	var found []graph.NodeID
 
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
+outerLoop:
+	for head4 := 0; head4 < len(queue); head4++ {
+		cur := queue[head4]
 
 		if cur.hop >= maxHops {
 			continue
 		}
 
-		for _, e := range g.OutEdges(cur.id) {
-			if e.Type != graph.EdgeCalls {
+		for _, toID := range adj[cur.id] {
+			if visited[toID] {
 				continue
 			}
-			if visited[e.To] {
-				continue
+			if len(visited) >= maxVisited {
+				break outerLoop
 			}
-			visited[e.To] = true
+			visited[toID] = true
 
-			if sinkSet[e.To] {
-				found = append(found, e.To)
+			if sinkSet[toID] {
+				found = append(found, toID)
 			}
 
-			queue = append(queue, qItem{e.To, cur.hop + 1})
+			queue = append(queue, qItem{toID, cur.hop + 1})
+		}
+		if len(visited) >= maxVisited {
+			break outerLoop
 		}
 	}
 

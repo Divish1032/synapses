@@ -1,5 +1,12 @@
-# Binaries
+docs/ROADMAP.md
+
+# Benchmark results (regenerable)
+results/
+benchmark
+
+# Build artifacts
 bin/
+completions/
 dist/
 /synapses
 *.exe
@@ -10,8 +17,12 @@ dist/
 # Build cache
 *.test
 *.out
+*.cov
 coverage.html
 coverage.out
+
+# Debug binaries
+/debug_callsites
 
 # Go workspace
 go.work
@@ -23,8 +34,14 @@ vendor/
 # IDE
 .idea/
 .vscode/
+.cursor/
+.gemini/
+.windsurf/
+.agent/
+.zed/
 *.swp
 *.swo
+.windsurfrules
 
 # OS
 .DS_Store
@@ -37,6 +54,10 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
+# Security/CI tool output
+gosec-results.json
+vuln_report.txt
+
 # Config files with secrets (use synapses.example.json as template)
 synapses.json
 
@@ -48,3 +69,12 @@ synapses.json
 .env
 .env.local
 .env.*.local
+
+json
+
+# Generated folders (Claude skills output, docs)
+council-reports/
+design-system/
+docs/
+e2e-results/
+pulse-audit-reports/

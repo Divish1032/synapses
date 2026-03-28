@@ -35,8 +35,10 @@ If you discover a security vulnerability in Synapses, please report it responsib
 
 The following components are in scope for security reports:
 
-✅ **MCP Protocol Implementation** — Tool inputs, parameter validation, stdio transport
+✅ **Daemon HTTP Server** — Auth bypass, CSRF, DNS rebinding, port binding, socket activation
+✅ **MCP Protocol Implementation** — Tool inputs, parameter validation, HTTP + stdio transport
 ✅ **SQLite Store** — Query injection, data integrity, file permissions
+✅ **Rate Limiter & Loop Guard** — Bypass via reconnection, cycle detection evasion
 ✅ **Sidecar HTTP Clients** — Brain and Scout API communication, timeout handling
 ✅ **File Watcher** — Path traversal, symlink handling
 ✅ **Parser** — Malformed input handling, resource exhaustion
@@ -71,10 +73,23 @@ The following are **not** in scope for security reports (but may be reported as 
 
 ### Fail-Silent Pattern
 
-- MCP tools **never panic**
+- MCP tools **never panic** — `WithRecovery()` middleware catches panics in tool handlers
 - Brain sidecar unavailable? Graph queries still work
 - Scout down? Web tools return "unavailable"
 - Reduces denial-of-service risk
+
+### Daemon Resilience
+
+The singleton daemon runs on `127.0.0.1:11435` with multiple layers of protection:
+
+- **Socket activation** — launchd (macOS) / systemd (Linux) holds the port. During daemon restart, connections queue in kernel backlog instead of getting "connection refused"
+- **Panic recovery** — 4 layers: mcp-go `WithRecovery()` for tools, `defer recover()` in HTTP handler, Go stdlib per-connection recovery, process supervisor auto-restart
+- **Per-project isolation** — A panic in one project's tool handler is caught and logged; other projects continue serving
+- **Agent-scoped rate limiting** — Rate limit buckets keyed by agent identity, persist across reconnections. Cannot be bypassed by reconnecting
+- **Cycle detection** — Loop guard detects both repeated identical calls AND alternating patterns (A-B-A-B, A-B-C-A-B-C) to prevent agent abuse
+- **Loopback-only binding** — Daemon binds to `127.0.0.1`, not `0.0.0.0`. DNS rebinding protection via Host header validation
+- **Bearer token auth** — Remote connections require `Authorization: Bearer <token>` (token stored at `~/.synapses/auth_token`, mode 0600). Loopback connections are trusted without a token
+- **CSRF protection** — All mutation endpoints require `X-CSRF-Token` header
 
 ### SQLite Permissions
 

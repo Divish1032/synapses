@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // handleGetPlans lists all plans with task completion counts.
@@ -15,11 +16,11 @@ func (s *Server) handleGetPlans(
 	_ mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 	plans, err := s.store.GetPlans()
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get plans: %v", err)), nil
+		return toolError("get plans", err)
 	}
 	summary := "no plans found"
 	if len(plans) > 0 {
@@ -38,11 +39,11 @@ func (s *Server) handleGetMyTasks(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 	agentID := stringArg(req, "agent_id")
 	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
+		return mcp.NewToolResultError("agent_id is required (e.g., 'implementer', 'reviewer')"), nil
 	}
 	planID := stringArg(req, "plan_id")
 
@@ -50,7 +51,7 @@ func (s *Server) handleGetMyTasks(
 
 	tasks, err := s.store.GetPendingTasks(planID, agentID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get tasks: %v", err)), nil
+		return toolError("get tasks", err)
 	}
 
 	// Pick the top unblocked task as the suggested next task.
@@ -84,18 +85,20 @@ func (s *Server) handleLinkTaskNodes(
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
 	}
 	taskID := stringArg(req, "task_id")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return mcp.NewToolResultError("task_id is required (use tasks(action=\"pending\") to list task IDs)"), nil
 	}
 
 	// Accept node_ids as a JSON array string or a raw []interface{}.
 	var nodeIDs []string
 	switch v := req.GetArguments()["node_ids"].(type) {
 	case string:
-		_ = json.Unmarshal([]byte(v), &nodeIDs)
+		if err := json.Unmarshal([]byte(v), &nodeIDs); err != nil {
+			logutil.Debug("synapses: coord: unmarshal node_ids from request: %v\n", err)
+		}
 	case []interface{}:
 		for _, item := range v {
 			if s, ok := item.(string); ok {
@@ -108,7 +111,7 @@ func (s *Server) handleLinkTaskNodes(
 	}
 
 	if err := s.store.UpdateLinkedNodes(taskID, nodeIDs); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("link task nodes: %v", err)), nil
+		return toolError("link task nodes", err)
 	}
 	return jsonResult(map[string]interface{}{
 		"task_id":  taskID,
@@ -118,180 +121,5 @@ func (s *Server) handleLinkTaskNodes(
 	})
 }
 
-// handleGetAgents returns all agents that have interacted with Synapses,
-// ordered by last-seen timestamp descending.
-func (s *Server) handleGetAgents(
-	_ context.Context,
-	_ mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
-	}
-	agents, err := s.store.GetAgents()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get agents: %v", err)), nil
-	}
-	summary := "no agents seen yet"
-	if len(agents) > 0 {
-		summary = fmt.Sprintf("%d agent(s) known", len(agents))
-	}
-	return jsonResult(map[string]interface{}{
-		"summary": summary,
-		"agents":  agents,
-	})
-}
-
-// handleClaimWork registers active work on a scope (file, package, directory,
-// or entity). Returns any conflicting claims by other agents immediately so the
-// caller can decide whether to proceed or coordinate.
-func (s *Server) handleClaimWork(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
-	}
-	agentID := stringArg(req, "agent_id")
-	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
-	}
-	scope := stringArg(req, "scope")
-	if scope == "" {
-		return mcp.NewToolResultError("scope is required (e.g. 'internal/auth' or 'cmd/server/main.go')"), nil
-	}
-	scopeType := stringArg(req, "scope_type")
-	if scopeType == "" {
-		scopeType = "path"
-	}
-	ttl := 30
-	if v, ok := req.GetArguments()["ttl_minutes"].(float64); ok && v > 0 {
-		ttl = int(v)
-	}
-
-	s.upsertAgentIfNeeded(agentID)
-
-	conflicts, err := s.store.ClaimWork(agentID, scope, scopeType, ttl)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("claim work: %v", err)), nil
-	}
-
-	msg := fmt.Sprintf("Claimed %q for %d minutes.", scope, ttl)
-	if len(conflicts) > 0 {
-		msg += fmt.Sprintf(" WARNING: %d conflicting claim(s) by other agents — review before editing.", len(conflicts))
-	}
-	return jsonResult(map[string]interface{}{
-		"claimed":   scope,
-		"agent_id":  agentID,
-		"ttl":       ttl,
-		"conflicts": conflicts,
-		"message":   msg,
-	})
-}
-
-// handleReleaseClaims removes all active work claims for the given agent.
-// Call this when editing is complete to free scopes for other agents.
-func (s *Server) handleReleaseClaims(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
-	}
-	agentID := stringArg(req, "agent_id")
-	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
-	}
-	if err := s.store.ReleaseClaims(agentID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("release claims: %v", err)), nil
-	}
-	return jsonResult(map[string]interface{}{
-		"agent_id": agentID,
-		"message":  "All work claims released.",
-	})
-}
-
-// handleGetConflicts returns all work claims by other agents that overlap with
-// any scope the calling agent currently holds.
-func (s *Server) handleGetConflicts(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
-	}
-	agentID := stringArg(req, "agent_id")
-	if agentID == "" {
-		return mcp.NewToolResultError("agent_id is required"), nil
-	}
-	s.upsertAgentIfNeeded(agentID)
-
-	conflicts, err := s.store.GetConflicts(agentID)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get conflicts: %v", err)), nil
-	}
-	summary := "no conflicts"
-	if len(conflicts) > 0 {
-		summary = fmt.Sprintf("%d conflicting claim(s) detected", len(conflicts))
-	}
-	return jsonResult(map[string]interface{}{
-		"summary":   summary,
-		"conflicts": conflicts,
-	})
-}
-
-// handleGetEvents returns events from the pull-based event log with seq >
-// since_seq. Use the latest_event_seq from session_init as the starting cursor.
-// Event types: file_change, task_update, annotation_added, agent_activity.
-func (s *Server) handleGetEvents(
-	_ context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	if s.store == nil {
-		return mcp.NewToolResultError("task memory unavailable: server started without a persistent store"), nil
-	}
-
-	var sinceSeq int64
-	if v, ok := req.GetArguments()["since_seq"].(float64); ok {
-		sinceSeq = int64(v)
-	}
-
-	limit := 50
-	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
-		limit = int(v)
-	}
-
-	// Parse optional types filter — accepts JSON array string or []interface{}.
-	var types []string
-	switch v := req.GetArguments()["types"].(type) {
-	case string:
-		if v != "" {
-			for _, t := range strings.Split(v, ",") {
-				if t = strings.TrimSpace(t); t != "" {
-					types = append(types, t)
-				}
-			}
-		}
-	case []interface{}:
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				types = append(types, s)
-			}
-		}
-	}
-
-	events, latestSeq, err := s.store.GetEvents(sinceSeq, types, limit)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get events: %v", err)), nil
-	}
-
-	summary := "no new events"
-	if len(events) > 0 {
-		summary = fmt.Sprintf("%d event(s) since seq %d", len(events), sinceSeq)
-	}
-	return jsonResult(map[string]interface{}{
-		"summary":    summary,
-		"events":     events,
-		"latest_seq": latestSeq,
-		"hint":       "Store latest_seq and pass as since_seq on next poll to get only new events.",
-	})
-}
+// Sprint 24: handleGetAgents and handleGetEvents removed.
+// Cross-session awareness is now handled by the Work Ledger.

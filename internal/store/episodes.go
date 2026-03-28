@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -39,6 +40,19 @@ type RuleCandidate struct {
 
 // RememberEpisode inserts a new episode and keeps the FTS5 index in sync.
 func (s *Store) RememberEpisode(e Episode) (string, error) {
+	// BUG-014: enforce per-project episode row cap.
+	// rowCapMu serializes cap-check + insert to prevent race conditions.
+	s.rowCapMu.Lock()
+	defer s.rowCapMu.Unlock()
+	maxRows := s.MaxEpisodeRows
+	if maxRows <= 0 {
+		maxRows = DefaultMaxEpisodeRows
+	}
+	var count int
+	if err := s.knowledgeDB.QueryRow(`SELECT COUNT(*) FROM episodes`).Scan(&count); err == nil && count >= maxRows {
+		return "", fmt.Errorf("episode row cap reached (%d/%d) — prune old episodes or increase the cap", count, maxRows)
+	}
+
 	if e.ID == "" {
 		e.ID = newID()
 	}
@@ -64,7 +78,7 @@ func (s *Store) RememberEpisode(e Episode) (string, error) {
 		e.Importance = 0.5
 	}
 
-	_, err := s.db.Exec(
+	_, err := s.knowledgeDB.Exec(
 		`INSERT INTO episodes
 		 (id, agent_id, project_id, created_at, episode_type, outcome,
 		  trigger, decision, rationale, affected_files, affected_nodes,
@@ -88,8 +102,22 @@ func (s *Store) RememberEpisode(e Episode) (string, error) {
 // Returns up to limit results ordered by relevance (best match first).
 // v1 uses top-N strategy with no score threshold — caller decides relevance.
 func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFilter string, limit, sinceDays int) ([]Episode, error) {
+	return s.RecallEpisodesCtx(context.Background(), query, projectID, agentID, episodeType, outcomeFilter, limit, sinceDays)
+}
+
+// RecallEpisodesCtx is like RecallEpisodes but accepts a context for cancellation.
+// Use this variant in federation cross-project search where a hung sibling store
+// should not block the caller for the full busy timeout.
+func (s *Store) RecallEpisodesCtx(ctx context.Context, query, projectID, agentID, episodeType, outcomeFilter string, limit, sinceDays int) ([]Episode, error) {
 	if limit <= 0 {
 		limit = 10
+	}
+
+	// Sanitize query before passing to FTS5 MATCH to prevent syntax errors
+	// from special characters like ".", "-", "/", etc.
+	safeQuery := sanitizeFTSQuery(query)
+	if safeQuery == "" {
+		return nil, nil
 	}
 
 	// FTS5 MATCH returns rows ordered by BM25 rank (most relevant first).
@@ -101,7 +129,7 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 		JOIN episodes e ON episodes_fts.rowid = e.rowid
 		WHERE episodes_fts MATCH ?`
 
-	args := []interface{}{query}
+	args := []interface{}{safeQuery}
 
 	if sinceDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -sinceDays).Unix()
@@ -128,7 +156,7 @@ func (s *Store) RecallEpisodes(query, projectID, agentID, episodeType, outcomeFi
 	baseQuery += ` ORDER BY rank LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(baseQuery, args...)
+	rows, err := s.knowledgeDB.QueryContext(ctx, baseQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("recall episodes: %w", err)
 	}
@@ -168,16 +196,22 @@ func (s *Store) GetEpisodes(projectID, agentID, episodeType string, tags []strin
 		query += ` AND created_at >= ?`
 		args = append(args, cutoff)
 	}
-	// tag filter: simple substring match on the JSON array string
+	// tag filter: substring match on the JSON array string.
+	// escapeLike handles LIKE metacharacters so a tag like "%" or "_" cannot
+	// wildcard-match unrelated episodes. Empty tags are skipped — an empty
+	// string would produce "%%" which matches every row.
 	for _, tag := range tags {
-		query += ` AND tags LIKE ?`
-		args = append(args, "%"+tag+"%")
+		if tag == "" {
+			continue
+		}
+		query += ` AND tags LIKE ? ESCAPE '\'`
+		args = append(args, "%"+escapeLike(tag)+"%")
 	}
 
 	query += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.knowledgeDB.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get episodes: %w", err)
 	}
@@ -194,6 +228,22 @@ func (s *Store) GetEpisodes(projectID, agentID, episodeType string, tags []strin
 // plan descriptions use different words than stored episodes — "change auth
 // handler" should match "modified auth token validation" via shared key terms.
 func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
+	return s.CheckPlanSafetyCtx(context.Background(), planDesc, projectID)
+}
+
+// HasNoFailureEpisodes reports whether there are zero failure episodes in the
+// store. Uses a fast indexed EXISTS check — avoids the FTS5 scan entirely on
+// cold-start (no episodes recorded yet).
+func (s *Store) HasNoFailureEpisodes() bool {
+	var exists bool
+	err := s.knowledgeDB.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM episodes WHERE episode_type = 'failure')`).Scan(&exists)
+	return err != nil || !exists
+}
+
+// CheckPlanSafetyCtx is the context-aware variant of CheckPlanSafety.
+// The context is threaded into the SQL query — if it expires, the query cancels.
+func (s *Store) CheckPlanSafetyCtx(ctx context.Context, planDesc, projectID string) (*Episode, error) {
 	safeQuery := buildORQuery(planDesc)
 	if safeQuery == "" {
 		return nil, nil
@@ -215,7 +265,7 @@ func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
 	}
 	query += ` ORDER BY rank LIMIT 1`
 
-	row := s.db.QueryRow(query, args...)
+	row := s.knowledgeDB.QueryRowContext(ctx, query, args...)
 	episodes, err := scanEpisodeRow(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -226,6 +276,34 @@ func (s *Store) CheckPlanSafety(planDesc, projectID string) (*Episode, error) {
 	return episodes, nil
 }
 
+// FindEpisodesByNodeID searches episodes where affected_nodes contains the
+// given node ID. Used by federation to find memories anchored to specific
+// entities, which is more precise than text-based FTS search on entity names.
+// Returns up to limit results ordered by recency (newest first).
+func (s *Store) FindEpisodesByNodeID(nodeID string, limit int) ([]Episode, error) {
+	if nodeID == "" || limit <= 0 {
+		return nil, nil
+	}
+	// The affected_nodes column stores a JSON array like '["repo::file.go::Name"]'.
+	// Wrap the search term in double quotes so the LIKE pattern matches the exact
+	// JSON string entry — "Auth" will NOT false-match "AuthService" because the
+	// closing quote acts as a boundary. escapeLike handles % and _ in node IDs.
+	pattern := `%"` + escapeLike(nodeID) + `"%`
+	rows, err := s.knowledgeDB.Query(`
+		SELECT id, agent_id, project_id, created_at, episode_type, outcome,
+		       trigger, decision, rationale, affected_files, affected_nodes,
+		       tags, importance, promoted_rule
+		FROM episodes
+		WHERE affected_nodes LIKE ? ESCAPE '\'
+		ORDER BY created_at DESC
+		LIMIT ?`, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find episodes by node: %w", err)
+	}
+	defer rows.Close()
+	return scanEpisodes(rows)
+}
+
 // GetRuleCandidates returns failure episodes that have appeared ≥minOccurrences
 // times (matched by decision similarity) and have not yet been promoted to a rule.
 // Uses exact decision-text grouping as a v1 approximation; FTS/vector grouping later.
@@ -234,7 +312,7 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 		minOccurrences = 2
 	}
 
-	rows, err := s.db.Query(`
+	rows, err := s.knowledgeDB.Query(`
 		SELECT decision, trigger, COUNT(*) as occurrences,
 		       json_group_array(id) as episode_ids
 		FROM episodes
@@ -242,7 +320,8 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 		  AND (promoted_rule = '' OR promoted_rule IS NULL)
 		GROUP BY decision
 		HAVING COUNT(*) >= ?
-		ORDER BY occurrences DESC`,
+		ORDER BY occurrences DESC
+		LIMIT 100`,
 		minOccurrences,
 	)
 	if err != nil {
@@ -259,19 +338,6 @@ func (s *Store) GetRuleCandidates(minOccurrences int) ([]RuleCandidate, error) {
 		candidates = append(candidates, c)
 	}
 	return candidates, rows.Err()
-}
-
-// MarkEpisodePromoted sets promoted_rule on an episode after it has been
-// converted to a dynamic_rule via upsert_rule().
-func (s *Store) MarkEpisodePromoted(episodeID, ruleID string) error {
-	_, err := s.db.Exec(
-		`UPDATE episodes SET promoted_rule = ? WHERE id = ?`,
-		ruleID, episodeID,
-	)
-	if err != nil {
-		return fmt.Errorf("mark episode promoted: %w", err)
-	}
-	return nil
 }
 
 // scanEpisodes reads all rows into an Episode slice.
@@ -315,10 +381,15 @@ func buildORQuery(s string) string {
 	if sanitized == "" {
 		return ""
 	}
-	// sanitizeFTSQuery returns `"word1"* "word2"*`; split on space and rejoin with OR.
+	// sanitizeFTSQuery returns `"word1"* OR "word2"* OR "word3"*`.
+	// Split on whitespace to get term tokens interleaved with "OR" separators.
 	parts := strings.Fields(sanitized)
 	var kept []string
 	for _, p := range parts {
+		// Skip "OR" separator tokens injected by sanitizeFTSQuery.
+		if p == "OR" {
+			continue
+		}
 		// Strip quotes and * to measure raw word length for stop-word filter.
 		raw := strings.Trim(p, `"*`)
 		if len(raw) > 3 {
@@ -327,7 +398,16 @@ func buildORQuery(s string) string {
 	}
 	if len(kept) == 0 {
 		// All words were short — fall back to including them anyway.
-		kept = parts
+		// Collect term tokens only (skip "OR" separators) to avoid
+		// producing invalid FTS5 like `"go" OR OR OR "is"`.
+		for _, p := range parts {
+			if p != "OR" {
+				kept = append(kept, p)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return ""
 	}
 	return strings.Join(kept, " OR ")
 }

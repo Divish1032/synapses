@@ -27,6 +27,7 @@ func seedEmbedNodes(t *testing.T, st interface{ SaveGraph(*graph.Graph) error })
 }
 
 func TestUpsertEmbedding_StoresCount(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, _ := seedEmbedNodes(t, st)
 
@@ -39,6 +40,7 @@ func TestUpsertEmbedding_StoresCount(t *testing.T) {
 }
 
 func TestUpsertEmbedding_Idempotent(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, _ := seedEmbedNodes(t, st)
 
@@ -51,6 +53,7 @@ func TestUpsertEmbedding_Idempotent(t *testing.T) {
 }
 
 func TestVectorSearch_ReturnsMostSimilar(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, idB := seedEmbedNodes(t, st)
 
@@ -75,6 +78,7 @@ func TestVectorSearch_ReturnsMostSimilar(t *testing.T) {
 }
 
 func TestVectorSearch_EmptyStore_ReturnsNil(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	results, err := st.VectorSearch([]float32{1, 0, 0}, 5)
 	if err != nil {
@@ -86,6 +90,7 @@ func TestVectorSearch_EmptyStore_ReturnsNil(t *testing.T) {
 }
 
 func TestGetNodesWithoutEmbeddings_ReturnsOnlyUnembedded(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	idA, idB := seedEmbedNodes(t, st)
 
@@ -102,6 +107,7 @@ func TestGetNodesWithoutEmbeddings_ReturnsOnlyUnembedded(t *testing.T) {
 }
 
 func TestGetNodeTextForEmbedding_ReturnsNameAndDoc(t *testing.T) {
+	t.Parallel()
 	st := openTestStore(t)
 	g := graph.New("texttest")
 	nid := g.MakeNodeID("a.go", "ParseRequest")
@@ -125,7 +131,32 @@ func TestGetNodeTextForEmbedding_ReturnsNameAndDoc(t *testing.T) {
 	if text == "" {
 		t.Error("expected non-empty text")
 	}
-	if !strings.Contains(text, "ParseRequest") {
-		t.Errorf("expected text to contain 'ParseRequest', got: %q", text)
+	// NL pipeline converts "ParseRequest" to "parse request" for code nodes.
+	if !strings.Contains(text, "parse request") {
+		t.Errorf("expected text to contain 'parse request', got: %q", text)
+	}
+}
+
+func TestUpsertEmbedding_PreNormalizesVector(t *testing.T) {
+	t.Parallel()
+	st := openTestStore(t)
+	idA, _ := seedEmbedNodes(t, st)
+
+	// Insert a non-unit vector. UpsertEmbedding should normalize it.
+	if err := st.UpsertEmbedding(idA, "test", []float32{3, 4}); err != nil {
+		t.Fatalf("UpsertEmbedding: %v", err)
+	}
+
+	// Search with query in the same direction — should get high score (≈1.0).
+	results, err := st.VectorSearch([]float32{3, 4}, 5)
+	if err != nil {
+		t.Fatalf("VectorSearch: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results")
+	}
+	// Dot product of two normalized identical-direction vectors ≈ 1.0.
+	if results[0].Score < 0.99 {
+		t.Errorf("expected score ≈ 1.0, got %f", results[0].Score)
 	}
 }

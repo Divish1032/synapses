@@ -2,7 +2,10 @@ package graph
 
 import (
 	"sync"
+	"sync/atomic"
 	"unique"
+
+	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
 // StringID is a compact index into the StringPool.
@@ -12,6 +15,11 @@ type StringID uint32
 // for transient or unindexed strings (Ghost Nodes). This prevents out-of-bounds panics
 // when an agent requests a file that hasn't been saved to the SQLite BLOB yet.
 const ReservedGhostRange = 1000
+
+// MaxPoolSize is the upper bound on the number of interned strings.
+// Intern returns a ghost ID once this limit is reached, preventing unbounded
+// memory growth in extremely large repositories.
+const MaxPoolSize = 5_000_000
 
 // StringPool implements a bi-directional mapping between strings and uint32 IDs.
 // It leverages the Go 1.23 `unique` package to ensure that identical strings
@@ -31,7 +39,7 @@ type StringPool struct {
 
 	// ghostPool handles transient strings within the reserved range.
 	// We use a simple slice that wraps around to prevent infinite growth.
-	ghostMu    sync.Mutex
+	// Protected by p.mu (read lock for Value, write lock for internGhost).
 	ghostCache []string
 	ghostNext  uint32
 }
@@ -72,6 +80,11 @@ func (p *StringPool) Intern(s string) StringID {
 		return id
 	}
 
+	// Cap check: if the pool is full, return a ghost ID instead of growing forever.
+	if len(p.reverse) >= MaxPoolSize {
+		return p.internGhost(s)
+	}
+
 	// Assign the next available ID sequence (offset by the ghost range)
 	id = StringID(len(p.reverse) + ReservedGhostRange)
 	p.forward[h] = id
@@ -89,8 +102,8 @@ func (p *StringPool) Value(id StringID) string {
 
 	// Check if this ID falls into the Ghost range
 	if id < ReservedGhostRange {
-		p.ghostMu.Lock()
-		defer p.ghostMu.Unlock()
+		p.mu.RLock()
+		defer p.mu.RUnlock()
 		return p.ghostCache[id]
 	}
 
@@ -107,37 +120,30 @@ func (p *StringPool) Value(id StringID) string {
 	return "" // Out of bounds safety fallback
 }
 
-// GhostIntern registers a string in the temporary Ghost ring-buffer.
-// This is used for queries involving nodes that aren't officially in the graph yet.
-func (p *StringPool) GhostIntern(s string) StringID {
-	if s == "" {
-		return 0
-	}
+// internGhost allocates a transient ghost ID for s. Caller must hold p.mu write lock.
+// ghostWarnOnce ensures we log the saturation warning only once.
+var ghostWarnOnce atomic.Int32
 
-	p.ghostMu.Lock()
-	defer p.ghostMu.Unlock()
-
+func (p *StringPool) internGhost(s string) StringID {
 	id := p.ghostNext
-	p.ghostCache[id] = s
-
-	p.ghostNext++
-	if p.ghostNext >= ReservedGhostRange {
-		p.ghostNext = 1 // wrap around, overriding oldest ghosts
+	if id >= ReservedGhostRange {
+		// Wrap around: evict the oldest ghost entry. Ghost strings are transient
+		// so losing old mappings is acceptable — callers already treat them as
+		// best-effort. Start at 1 (0 is the empty-string sentinel).
+		if ghostWarnOnce.CompareAndSwap(0, 1) {
+			logutil.Warn("synapses: StringPool ghost range wrapped (%d entries); oldest ghost strings evicted\n", ReservedGhostRange)
+		}
+		id = 1
 	}
-
+	p.ghostCache[id] = s
+	// Guard against uint32 overflow: ghostNext is always in [1, ReservedGhostRange)
+	// due to the wrap check above, so this can only trigger if ReservedGhostRange
+	// is ever set close to math.MaxUint32. Saturate to 1 (wraps to start).
+	if id+1 < id { // overflow
+		p.ghostNext = 1
+	} else {
+		p.ghostNext = id + 1
+	}
 	return StringID(id)
 }
 
-// Stats returns the number of permanently interned strings and the current
-// next ghost index.
-func (p *StringPool) Stats() (interned int, nextGhost uint32) {
-	p.mu.RLock()
-	interned = len(p.reverse)
-	p.mu.RUnlock()
-
-	p.ghostMu.Lock()
-	nextGhost = p.ghostNext
-	p.ghostMu.Unlock()
-
-	return interned, nextGhost
-}

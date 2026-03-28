@@ -9,8 +9,14 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	sitter "github.com/alexaandru/go-tree-sitter-bare"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 )
 
 // LanguageParser is implemented by each language-specific parser.
@@ -23,16 +29,79 @@ type LanguageParser interface {
 	Parse(g *graph.Graph, filePath string, src []byte) error
 }
 
+// FilenameParser is an optional interface that parsers can implement
+// if they handle files matched by base filename rather than extension.
+// The Walker checks this interface when no extension-based match is found.
+type FilenameParser interface {
+	Filenames() []string
+}
+
+// FilenamePatternParser is an optional interface for parsers that handle
+// files whose base name matches a prefix (e.g. "Dockerfile" handles
+// "Dockerfile.staging", "Dockerfile.ci", etc.).
+type FilenamePatternParser interface {
+	FilenamePrefixes() []string
+}
+
+// TreeSitterLanguageProvider is an optional interface for parsers that use
+// tree-sitter internally. Returning the language enables the watcher to
+// pre-check files for parse errors before updating the graph, preventing
+// corrupted ASTs from half-saved files during active editing.
+type TreeSitterLanguageProvider interface {
+	TSLanguageForFile(filePath string) *sitter.Language
+}
+
+// filenamePrefixEntry associates a filename prefix with the parser that handles it.
+type filenamePrefixEntry struct {
+	prefix string
+	parser LanguageParser
+}
+
 // Walker orchestrates multi-language parsing over a directory tree.
 type Walker struct {
-	parsers map[string]LanguageParser // extension → parser
+	parsers               map[string]LanguageParser // extension → parser
+	filenameParsers       map[string]LanguageParser // base filename → parser
+	filenamePrefixParsers []filenamePrefixEntry      // base filename prefix → parser
+
+	// BeginFunc is called once, on the main goroutine, after the filesystem
+	// scan completes and the total file count is known, but before any parsing
+	// begins. Use this to initialise progress state with the real total.
+	// Set to nil to disable.
+	BeginFunc func(total int)
+
+	// ProgressFunc is called from worker goroutines after each file is parsed.
+	// done is the number of files completed so far; total is the same value
+	// passed to BeginFunc. byExt maps file extension (e.g. ".go") to the
+	// number of files of that type parsed so far (snapshot copy — safe to read
+	// without locking). Calls are throttled to at most 1 per 200ms via an
+	// atomic CAS; the final call (done==total) always fires.
+	// The callback is called from multiple goroutines; implementations must be
+	// goroutine-safe. Set to nil to disable progress reporting.
+	ProgressFunc func(done, total int, byExt map[string]int)
+
+	// PulseClient, when non-nil, receives a ParseEvent after each file is
+	// parsed during WalkDir. Fire-and-forget — never blocks parsing. (P2-2)
+	PulseClient *pulse.Client
+	// ProjectID is included in ParseEvent so Pulse can scope data per project.
+	ProjectID     string
+	mMATLABParser LanguageParser
+	mObjCParser   LanguageParser
+
+	// Throttle reduces parsing concurrency to half the normal worker count
+	// and lowers the OS scheduling priority (nice +10). Use this for the
+	// initial full-index so the machine stays responsive during the first
+	// impression — incremental updates are already fast and don't need this.
+	Throttle bool
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.
 // Registration order matters: generic (file-only) is registered first so that
 // dedicated AST parsers registered afterward take precedence for their extensions.
 func NewWalker() *Walker {
-	w := &Walker{parsers: make(map[string]LanguageParser)}
+	w := &Walker{
+		parsers:         make(map[string]LanguageParser),
+		filenameParsers: make(map[string]LanguageParser),
+	}
 	w.Register(newGenericParser())    // file-level fallback for all other languages
 	w.Register(NewGoParser())         // deep: .go
 	w.Register(NewTypeScriptParser()) // deep: .ts .tsx
@@ -50,13 +119,72 @@ func NewWalker() *Walker {
 	w.Register(NewCSharpParser()) // deep: .cs
 	w.Register(NewSwiftParser())  // deep: .swift
 	// Scripting
-	w.Register(NewRubyParser()) // deep: .rb
-	w.Register(NewPHPParser())  // deep: .php
-	w.Register(NewLuaParser())  // deep: .lua
+	w.Register(NewRubyParser())      // deep: .rb .rbi (Sorbet type stubs)
+	w.Register(NewRBSParser())       // deep: .rbs (Ruby type signatures)
+	w.Register(NewPHPParser())       // deep: .php
+	w.Register(NewLuaParser())       // deep: .lua
+	w.Register(NewBashParser())      // deep: .sh .bash
+	w.Register(NewPowerShellParser()) // deep: .ps1 .psm1 .psd1
 	// Functional
-	w.Register(NewElixirParser()) // deep: .ex .exs
+	w.Register(NewElixirParser())  // deep: .ex .exs
+	w.Register(NewOCamlParser())   // deep: .ml .mli
+	w.Register(NewElmParser())     // deep: .elm
+	w.Register(NewHaskellParser()) // deep: .hs .lhs
+	w.Register(NewErlangParser())  // deep: .erl .hrl
+	w.Register(NewFSharpParser())  // deep: .fs .fsi .fsx
+	w.Register(NewClojureParser()) // deep: .clj .cljs .cljc .edn
+	// Database
+	w.Register(NewSQLParser()) // deep: .sql
+	// Frontend
+	w.Register(NewCSSParser())    // deep: .css
+	w.Register(NewSCSSParser())   // deep: .scss .sass
+	w.Register(NewSvelteParser()) // deep: .svelte
+	w.Register(NewRParser())      // deep: .r .R
+	w.Register(NewDartParser())   // deep: .dart
+	// Infrastructure
+	w.Register(NewHCLParser())        // deep: .tf .tfvars .hcl
+	w.Register(NewDockerfileParser()) // deep: .dockerfile
+	w.Register(NewMakefileParser())  // deep: .mk, Makefile
+	w.Register(NewCMakeParser())     // deep: .cmake, CMakeLists.txt
+	w.Register(NewNixParser())       // deep: .nix
+	w.Register(NewStarlarkParser())  // deep: .bzl .star, BUILD
+	w.Register(NewCUEParser())        // deep: .cue
+	w.Register(NewYAMLParser())       // deep: .yaml .yml (overrides generic)
+	w.Register(NewTOMLParser())       // deep: .toml
+	w.Register(NewXMLParser())        // deep: .xml (pom.xml, AndroidManifest.xml, Spring context)
+	w.Register(NewBicepParser())      // deep: .bicep (Azure IaC)
 	// Schema / API
 	w.Register(NewProtobufParser()) // deep: .proto
+	w.Register(NewGraphQLParser())  // deep: .graphql .gql
+	w.Register(NewThriftParser())   // deep: .thrift (Apache Thrift IDL)
+	// Smart Contracts
+	w.Register(NewSolidityParser()) // deep: .sol
+	// Configuration scripting
+	w.Register(NewJsonnetParser()) // deep: .jsonnet .libsonnet
+	// Scripting
+	w.Register(NewPerlParser())   // deep: .pl .pm .t
+	// Scientific computing
+	w.Register(NewMATLABParser()) // deep: .m (MATLAB/Octave)
+	// Documentation
+	w.Register(NewMarkdownParser())   // deep: .md .markdown .mdx (overrides generic)
+	w.Register(NewPlaintextParser())  // deep: .txt .rst (section extraction, overrides generic)
+	// Frontend
+	w.Register(NewVueParser()) // deep: .vue (SFC, delegates script to JS/TS)
+	// Data formats
+	w.Register(NewJSONParser()) // deep: .json (scoped to package.json, tsconfig.json, *.schema.json)
+	// Systems
+	w.Register(NewZigParser())  // deep: .zig
+	w.Register(NewObjCParser()) // deep: .m (Objective-C)
+	// Scientific
+	w.Register(NewJuliaParser()) // deep: .jl
+	// Infrastructure
+	w.Register(NewTerraformParser()) // deep: .tf
+
+	// Populate disambiguation fields for .m extension (MATLAB vs Objective-C).
+	// MATLAB was registered first; ObjC registered last wins in w.parsers[".m"].
+	// resolveParser uses these fields to disambiguate at parse time.
+	w.mObjCParser = w.parsers[".m"]    // ObjC (last registered, current winner)
+	w.mMATLABParser = NewMATLABParser() // MATLAB (re-instantiate since overwritten)
 	return w
 }
 
@@ -66,13 +194,33 @@ func (w *Walker) Register(p LanguageParser) {
 	for _, ext := range p.Extensions() {
 		w.parsers[ext] = p
 	}
+	if fp, ok := p.(FilenameParser); ok {
+		for _, name := range fp.Filenames() {
+			w.filenameParsers[name] = p
+		}
+	}
+	if fpp, ok := p.(FilenamePatternParser); ok {
+		for _, prefix := range fpp.FilenamePrefixes() {
+			w.filenamePrefixParsers = append(w.filenamePrefixParsers, filenamePrefixEntry{prefix: prefix, parser: p})
+		}
+	}
 }
 
 // RegisterPlugin adds an external parser plugin for the given file extensions.
 // command is split on whitespace into binary + args (e.g. "node parsers/graphql.js").
 // If two parsers claim the same extension the last one registered wins, so
 // plugins registered here override built-in parsers for their extensions.
-func (w *Walker) RegisterPlugin(extensions []string, command string) {
+//
+// If checker is non-nil, the command is validated against the per-machine
+// allowlist before registration. Unapproved plugins are skipped with a
+// stderr warning.
+func (w *Walker) RegisterPlugin(extensions []string, command string, checker *PluginChecker) {
+	if checker != nil {
+		if err := checker.IsAllowed(command); err != nil {
+			logutil.Warn("skipping plugin for %v: %v\n", extensions, err)
+			return
+		}
+	}
 	w.Register(newPluginParser(extensions, command))
 }
 
@@ -86,6 +234,13 @@ func (w *Walker) RegisterPlugin(extensions []string, command string) {
 // parsers create a fresh sitter.Parser per call so there is no shared mutable
 // state between goroutines. Graph mutations are protected by Graph's own mutex.
 func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) {
+	// Canonicalize root so the mtime map keys match IncrementalReindex, which
+	// also canonicalizes. On macOS /var → /private/var via EvalSymlinks; without
+	// this, IncrementalReindex always sees every file as changed.
+	if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
+		root = canonical
+	}
+
 	type fileJob struct {
 		path   string
 		parser LanguageParser
@@ -106,15 +261,33 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			}
 			return nil
 		}
+		
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+
+		// Security: Prevent Directory Traversal via Symlinks.
+		// Resolve the symlink and verify containment using inode comparison
+		// (os.SameFile), which is immune to case/Unicode/TOCTOU races.
+		if d.Type()&os.ModeSymlink != 0 {
+			resolved, symErr := filepath.EvalSymlinks(path)
+			if symErr != nil {
+				return nil // Skip dangling or invalid symlinks
+			}
+			if !isPathContainedIn(resolved, root) {
+				logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
+				return nil
+			}
+		}
+
 		ext := strings.ToLower(filepath.Ext(path))
-		p, ok := w.parsers[ext]
+		p, ok := w.resolveParser(path, ext)
 		if !ok {
 			return nil
 		}
-		var mtime int64
-		if info, statErr := d.Info(); statErr == nil {
-			mtime = info.ModTime().UnixNano()
-		}
+
+		mtime := info.ModTime().UnixNano()
 		jobs = append(jobs, fileJob{path: path, parser: p, mtime: mtime})
 		return nil
 	}); err != nil {
@@ -127,10 +300,16 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 
 	// Phase 2 — parallel read + parse.
 	// Worker count is bounded to 8 to avoid opening too many files at once on
-	// systems with low file-descriptor limits.
+	// systems with low file-descriptor limits. When Throttle is set (initial
+	// full-index), halve the workers so the machine stays responsive.
 	workers := runtime.NumCPU()
 	if workers > 8 {
 		workers = 8
+	}
+	if w.Throttle {
+		workers = max(1, workers/2)
+		restorePriority := lowerProcessPriority()
+		defer restorePriority()
 	}
 
 	sem := make(chan struct{}, workers)
@@ -138,6 +317,49 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 
 	mtimes := make(map[string]int64, len(jobs))
 	var mtimesMu sync.Mutex
+
+	// R1: collect paths of successfully parsed files for the serial heuristic
+	// pass after wg.Wait(). Only paths are stored — re-reading from disk avoids
+	// holding the full source bytes of every file in memory simultaneously.
+	var heuristicPaths []string
+	var heuristicMu sync.Mutex
+
+	// Phase 1 complete: total is now known. Notify before goroutines start.
+	total := len(jobs)
+	if w.BeginFunc != nil {
+		w.BeginFunc(total)
+	}
+	var doneCount atomic.Int64   // files completed (read+parsed)
+	var byExtMu sync.Mutex
+	byExt := make(map[string]int, 16)
+	var lastEmitNs atomic.Int64  // UnixNano of last ProgressFunc call (throttle)
+
+	emitProgress := func(final bool) {
+		if w.ProgressFunc == nil {
+			return
+		}
+		now := time.Now().UnixNano()
+		if !final {
+			last := lastEmitNs.Load()
+			if now-last < int64(200*time.Millisecond) {
+				return
+			}
+			if !lastEmitNs.CompareAndSwap(last, now) {
+				return // another goroutine won the CAS — skip this tick
+			}
+		}
+		done := int(doneCount.Load())
+		byExtMu.Lock()
+		snapshot := make(map[string]int, len(byExt))
+		for k, v := range byExt {
+			snapshot[k] = v
+		}
+		byExtMu.Unlock()
+		w.ProgressFunc(done, total, snapshot)
+	}
+
+	pc := w.PulseClient   // capture to avoid data race on walker field
+	projID := w.ProjectID
 
 	for _, job := range jobs {
 		job := job // capture loop variable
@@ -147,11 +369,45 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			parseStart := time.Now()
 			src, err := os.ReadFile(job.path)
+			errType := ""
+			var nodesProduced int
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", job.path, err)
-			} else if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
-				fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", job.path, parseErr)
+				logutil.Error("synapses: read %s: %v\n", job.path, err)
+				errType = "read_error"
+			} else {
+				// Snapshot node count before parse to compute delta — avoids
+				// O(N) NodesForFile scan just for the telemetry counter.
+				before := g.NodeCount()
+				if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
+					logutil.Error("synapses: parse %s: %v\n", job.path, parseErr)
+					errType = "parse_error"
+				} else {
+					nodesProduced = g.NodeCount() - before
+					// R28: stamp provenance on all nodes produced by this file.
+					ApplyProvenance(g, job.path, src)
+					// R1: collect path for heuristic pass; re-read from disk later
+					// to avoid holding all source bytes in memory simultaneously.
+					heuristicMu.Lock()
+					heuristicPaths = append(heuristicPaths, job.path)
+					heuristicMu.Unlock()
+				}
+			}
+			parseElapsed := time.Since(parseStart).Milliseconds()
+
+			// P2-2: emit ParseEvent. Enqueue is mutex+append (O(1)) — direct call,
+			// no goroutine needed. The outer goroutine is already off the parse path.
+			if pc != nil {
+				lang := strings.TrimPrefix(strings.ToLower(filepath.Ext(job.path)), ".")
+				pc.RecordParseEvent(pulse.ParseEvent{
+					File:          job.path,
+					Language:      lang,
+					DurationMs:    parseElapsed,
+					NodesProduced: nodesProduced,
+					ErrorType:     errType,
+					ProjectID:     projID,
+				})
 			}
 
 			if job.mtime != 0 {
@@ -159,10 +415,35 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				mtimes[job.path] = job.mtime
 				mtimesMu.Unlock()
 			}
+
+			// Progress: increment counter, update byExt, maybe emit tick.
+			if w.ProgressFunc != nil {
+				ext := strings.ToLower(filepath.Ext(job.path))
+				byExtMu.Lock()
+				byExt[ext]++
+				byExtMu.Unlock()
+				doneCount.Add(1)
+				emitProgress(false)
+			}
 		}()
 	}
 
 	wg.Wait()
+
+	// Emit final progress tick (done == total).
+	emitProgress(true)
+
+	// R1: serial heuristic pass — all AST nodes are now present in the graph.
+	// Re-read each file from disk instead of holding bytes in memory since
+	// the OS page cache makes this cheap.
+	for _, path := range heuristicPaths {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		ApplyHeuristics(g, path, src)
+	}
+
 	return mtimes, nil
 }
 
@@ -179,6 +460,14 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[string]int64) (fresh map[string]int64, changed, removed int, err error) {
 	fresh = make(map[string]int64, len(known))
 
+	// Canonicalize root once so the symlink containment check below uses a
+	// fully resolved path; an un-resolved root causes false negatives (valid
+	// in-tree symlinks get rejected) or false positives (out-of-tree targets
+	// accepted) depending on how root and the resolved path align.
+	if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
+		root = canonical
+	}
+
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil // skip unreadable entries
@@ -191,15 +480,30 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		p, ok := w.parsers[ext]
+		p, ok := w.resolveParser(path, ext)
 		if !ok {
-			return nil // unsupported extension
+			return nil // unsupported extension or filename
 		}
 
 		info, statErr := d.Info()
 		if statErr != nil {
 			return nil
 		}
+
+		// Security: Prevent Directory Traversal via Symlinks.
+		// Resolve the symlink and verify containment using inode comparison
+		// (os.SameFile), which is immune to case/Unicode/TOCTOU races.
+		if d.Type()&os.ModeSymlink != 0 {
+			resolved, symErr := filepath.EvalSymlinks(path)
+			if symErr != nil {
+				return nil // Skip dangling or invalid symlinks
+			}
+			if !isPathContainedIn(resolved, root) {
+				logutil.Warn("synapses/security: skipped symlink resolving outside repo root: %s -> %s\n", path, resolved)
+				return nil
+			}
+		}
+
 		mtime := info.ModTime().UnixNano()
 
 		if stored, hit := known[path]; hit && stored == mtime {
@@ -211,11 +515,16 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 		g.RemoveFile(path)
 		src, readErr := os.ReadFile(path)
 		if readErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: read %s: %v\n", path, readErr)
+			logutil.Error("synapses: read %s: %v\n", path, readErr)
 			return nil
 		}
 		if parseErr := p.Parse(g, path, src); parseErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: parse %s: %v\n", path, parseErr)
+			logutil.Error("synapses: parse %s: %v\n", path, parseErr)
+		} else {
+			// R28: stamp provenance on all nodes produced by this file.
+			ApplyProvenance(g, path, src)
+			// R1: re-inject HANDLES edges for the changed file.
+			ApplyHeuristics(g, path, src)
 		}
 		fresh[path] = mtime
 		changed++
@@ -239,7 +548,7 @@ func (w *Walker) IncrementalReindex(g *graph.Graph, root string, known map[strin
 // supported it returns nil without error.
 func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	ext := strings.ToLower(filepath.Ext(path))
-	p, ok := w.parsers[ext]
+	p, ok := w.resolveParser(path, ext)
 	if !ok {
 		return nil
 	}
@@ -247,7 +556,83 @@ func (w *Walker) ParseFile(g *graph.Graph, path string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	return p.Parse(g, path, src)
+	if err := p.Parse(g, path, src); err != nil {
+		return err
+	}
+	// R28: stamp provenance on all nodes produced by this file.
+	ApplyProvenance(g, path, src)
+	// R1: inject HANDLES edges for this file.
+	ApplyHeuristics(g, path, src)
+	return nil
+}
+
+// ParseFileSrc parses a single file from pre-read bytes and updates g.
+// It is identical to ParseFile but skips the os.ReadFile call, allowing
+// callers that already hold the file bytes (e.g. for error checking or
+// content hashing) to avoid a second disk read.
+// If the file extension is not supported it returns nil without error.
+func (w *Walker) ParseFileSrc(g *graph.Graph, path string, src []byte) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	p, ok := w.resolveParser(path, ext)
+	if !ok {
+		return nil
+	}
+	if err := p.Parse(g, path, src); err != nil {
+		return err
+	}
+	ApplyProvenance(g, path, src)
+	ApplyHeuristics(g, path, src)
+	return nil
+}
+
+// parserForPath returns the language parser for the given file path, or nil
+// if no parser is registered for the file's extension or name.
+func (w *Walker) parserForPath(path string) LanguageParser {
+	ext := strings.ToLower(filepath.Ext(path))
+	if p, ok := w.parsers[ext]; ok {
+		return p
+	}
+	base := filepath.Base(path)
+	if p, ok := w.filenameParsers[base]; ok {
+		return p
+	}
+	for _, entry := range w.filenamePrefixParsers {
+		if strings.HasPrefix(base, entry.prefix) {
+			return entry.parser
+		}
+	}
+	return nil
+}
+
+// HasParseErrors performs a lightweight tree-sitter parse of src and returns
+// true if the resulting AST contains syntax errors. Used by the watcher to
+// skip reparsing files that are mid-save (half-written), preventing corrupted
+// AST data from replacing valid graph nodes.
+//
+// Returns false for parsers that don't use tree-sitter or for unknown extensions.
+func (w *Walker) HasParseErrors(path string, src []byte) bool {
+	p := w.parserForPath(path)
+	if p == nil {
+		return false
+	}
+	tsp, ok := p.(TreeSitterLanguageProvider)
+	if !ok {
+		return false
+	}
+	lang := tsp.TSLanguageForFile(path)
+	if lang == nil {
+		return false
+	}
+	parser := sitter.NewParser()
+	parser.SetLanguage(lang)
+	parseCtx, parseCancel := parseContext()
+	defer parseCancel()
+	tree, err := parser.ParseString(parseCtx, nil, src)
+	if err != nil || tree == nil {
+		return true
+	}
+	defer tree.Close()
+	return tree.RootNode().HasError()
 }
 
 // shouldSkipDir returns true for directories that never contain useful source:

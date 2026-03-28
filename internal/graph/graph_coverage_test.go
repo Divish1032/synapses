@@ -1,0 +1,338 @@
+package graph_test
+
+// Additional tests targeting uncovered graph functions:
+// Serialize/Deserialize, LoadSnapshot,
+// SuggestRules, MakeNodeID, MergeFrom, ProjectIdentity.
+
+import (
+	"testing"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func buildTestGraph(t *testing.T) *graph.Graph {
+	t.Helper()
+	g := graph.New("/repo")
+
+	authFile := "/repo/pkg/auth/auth.go"
+	apiFile := "/repo/pkg/api/handler.go"
+
+	nodes := []struct {
+		file, name, pkg string
+		typ             graph.NodeType
+	}{
+		{authFile, "Login", "auth", graph.NodeFunction},
+		{authFile, "Logout", "auth", graph.NodeFunction},
+		{authFile, "ValidateToken", "auth", graph.NodeFunction},
+		{apiFile, "HandleLogin", "api", graph.NodeFunction},
+		{apiFile, "HandleLogout", "api", graph.NodeFunction},
+	}
+	ids := make(map[string]graph.NodeID)
+	for _, n := range nodes {
+		id := g.MakeNodeID(n.file, n.name)
+		ids[n.name] = id
+		g.AddNode(&graph.Node{
+			ID:      id,
+			Name:    n.name,
+			Type:    n.typ,
+			File:    n.file,
+			Package: n.pkg,
+		})
+	}
+	g.AddEdge(&graph.Edge{From: ids["HandleLogin"], To: ids["Login"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["HandleLogout"], To: ids["Logout"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Login"], To: ids["ValidateToken"], Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: ids["Logout"], To: ids["ValidateToken"], Type: graph.EdgeCalls})
+	return g
+}
+
+// ── LoadSnapshot via RebuildIndex ─────────────────────────────────────────────
+
+func TestRebuildIndexAndLoadSnapshot(t *testing.T) {
+	g := buildTestGraph(t)
+	blob, err := g.RebuildIndex()
+	if err != nil {
+		t.Fatalf("RebuildIndex: %v", err)
+	}
+	if len(blob) == 0 {
+		t.Fatal("expected non-empty snapshot blob")
+	}
+
+	pool := graph.NewStringPool()
+	restored, err := graph.LoadSnapshot(blob, pool)
+	if err != nil {
+		t.Fatalf("LoadSnapshot: %v", err)
+	}
+	if restored == nil {
+		t.Fatal("expected non-nil restored GraphIndex")
+	}
+}
+
+func TestLoadSnapshot_CorruptData(t *testing.T) {
+	pool := graph.NewStringPool()
+	_, err := graph.LoadSnapshot([]byte("garbage"), pool)
+	if err == nil {
+		t.Error("expected error for corrupt snapshot")
+	}
+}
+
+func TestRebuildIndex_EmptyGraph(t *testing.T) {
+	g := graph.New("empty")
+	blob, err := g.RebuildIndex()
+	if err != nil {
+		t.Fatalf("RebuildIndex empty: %v", err)
+	}
+	pool := graph.NewStringPool()
+	restored, err := graph.LoadSnapshot(blob, pool)
+	if err != nil {
+		t.Fatalf("LoadSnapshot empty: %v", err)
+	}
+	_ = restored
+}
+
+// ── SuggestRules ──────────────────────────────────────────────────────────────
+
+func TestSuggestRules_EmptyGraph(t *testing.T) {
+	g := graph.New("test")
+	rules := g.SuggestRules()
+	if len(rules) != 0 {
+		t.Errorf("expected no rules for empty graph, got %d", len(rules))
+	}
+}
+
+func TestSuggestRules_WithNodes(t *testing.T) {
+	g := buildTestGraph(t)
+	rules := g.SuggestRules()
+	_ = rules // must not panic
+}
+
+func TestSuggestRules_StrongCoupling(t *testing.T) {
+	// Build a graph where api/ consistently calls auth/ to trigger rule detection.
+	g := graph.New("/repo")
+	for i := 0; i < 5; i++ {
+		apiFile := "/repo/api/handler.go"
+		authFile := "/repo/auth/service.go"
+		apiID := g.MakeNodeID(apiFile, "Handler"+string(rune('A'+i)))
+		authID := g.MakeNodeID(authFile, "Service"+string(rune('A'+i)))
+		g.AddNode(&graph.Node{ID: apiID, Name: "Handler" + string(rune('A'+i)),
+			Type: graph.NodeFunction, File: apiFile, Package: "api"})
+		g.AddNode(&graph.Node{ID: authID, Name: "Service" + string(rune('A'+i)),
+			Type: graph.NodeFunction, File: authFile, Package: "auth"})
+		g.AddEdge(&graph.Edge{From: apiID, To: authID, Type: graph.EdgeCalls})
+	}
+	rules := g.SuggestRules()
+	_ = rules
+}
+
+// ── MakeNodeID ────────────────────────────────────────────────────────────────
+
+func TestMakeNodeID_AbsolutePath(t *testing.T) {
+	g := graph.New("/my/project")
+	id := g.MakeNodeID("/my/project/pkg/auth.go", "Login")
+	if id == "" {
+		t.Error("expected non-empty node ID")
+	}
+}
+
+func TestMakeNodeID_RelativePath(t *testing.T) {
+	g := graph.New("/project")
+	id := g.MakeNodeID("pkg/auth.go", "Login")
+	if id == "" {
+		t.Error("expected non-empty node ID for relative path")
+	}
+}
+
+func TestMakeNodeID_EmptyRoot(t *testing.T) {
+	g := graph.New("")
+	id := g.MakeNodeID("auth.go", "Login")
+	if id == "" {
+		t.Error("expected non-empty node ID when root is empty")
+	}
+}
+
+func TestMakeNodeID_Stable(t *testing.T) {
+	g := graph.New("/repo")
+	id1 := g.MakeNodeID("/repo/pkg/auth.go", "Login")
+	id2 := g.MakeNodeID("/repo/pkg/auth.go", "Login")
+	if id1 != id2 {
+		t.Error("MakeNodeID must be deterministic")
+	}
+}
+
+// ── MergeFrom ─────────────────────────────────────────────────────────────────
+
+func TestMergeFrom_Basic(t *testing.T) {
+	g1 := graph.New("repo1")
+	id1 := g1.MakeNodeID("a.go", "FuncA")
+	g1.AddNode(&graph.Node{ID: id1, Name: "FuncA", Type: graph.NodeFunction, File: "a.go"})
+
+	g2 := graph.New("repo2")
+	id2 := g2.MakeNodeID("b.go", "FuncB")
+	g2.AddNode(&graph.Node{ID: id2, Name: "FuncB", Type: graph.NodeFunction, File: "b.go"})
+
+	g1.MergeFrom(g2)
+	nodes := g1.AllNodes()
+	found := false
+	for _, n := range nodes {
+		if n.Name == "FuncB" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected FuncB in merged graph")
+	}
+}
+
+func TestMergeFrom_Empty(t *testing.T) {
+	g1 := graph.New("repo1")
+	g2 := graph.New("repo2")
+	g1.MergeFrom(g2) // must not panic
+}
+
+// ── ProjectIdentity ───────────────────────────────────────────────────────────
+
+func TestProjectIdentity_NotNil(t *testing.T) {
+	g := buildTestGraph(t)
+	p := g.ProjectIdentity()
+	if p == nil {
+		t.Fatal("expected non-nil ProjectIdentity")
+	}
+	if p.Summary.Functions == 0 {
+		t.Error("expected non-zero function count")
+	}
+}
+
+func TestProjectIdentity_Cached(t *testing.T) {
+	g := buildTestGraph(t)
+	p1 := g.ProjectIdentity()
+	p2 := g.ProjectIdentity()
+	if p1 == nil || p2 == nil {
+		t.Fatal("expected non-nil ProjectIdentity")
+	}
+	if p1.Summary.Functions != p2.Summary.Functions {
+		t.Error("cached and fresh identity should match")
+	}
+}
+
+// ── ExportDOT dotEscape coverage ─────────────────────────────────────────────
+
+func TestExportDOT_WithSpecialChars(t *testing.T) {
+	// Nodes with special characters trigger dotEscape.
+	g := graph.New("/repo")
+	id := g.MakeNodeID("/repo/file.go", `Func"With"Quotes`)
+	g.AddNode(&graph.Node{
+		ID:   id,
+		Name: `Func"With"Quotes`,
+		Type: graph.NodeFunction,
+		File: "/repo/file.go",
+	})
+	nodes := g.AllNodes()
+	edges := g.AllEdges()
+	dot := graph.ExportDOT(nodes, edges, "/repo", false)
+	if dot == "" {
+		t.Error("expected non-empty DOT even with special chars")
+	}
+}
+
+// ── SnapshotFileStableIDs / MigrateStableID ───────────────────────────────────
+
+func TestSnapshotAndMigrateStableID(t *testing.T) {
+	g := buildTestGraph(t)
+	// SnapshotFileStableIDs is void — call for side-effects / coverage.
+	g.SnapshotFileStableIDs("/repo/pkg/auth/auth.go")
+	// MigrateStableID takes a *Node — call with an existing node.
+	nodes := g.AllNodes()
+	if len(nodes) > 0 {
+		g.MigrateStableID(nodes[0])
+	}
+}
+
+// ── RemoveFile ────────────────────────────────────────────────────────────────
+
+func TestRemoveFile_Existing(t *testing.T) {
+	g := buildTestGraph(t)
+	n := g.AllNodes()[0]
+	before := len(g.AllNodes())
+	g.RemoveFile(n.File)
+	after := len(g.AllNodes())
+	if after >= before {
+		t.Error("expected nodes to be removed after RemoveFile")
+	}
+}
+
+func TestRemoveFile_NonExistent(t *testing.T) {
+	g := buildTestGraph(t)
+	before := len(g.AllNodes())
+	g.RemoveFile("nonexistent/file.go")
+	after := len(g.AllNodes())
+	if after != before {
+		t.Errorf("expected no change for non-existent file, before=%d after=%d", before, after)
+	}
+}
+
+// ── FindByType ────────────────────────────────────────────────────────────────
+
+func TestFindByType_Functions(t *testing.T) {
+	g := graph.New("test")
+
+	fID := g.MakeNodeID("test.go", "MyFunc")
+	sID := g.MakeNodeID("test.go", "MyStruct")
+
+	g.AddNode(&graph.Node{ID: fID, Type: graph.NodeFunction, Name: "MyFunc", File: "test.go"})
+	g.AddNode(&graph.Node{ID: sID, Type: graph.NodeStruct, Name: "MyStruct", File: "test.go"})
+
+	funcs := g.FindByType(graph.NodeFunction)
+	if len(funcs) == 0 {
+		t.Error("expected at least one function")
+	}
+	foundMyFunc := false
+	for _, n := range funcs {
+		if n.Name == "MyFunc" {
+			foundMyFunc = true
+			break
+		}
+	}
+	if !foundMyFunc {
+		t.Error("MyFunc not found in function results")
+	}
+}
+
+func TestFindByType_Structs(t *testing.T) {
+	g := graph.New("test")
+
+	sID1 := g.MakeNodeID("test.go", "StructA")
+	sID2 := g.MakeNodeID("test.go", "StructB")
+	fID := g.MakeNodeID("test.go", "Func")
+
+	g.AddNode(&graph.Node{ID: sID1, Type: graph.NodeStruct, Name: "StructA", File: "test.go"})
+	g.AddNode(&graph.Node{ID: sID2, Type: graph.NodeStruct, Name: "StructB", File: "test.go"})
+	g.AddNode(&graph.Node{ID: fID, Type: graph.NodeFunction, Name: "Func", File: "test.go"})
+
+	structs := g.FindByType(graph.NodeStruct)
+	if len(structs) != 2 {
+		t.Errorf("expected 2 structs, got %d", len(structs))
+	}
+	for _, n := range structs {
+		if n.Type != graph.NodeStruct {
+			t.Errorf("found non-struct node: %v", n)
+		}
+	}
+}
+
+func TestFindByType_Empty(t *testing.T) {
+	g := graph.New("test")
+	g.AddNode(&graph.Node{
+		ID:   g.MakeNodeID("test.go", "OnlyFunc"),
+		Type: graph.NodeFunction,
+		Name: "OnlyFunc",
+		File: "test.go",
+	})
+
+	// No structs added
+	structs := g.FindByType(graph.NodeStruct)
+	if len(structs) != 0 {
+		t.Errorf("expected no structs, got %d", len(structs))
+	}
+}

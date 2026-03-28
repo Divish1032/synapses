@@ -1,6 +1,7 @@
 package parser_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -196,5 +197,205 @@ func TestGoParser_EmptyFile(t *testing.T) {
 	// Should at least produce a file node and a package import node.
 	if g.NodeCount() == 0 {
 		t.Error("empty file produced no nodes")
+	}
+}
+
+// ── IMP-IMPL-2: struct fields in metadata ─────────────────────────────────────
+
+// structFieldsOf is a helper that finds a struct by name and returns the
+// comma-separated "fields" metadata string (split into a slice for easy assertion).
+func structFieldsOf(t *testing.T, g *graph.Graph, structName string) []string {
+	t.Helper()
+	nodes := g.FindByName(structName)
+	if len(nodes) == 0 {
+		t.Fatalf("struct %q not found", structName)
+	}
+	raw := nodes[0].Metadata["fields"]
+	if raw == "" {
+		return nil
+	}
+	// Split and trim — mirrors digest.go's rendering.
+	var out []string
+	for _, f := range splitComma(raw) {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func splitComma(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func TestGoParser_StructFields_SimpleTypes(t *testing.T) {
+	src := `package config
+type Config struct {
+	Host    string
+	Port    int
+	Debug   bool
+	Timeout float64
+}
+`
+	g := parseGoSource(t, src)
+	fields := structFieldsOf(t, g, "Config")
+	want := []string{"Host string", "Port int", "Debug bool", "Timeout float64"}
+	if len(fields) != len(want) {
+		t.Fatalf("fields count: want %d, got %d (%v)", len(want), len(fields), fields)
+	}
+	for i, w := range want {
+		if fields[i] != w {
+			t.Errorf("field[%d]: want %q, got %q", i, w, fields[i])
+		}
+	}
+}
+
+func TestGoParser_StructFields_PointerAndSliceTypes(t *testing.T) {
+	src := `package store
+type Node struct {
+	ID       string
+	Children []*Node
+	Parent   *Node
+	Tags     []string
+}
+`
+	g := parseGoSource(t, src)
+	fields := structFieldsOf(t, g, "Node")
+	// Must contain pointer and slice types with correct text.
+	want := map[string]bool{
+		"ID string":          true,
+		"Children []*Node":   true,
+		"Parent *Node":       true,
+		"Tags []string":      true,
+	}
+	for _, f := range fields {
+		delete(want, f)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing fields: %v (got %v)", want, fields)
+	}
+}
+
+func TestGoParser_StructFields_MultiNameDeclaration(t *testing.T) {
+	// "X, Y int" — both names should appear as separate "Name type" entries.
+	src := `package geom
+type Point struct {
+	X, Y int
+	Z    float64
+}
+`
+	g := parseGoSource(t, src)
+	fields := structFieldsOf(t, g, "Point")
+	wantSet := map[string]bool{"X int": true, "Y int": true, "Z float64": true}
+	for _, f := range fields {
+		delete(wantSet, f)
+	}
+	if len(wantSet) > 0 {
+		t.Errorf("missing fields: %v (got %v)", wantSet, fields)
+	}
+}
+
+func TestGoParser_StructFields_EmbeddedField(t *testing.T) {
+	src := `package auth
+import "sync"
+type Service struct {
+	sync.Mutex
+	Name string
+}
+`
+	g := parseGoSource(t, src)
+	fields := structFieldsOf(t, g, "Service")
+	// Must contain the embedded type and the named field.
+	var hasName, hasEmbedded bool
+	for _, f := range fields {
+		if f == "Name string" {
+			hasName = true
+		}
+		// Embedded field may appear as "sync.Mutex" or just "Mutex".
+		if strings.Contains(f, "Mutex") {
+			hasEmbedded = true
+		}
+	}
+	if !hasName {
+		t.Errorf("missing 'Name string' field; got %v", fields)
+	}
+	if !hasEmbedded {
+		t.Errorf("missing embedded Mutex field; got %v", fields)
+	}
+}
+
+func TestGoParser_StructFields_StructTagStripped(t *testing.T) {
+	// Struct tags must NOT appear in the fields metadata.
+	src := `package api
+type User struct {
+	ID   int    ` + "`json:\"id\"`" + `
+	Name string ` + "`json:\"name\" db:\"user_name\"`" + `
+}
+`
+	g := parseGoSource(t, src)
+	fields := structFieldsOf(t, g, "User")
+	for _, f := range fields {
+		if strings.Contains(f, "`") || strings.Contains(f, "json:") {
+			t.Errorf("struct tag leaked into fields: %q", f)
+		}
+	}
+	wantSet := map[string]bool{"ID int": true, "Name string": true}
+	for _, f := range fields {
+		delete(wantSet, f)
+	}
+	if len(wantSet) > 0 {
+		t.Errorf("missing fields: %v (got %v)", wantSet, fields)
+	}
+}
+
+func TestGoParser_StructFields_Cap15(t *testing.T) {
+	// Structs with >15 fields must only store the first 15.
+	src := `package big
+type Big struct {
+	F01 int
+	F02 int
+	F03 int
+	F04 int
+	F05 int
+	F06 int
+	F07 int
+	F08 int
+	F09 int
+	F10 int
+	F11 int
+	F12 int
+	F13 int
+	F14 int
+	F15 int
+	F16 int
+	F17 int
+}
+`
+	g := parseGoSource(t, src)
+	fields := structFieldsOf(t, g, "Big")
+	if len(fields) != 15 {
+		t.Errorf("expected exactly 15 fields (cap), got %d: %v", len(fields), fields)
+	}
+}
+
+func TestGoParser_StructFields_EmptyStruct(t *testing.T) {
+	src := `package token
+type Token struct{}
+`
+	g := parseGoSource(t, src)
+	nodes := g.FindByName("Token")
+	if len(nodes) == 0 {
+		t.Fatal("Token struct not found")
+	}
+	// Empty struct should have no "fields" metadata key (or empty string).
+	if raw := nodes[0].Metadata["fields"]; raw != "" {
+		t.Errorf("empty struct should have no fields metadata, got %q", raw)
 	}
 }

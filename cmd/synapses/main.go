@@ -10,33 +10,45 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/SynapsesOS/synapses/internal/benchmark"
 	"github.com/SynapsesOS/synapses/internal/brain"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/namematcher"
+	"github.com/SynapsesOS/synapses/internal/contextfile"
 	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/embed"
+	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/metrics"
+	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/parser"
-	"github.com/SynapsesOS/synapses/internal/peer"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
+	"github.com/SynapsesOS/synapses/internal/webcache"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 )
@@ -45,8 +57,21 @@ import (
 var version = "dev"
 
 func main() {
+	// Fast-path: print version and exit immediately.
+	// This avoids loading SQLite drivers and other heavy init() code
+	// that runs before main(). Keeps `synapses version` zero-cost.
+	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("synapses %s\n", version)
+		// Show update hint if a cached check found a newer version.
+		if state := getUpdateState(); state != nil && state.UpdateAvailable {
+			fmt.Printf("Update available: %s → %s (run 'synapses update')\n",
+				state.CurrentVersion, state.LatestVersion)
+		}
+		return
+	}
+
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		logutil.Error("%v\n", err)
 		os.Exit(1)
 	}
 }
@@ -61,22 +86,36 @@ func run(args []string) error {
 	case "init":
 		return cmdInit(args[1:])
 	case "start":
-		return cmdStart(args[1:])
+		return cmdStartProxy(args[1:])
+	case "stop":
+		return cmdStop(args[1:])
+	case "projects":
+		return cmdProjects(args[1:])
+	case "logs":
+		return cmdLogs(args[1:])
 	case "index":
 		return cmdIndex(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
 	case "list":
-		return cmdList()
+		return cmdList(args[1:])
 	case "reset":
 		return cmdReset(args[1:])
-	case "version":
+	case "version", "--version", "-v":
 		fmt.Printf("synapses %s\n", version)
 		return nil
+	case "brain":
+		return cmdBrain(args[1:])
 	case "setup":
-		return cmdSetup(args[1:])
+		// Replaced by "synapses init". Print redirect.
+		fmt.Println("'synapses setup' has been replaced by 'synapses init'.")
+		fmt.Println("Run: synapses init --path <dir>")
+		return nil
 	case "mcp-setup":
-		return cmdMCPSetup(args[1:])
+		// Replaced by "synapses init". Print redirect.
+		fmt.Println("'synapses mcp-setup' has been replaced by 'synapses init'.")
+		fmt.Println("Run: synapses init --path <dir>")
+		return nil
 	case "query":
 		return cmdQuery(args[1:])
 	case "export":
@@ -88,7 +127,26 @@ func run(args []string) error {
 	case "brief":
 		return cmdBrief(args[1:])
 	case "onboard":
-		return cmdOnboard(args[1:])
+		// Replaced by "synapses init". Print redirect.
+		fmt.Println("'synapses onboard' has been replaced by 'synapses init'.")
+		fmt.Println("Run: synapses init --path <dir>")
+		return nil
+	case "connect":
+		return cmdConnect(args[1:])
+	case "memory":
+		return cmdMemory(args[1:])
+	case "allow-plugin":
+		return cmdAllowPlugin(args[1:])
+	case "approve":
+		return cmdApprove(args[1:])
+	case "benchmark":
+		return cmdBenchmark(args[1:])
+	case "uninstall":
+		return cmdUninstall(args[1:])
+	case "update":
+		return cmdUpdate(args[1:])
+	case "completion":
+		return cmdCompletion(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -97,9 +155,10 @@ func run(args []string) error {
 	}
 }
 
-// cmdStart indexes the repo (using cache if available), starts the file watcher
-// for incremental updates, then starts the MCP server on stdio.
-func cmdStart(args []string) error {
+// cmdStartDirect runs the MCP server directly on stdio (legacy mode).
+// Used when "synapses start --direct" is passed, or for debugging.
+// In normal operation, "synapses start" uses the proxy+daemon model instead.
+func cmdStartDirect(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
 	forceReindex := fs.Bool("reindex", false, "Force a full re-index even if cache is fresh")
@@ -122,7 +181,7 @@ func cmdStart(args []string) error {
 	// The index path (absPath) stays unchanged — we only adjust where config is loaded from.
 	cfgDir, found := config.FindConfigDir(absPath)
 	if found && cfgDir != absPath {
-		fmt.Fprintf(os.Stderr, "synapses: using config from %s\n", cfgDir)
+		logutil.Info("synapses: using config from %s\n", cfgDir)
 	}
 	cfg, err := config.Load(cfgDir)
 	if err != nil {
@@ -140,10 +199,37 @@ func cmdStart(args []string) error {
 	}
 	defer st.Close()
 
-	// Prune stale operational data in the background (30-day retention).
-	go st.PruneStaleData(30)
+	// Prune stale operational data at startup and then daily.
+	// Prevents unbounded growth of tool_calls, events, agent_messages, and
+	// episodes tables during long stdio process uptime (hours/days).
+	go func() {
+		st.PruneStaleData(appCtx, 30)
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				logutil.Info("synapses: daily prune running (30-day retention)\n")
+				st.PruneStaleData(appCtx, 30)
+			case <-appCtx.Done():
+				return
+			}
+		}
+	}()
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins)
+	// Plugin security: per-machine opt-in for external parser commands.
+	var pluginCheck *parser.PluginChecker
+	if len(cfg.Plugins) > 0 {
+		sHome, homeErr := synapsesHome()
+		if homeErr != nil {
+			logutil.Warn("cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
+		} else {
+			pluginCheck = parser.NewPluginChecker(sHome)
+		}
+	}
+
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck, nil, "")
 	if err != nil {
 		return err
 	}
@@ -151,7 +237,7 @@ func cmdStart(args []string) error {
 	// Federation: merge linked project graphs (monorepo support).
 	for _, linkedPath := range cfg.Linked {
 		if mergeErr := mergeLinkedProject(g, linkedPath); mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
+			logutil.Warn("synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
 		}
 	}
 
@@ -164,7 +250,7 @@ func cmdStart(args []string) error {
 				g.AddCallSite(cs)
 			}
 			if n := resolver.ResolveCallEdges(g); n > 0 {
-				fmt.Fprintf(os.Stderr, "synapses: resolved %d cross-project CALLS edges\n", n)
+				logutil.Info("synapses: resolved %d cross-project CALLS edges\n", n)
 			}
 		}
 	}
@@ -197,28 +283,32 @@ func cmdStart(args []string) error {
 	go func() {
 		const (
 			checkInterval  = 60 * time.Second
-			idleThreshold  = 5 * time.Minute
 			tombstoneLimit = 0.15
 		)
 		ticker := time.NewTicker(checkInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			idx := g.Index()
-			if idx == nil || !idx.Ready() {
-				continue
-			}
-			if idx.TombstoneRatio() < tombstoneLimit {
-				continue
-			}
-			// Only defrag if the watcher reports idle (no changes recently).
-			// We check this by looking at whether the graph's node count is stable
-			// (a rough proxy — the watcher's RecentChanges API would be cleaner but
-			// watcher is not accessible here without a circular import).
-			blob, err := g.RebuildIndex()
-			if err == nil && len(blob) > 0 {
-				_ = st.SaveIndexSnapshot(blob)
-				fmt.Fprintf(os.Stderr, "synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
-					idx.TombstoneRatio()*100)
+		for {
+			select {
+			case <-appCtx.Done():
+				return
+			case <-ticker.C:
+				idx := g.Index()
+				if idx == nil || !idx.Ready() {
+					continue
+				}
+				if idx.TombstoneRatio() < tombstoneLimit {
+					continue
+				}
+				// Only defrag if the watcher reports idle (no changes recently).
+				// We check this by looking at whether the graph's node count is stable
+				// (a rough proxy — the watcher's RecentChanges API would be cleaner but
+				// watcher is not accessible here without a circular import).
+				blob, err := g.RebuildIndex()
+				if err == nil && len(blob) > 0 {
+					_ = st.SaveIndexSnapshot(blob)
+					logutil.Info("synapses: idle defrag complete (tombstone ratio was %.0f%%)\n",
+						idx.TombstoneRatio()*100)
+				}
 			}
 		}
 	}()
@@ -226,92 +316,89 @@ func cmdStart(args []string) error {
 	// Create the MCP server early so we can wire the watcher into it below.
 	mcpsrv.Version = version
 	srv := mcpsrv.New(g, cfg, st)
+	srv.SetProjectID(pathProjectID(absPath))
+	srv.StartBackground()
+	defer srv.Close()
 
-	// Start the peer API server if configured. Non-fatal on failure.
-	if cfg.PeerAPIPort > 0 {
-		peerSrv := peer.NewPeerServer(g, cfg, st)
-		if err := peerSrv.Start(cfg.PeerAPIPort); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: peer API: %v\n", err)
-		} else {
-			defer peerSrv.Stop()
-			fmt.Fprintf(os.Stderr, "synapses: peer API listening on :%d\n", cfg.PeerAPIPort)
+	// Load activation-context prompts from all scopes (fail-silent per scope).
+	// Order matters: builtin < user < project (project can override user).
+	{
+		var allPrompts []skills.PromptTemplate
+		allPrompts = append(allPrompts, skills.BuiltinPrompts()...)
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			userDir := filepath.Join(homeDir, ".synapses", "prompts")
+			if pts, err := skills.LoadPromptDir(userDir, "user"); err == nil {
+				allPrompts = append(allPrompts, pts...)
+			}
+		}
+		projectDir := filepath.Join(absPath, ".synapses", "prompts")
+		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
+			allPrompts = append(allPrompts, pts...)
+		}
+		allPrompts = skills.DeduplicatePrompts(allPrompts) // user overrides builtin; project cannot shadow user/builtin
+		if len(allPrompts) > 0 {
+			srv.SetPromptTemplates(allPrompts)
+			logutil.Info("synapses: loaded %d activation-context prompts\n", len(allPrompts))
 		}
 	}
 
-	// Connect to configured peers (non-blocking, 5s timeout per peer).
-	// Start a health monitor that reconnects every 30s.
-	if len(cfg.Peers) > 0 {
-		pm := peer.NewPeerManager(cfg, g, st)
-		pm.Connect()
-		pm.StartHealthMonitor(30 * time.Second)
-		defer pm.Stop()
-		srv.SetPeerManager(pm)
-	}
-
-	// Optional: connect to synapses-intelligence brain service.
-	var brainCli *brain.Client
-	if cfg.Brain.URL != "" {
-		brainCli = brain.NewClient(cfg.Brain.URL, cfg.Brain.TimeoutSec)
-		if model, err := brainCli.HealthCheck(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s: %v (continuing without)\n", cfg.Brain.URL, err)
-			brainCli = nil
-		} else {
-			fmt.Fprintf(os.Stderr, "synapses: brain connected (%s)\n", model)
-			srv.SetBrainClient(brainCli)
-			// Bulk-ingest all nodes in parallel, then fetch summaries and write them
-			// back as annotations so they surface in get_context/find_entity.
-			go func() {
-				bulkIngestToBrain(brainCli, g)
-				fetchAndWriteBackSummaries(brainCli, g, st)
-			}()
+	// Federation resolver: cross-project drift detection + dependency tracking.
+	var fedResolver *federation.Resolver
+	if len(cfg.Federation) > 0 {
+		fedResolver = federation.NewResolver(cfg.Federation, cfgDir)
+		srv.SetFederationResolver(fedResolver)
+		defer fedResolver.Close()
+		// Cross-repo module discovery: find Go module and npm workspace siblings.
+		moduleDeps := federation.DiscoverModuleSiblings(absPath, cfg.Federation)
+		if siblings := federation.FilterSiblingDeps(moduleDeps); len(siblings) > 0 {
+			logutil.Info("synapses: discovered %d cross-repo module dependencies (%d match federation siblings)\n",
+				len(moduleDeps), len(siblings))
 		}
 	}
 
-	// Optional: connect to synapses-scout web-search service.
-	// The client is wired unconditionally so that tools work as soon as scout
-	// becomes available — even if it wasn't reachable at startup. Individual
-	// tool calls degrade gracefully (fail-silent) when scout is down.
-	var scoutCli *scout.Client
-	if cfg.Scout.URL != "" {
-		scoutCli = scout.NewClient(cfg.Scout.URL, cfg.Scout.TimeoutSec)
-		srv.SetScoutClient(scoutCli)
-		if scoutCli.Health(context.Background()) {
-			fmt.Fprintf(os.Stderr, "synapses: scout connected at %s\n", cfg.Scout.URL)
+	// Brain — now in-process; no external sidecar or port required.
+	brainCli := brain.NewInProcess(cfg.Brain.ToBrainConfig())
+	defer brainCli.Close() // stops SystemPulse + Scheduler goroutines on graceful shutdown
+	if cfg.Brain.Enabled {
+		if model, _ := brainCli.HealthCheck(context.Background()); model != "" {
+			logutil.Info("synapses: brain enabled in-process (%s)\n", model)
 		} else {
-			fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable at startup — tools will retry on use)\n", cfg.Scout.URL)
+			logutil.Info("synapses: brain enabled in-process (Ollama not yet reachable — will retry on use)\n")
 		}
+		srv.SetBrainClient(brainCli)
+		go func() {
+			bulkIngestToBrain(appCtx, brainCli, g, pathProjectID(absPath))
+			fetchAndWriteBackSummaries(appCtx, brainCli, g, st)
+		}()
+	}
+
+	// Web doc cache: version-pinned Go package docs, cached locally in SQLite.
+	if st != nil {
+		wc := webcache.New(st)
+		srv.SetWebCache(wc)
+		srv.SetProjectPath(absPath)
+		go webcache.IndexProjectImports(appCtx, absPath, g, wc, 20)
 	}
 
 	// Optional: connect to synapses-pulse analytics sidecar.
 	// Pulse is fire-and-forget: if unreachable at startup or during operation,
 	// all errors are silently discarded and the MCP server continues normally.
+	var sharedPulse *pulse.Client // P2-6: shared with embedAllMemories
 	if cfg.Pulse.URL != "" {
-		pulseCli := pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
-		srv.SetPulseClient(pulseCli)
-		fmt.Fprintf(os.Stderr, "synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
+		sharedPulse = pulse.NewClient(cfg.Pulse.URL, cfg.Pulse.TimeoutSec)
+		srv.SetPulseClient(sharedPulse)
+		logutil.Info("synapses: pulse analytics enabled at %s\n", cfg.Pulse.URL)
 	}
 
-	// Optional: vector embedding for semantic search.
-	// Priority: (1) brain /v1/embed when brain is connected and embedding is available,
-	//           (2) explicit embedding_endpoint in synapses.json (Ollama/OpenAI compat),
-	//           (3) FTS5-only fallback (no embeddings).
+	// Optional: vector embedding for semantic search (node embeddings).
+	// Configured via embedding_endpoint in synapses.json (Ollama/OpenAI compat).
+	// Falls back to FTS5-only search when not configured.
 	// Embeddings are built/updated in the background so startup is never delayed.
 	{
 		var embedCli *embed.Client
-		if brainCli != nil {
-			// Probe brain's /v1/embed — only wire it if the endpoint responds (i.e.
-			// embedding_enabled=true was set in brain.json and llama-server started).
-			candidate := embed.NewBrainClient(cfg.Brain.URL)
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer probeCancel()
-			if _, err := candidate.Embed(probeCtx, "probe"); err == nil {
-				embedCli = candidate
-				fmt.Fprintf(os.Stderr, "synapses: embeddings via brain /v1/embed (Ollama-free)\n")
-			}
-		}
-		if embedCli == nil && cfg.EmbeddingEndpoint != "" {
+		if cfg.EmbeddingEndpoint != "" {
 			embedCli = embed.NewClient(cfg.EmbeddingEndpoint, "")
-			fmt.Fprintf(os.Stderr, "synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
+			logutil.Info("synapses: embeddings via %s\n", cfg.EmbeddingEndpoint)
 		}
 		if embedCli != nil {
 			srv.SetEmbedClient(embedCli)
@@ -319,71 +406,130 @@ func cmdStart(args []string) error {
 		}
 	}
 
-	// Autosubscribe: detect tech stack from manifest files and optionally enrich
-	// with official doc URLs via scout. Runs in the background — does not block startup.
+	// Memory embeddings: generate embeddings for memories on remember() writes
+	// and provide vector search in recall(). Three modes:
+	//   "builtin" (default) — pure-Go nomic-embed-text-v1.5, auto-downloads model
+	//   "ollama"            — delegates to local Ollama instance
+	//   "off"               — disabled, FTS5-only recall
+	// Declared at function scope so the force-close handler can reach it.
+	var memEmbedder embed.Embedder
+	{
+		memEmbedder = createMemoryEmbedder(cfg)
+		if memEmbedder != nil {
+			// P8-11: wire model download lifecycle events to Pulse.
+			if be, ok := memEmbedder.(*embed.BuiltinEmbedder); ok && sharedPulse != nil {
+				pc := sharedPulse
+				be.OnModelEvent = func(eventType string) {
+					pc.RecordEmbeddingEvent(pulse.EmbeddingEvent{
+						EventType: eventType,
+						Trigger:   "model_lifecycle",
+						Model:     "all-MiniLM-L6-v2",
+					})
+				}
+			}
+			defer memEmbedder.Close()
+			srv.SetMemoryEmbedder(memEmbedder)
+			// Pre-initialize the embedder (e.g. download the model) in the
+			// background so the first Embed() call doesn't block. WarmUp
+			// uses singleflight internally — concurrent Embed() callers
+			// coalesce into the same download.
+			go func() {
+				if err := memEmbedder.WarmUp(appCtx); err != nil {
+					logutil.Warn("synapses: embedder warmup: %v\n", err)
+				}
+			}()
+			go embedAllMemories(appCtx, memEmbedder, st, sharedPulse)
+		}
+	}
+
+	// Autosubscribe: detect tech stack from manifest files.
 	go func() {
-		entries := scout.DetectTechStack(absPath)
+		// Wrap with timeout since DetectTechStack doesn't accept a context.
+		type tsResult struct{ entries []scout.TechStackEntry }
+		ch := make(chan tsResult, 1)
+		go func() {
+			ch <- tsResult{entries: scout.DetectTechStack(absPath)}
+		}()
+		tsCtx, tsCancel := context.WithTimeout(appCtx, 30*time.Second)
+		defer tsCancel()
+		var entries []scout.TechStackEntry
+		select {
+		case <-tsCtx.Done():
+			logutil.Warn("synapses: tech stack detection timed out\n")
+			return
+		case res := <-ch:
+			entries = res.entries
+		}
 		if len(entries) == 0 {
 			return
 		}
-		if scoutCli != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			entries = scout.EnrichWithDocs(ctx, scoutCli, entries)
-			cancel()
+		// Skip writing to server if shutdown has started.
+		select {
+		case <-appCtx.Done():
+			return
+		default:
 		}
 		srv.SetTechStack(entries)
-		fmt.Fprintf(os.Stderr, "synapses: tech stack detected (%d deps)\n", len(entries))
+		logutil.Info("synapses: tech stack detected (%d deps)\n", len(entries))
 	}()
 
 	// Start the file watcher so the graph stays current as files change.
+	// Declared at function scope so the force-close handler can reach it.
+	var fw *watcher.Watcher
 	if !*noWatch {
 		w := parser.NewWalker()
 		for _, p := range cfg.Plugins {
-			w.RegisterPlugin(p.Extensions, p.Command)
+			w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 		}
-		fw, err := watcher.New(g, w, st)
+		var err error
+		fw, err = watcher.New(g, w, st)
 		if err != nil {
 			// Non-fatal: log and continue without watching.
-			fmt.Fprintf(os.Stderr, "synapses: file watcher unavailable: %v\n", err)
+			logutil.Error("synapses: file watcher unavailable: %v\n", err)
 		} else {
 			if err := fw.Start(absPath); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: file watcher start failed: %v\n", err)
+				logutil.Error("synapses: file watcher start failed: %v\n", err)
 			} else {
 				defer fw.Stop()
-				fw.SetConfig(cfg)            // wire rules for proactive violation events
-				srv.SetChangeSource(fw)      // wire change log into get_working_state
-				fw.SetPacketInvalidator(srv) // clear brain packet cache on file change
-				if brainCli != nil {
-					fw.SetBrainClient(brainCli) // wire incremental ingest
+				fw.SetConfig(cfg)                    // wire rules for proactive violation events
+				fw.SetProjectID(pathProjectID(absPath)) // scope brain ingest to this project
+				srv.SetChangeSource(fw)               // wire change log into get_working_state
+				fw.SetPacketInvalidator(srv)          // clear brain packet cache on file change
+				fw.SetBrainClient(brainCli)           // wire incremental ingest
+				// Wire cross-domain name matcher: runs after each reindex to create MENTIONS edges.
+				nm := namematcher.New(brainCli)
+				// Prime the cross-domain flag from the already-loaded graph so that
+				// incremental reindex events with code-only changed files are not
+				// incorrectly skipped when non-code entities exist from a prior session.
+				nm.PrimeCrossDomain(g)
+				fw.SetNameMatcher(nm)
+				// Federation: wire cross-project dependency tracker into watcher.
+				var fedTracker *federation.DeterministicDetector
+				if fedResolver != nil {
+					fedTracker = federation.NewDeterministicDetector(cfg.Federation, fedResolver)
+					fw.SetCrossProjectTracker(fedTracker)
 				}
-				// Hot-reload synapses.json: reconnect scout/brain when config changes.
+				// Hot-reload synapses.json: reconnect brain and federation when config changes.
+				// activeBrain tracks the current brain client so each reload can close the
+				// previous instance, stopping its background goroutines (SystemPulse sampler
+				// + Scheduler drain) and releasing LLM + SQLite resources.
+				var activeBrain atomic.Pointer[brain.Client]
+				activeBrain.Store(brainCli)
 				fw.SetConfigChangeHandler(func(newCfg *config.Config) {
-					if newCfg.Scout.URL != "" {
-						newScout := scout.NewClient(newCfg.Scout.URL, newCfg.Scout.TimeoutSec)
-						srv.SetScoutClient(newScout)
-						if newScout.Health(context.Background()) {
-							fmt.Fprintf(os.Stderr, "synapses: scout reconnected at %s\n", newCfg.Scout.URL)
-						} else {
-							fmt.Fprintf(os.Stderr, "synapses: scout configured at %s (unreachable — tools will retry on use)\n", newCfg.Scout.URL)
-						}
-					} else {
-						srv.SetScoutClient(nil)
+					newBrain := brain.NewInProcess(newCfg.Brain.ToBrainConfig())
+					oldBrain := activeBrain.Swap(newBrain)
+					srv.SetBrainClient(newBrain)
+					fw.SetBrainClient(newBrain)
+					fw.SetNameMatcher(namematcher.New(newBrain))
+					if fedTracker != nil {
+						fedTracker.Rebuild(newCfg.Federation)
 					}
-					if newCfg.Brain.URL != "" {
-						newBrain := brain.NewClient(newCfg.Brain.URL, newCfg.Brain.TimeoutSec)
-						if _, err := newBrain.HealthCheck(context.Background()); err != nil {
-							fmt.Fprintf(os.Stderr, "synapses: brain unreachable at %s after config reload: %v\n", newCfg.Brain.URL, err)
-						} else {
-							srv.SetBrainClient(newBrain)
-							fw.SetBrainClient(newBrain)
-							fmt.Fprintf(os.Stderr, "synapses: brain reconnected at %s\n", newCfg.Brain.URL)
-						}
-					} else {
-						srv.SetBrainClient(nil)
-						fw.SetBrainClient(nil)
-					}
+					logutil.Info("synapses: brain reloaded (enabled=%v)\n", newCfg.Brain.Enabled)
+					// Close old brain after wiring in the new one so no new tasks are
+					// submitted to it. Async to avoid blocking the config-change callback.
+					go oldBrain.Close()
 				})
-				fmt.Fprintf(os.Stderr, "synapses: watching %s for changes\n", absPath)
+				logutil.Info("synapses: watching %s for changes\n", absPath)
 			}
 		}
 	}
@@ -396,22 +542,57 @@ func cmdStart(args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nsynapses: received %s, shutting down\n", sig)
+		fmt.Fprintln(os.Stderr) // visual separator
+		logutil.Info("synapses: received %s, shutting down\n", sig)
 		appCancel()
 		time.AfterFunc(5*time.Second, func() {
-			fmt.Fprintf(os.Stderr, "synapses: graceful shutdown timed out, forcing exit\n")
+			logutil.Error("synapses: graceful shutdown timed out, forcing exit\n")
+			// Close resources in reverse-initialization order since defers
+			// won't run after os.Exit. Each Close is wrapped in a timer to
+			// prevent a hanging Close from blocking the force-exit.
+			forceClose := func(name string, fn func()) {
+				done := make(chan struct{})
+				go func() { fn(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(500 * time.Millisecond):
+					logutil.Error("synapses: force-exit: %s close timed out\n", name)
+				}
+			}
+			if fedResolver != nil {
+				forceClose("federation", func() { fedResolver.Close() })
+			}
+			if fw != nil {
+				forceClose("watcher", func() { fw.Stop() })
+			}
+			forceClose("mcp-server", func() { srv.Close() })
+			if memEmbedder != nil {
+				forceClose("embedder", func() { memEmbedder.Close() })
+			}
+			brainCli.Close()
+			if sharedPulse != nil {
+				// pulse.Collector.Stop() flushes in-flight events; give it 3s.
+				done := make(chan struct{})
+				go func() { sharedPulse.Close(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(3 * time.Second):
+					logutil.Error("synapses: force-exit: pulse close timed out\n")
+				}
+			}
+			forceClose("store", func() { st.Close() })
 			os.Exit(1)
 		})
 	}()
 
 	// MCP server writes to stdout (protocol messages); all status goes to stderr.
 	identity := g.ProjectIdentity()
-	fmt.Fprintf(os.Stderr, "synapses %s ready — %d nodes, %d edges (repo: %s)\n",
+	logutil.Info("synapses %s ready — %d nodes, %d edges (repo: %s)\n",
 		version,
 		identity.Summary.Files+identity.Summary.Functions+
 			identity.Summary.Structs+identity.Summary.Interfaces,
 		identity.Summary.Edges, identity.RepoID)
-	fmt.Fprintf(os.Stderr, "MCP server starting on stdio...\n")
+	logutil.Info("MCP server starting on stdio...\n")
 
 	return srv.ServeStdio()
 }
@@ -429,6 +610,9 @@ func cmdIndex(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
+
+	// ── Check for git and offer to initialize ────────────────────────────
+	offerGitInit(absPath)
 
 	cfg, err := config.Load(absPath)
 	if err != nil {
@@ -448,7 +632,19 @@ func cmdIndex(args []string) error {
 	}
 	defer st.Close()
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins)
+	// Plugin security: per-machine opt-in for external parser commands.
+	var pluginCheck2 *parser.PluginChecker
+	if len(cfg.Plugins) > 0 {
+		sHome, homeErr := synapsesHome()
+		if homeErr != nil {
+			logutil.Warn("cannot determine synapses home: %v (plugins disabled)\n", homeErr)
+			cfg.Plugins = nil // fail-closed: cannot verify plugins → disable them
+		} else {
+			pluginCheck2 = parser.NewPluginChecker(sHome)
+		}
+	}
+
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck2, nil, "")
 	if err != nil {
 		return err
 	}
@@ -456,7 +652,7 @@ func cmdIndex(args []string) error {
 	// Federation: merge linked project graphs.
 	for _, linkedPath := range cfg.Linked {
 		if mergeErr := mergeLinkedProject(g, linkedPath); mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
+			logutil.Warn("synapses: skipping linked project %s: %v\n", linkedPath, mergeErr)
 		}
 	}
 
@@ -467,8 +663,11 @@ func cmdIndex(args []string) error {
 				g.AddCallSite(cs)
 			}
 			if n := resolver.ResolveCallEdges(g); n > 0 {
-				fmt.Fprintf(os.Stderr, "synapses: resolved %d cross-project CALLS edges\n", n)
+				logutil.Info("synapses: resolved %d cross-project CALLS edges\n", n)
 			}
+		}
+		if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
+			logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
 		}
 	}
 
@@ -487,14 +686,6 @@ func cmdIndex(args []string) error {
 	identity := g.ProjectIdentity()
 	printSummaryTable(identity, time.Since(start), nil, 0, 0, 0, 0)
 
-	// Write agent-guidance files so AI agents use Synapses tools by default.
-	if err := writeProjectCLAUDE(absPath); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: warning: could not update CLAUDE.md: %v\n", err)
-	}
-	if err := writeClaudeSettings(absPath); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: warning: could not update .claude/settings.json: %v\n", err)
-	}
-
 	// Silently ensure sidecars are running after indexing.
 	if ensureDirs() == nil {
 		daemonStart(allSidecars, true) //nolint:errcheck
@@ -503,7 +694,125 @@ func cmdIndex(args []string) error {
 	return nil
 }
 
+// cmdStop stops the singleton daemon by sending SIGTERM via its PID file.
+func cmdStop(args []string) error {
+	pidPath, err := singletonPIDPath()
+	if err != nil {
+		return fmt.Errorf("resolve PID path: %w", err)
+	}
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("Daemon is not running.")
+			return nil
+		}
+		return fmt.Errorf("read PID file: %w", err)
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	pid, err := parseInt(strings.TrimSpace(lines[0]))
+	if err != nil {
+		return fmt.Errorf("invalid PID in %s: %w", pidPath, err)
+	}
+	// PID recycling check: if we recorded a start timestamp, verify the
+	// process with this PID actually started at that time.
+	if len(lines) >= 2 {
+		if startNanos, parseErr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); parseErr == nil && startNanos > 0 {
+			if procStart := processStartTime(pid); procStart > 0 {
+				recorded := time.Unix(0, startNanos)
+				actual := time.Unix(0, procStart)
+				if diff := recorded.Sub(actual); diff < -2*time.Second || diff > 2*time.Second {
+					fmt.Printf("Process %d was recycled — removing stale PID file.\n", pid)
+					os.Remove(pidPath)
+					return nil
+				}
+			}
+		}
+	}
+	if !processAlive(pid) {
+		fmt.Printf("Process %d not found — removing stale PID file.\n", pid)
+		os.Remove(pidPath) //nolint:errcheck
+		return nil
+	}
+	if err := killProcess(pid); err != nil {
+		return fmt.Errorf("kill daemon (pid %d): %w", pid, err)
+	}
+	// Wait up to 10s for graceful exit.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		if !processAlive(pid) {
+			fmt.Printf("Daemon stopped (was pid %d).\n", pid)
+			return nil
+		}
+	}
+	forceKillProcess(pid) //nolint:errcheck
+	fmt.Printf("Daemon force-killed (pid %d).\n", pid)
+	return nil
+}
+
+// cmdProjects lists all projects currently registered with the singleton daemon.
+func cmdProjects(args []string) error {
+	if !IsSingletonDaemonRunning() {
+		logutil.Info("Daemon not running at %s.\n", DaemonHTTPAddr)
+		return nil
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://" + DaemonHTTPAddr + "/api/admin/projects")
+	if err != nil {
+		return fmt.Errorf("query daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Projects []struct {
+			Path   string `json:"path"`
+			Hash   string `json:"hash"`
+			Socket string `json:"socket"`
+		} `json:"projects"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if len(result.Projects) == 0 {
+		fmt.Println("No projects registered with daemon.")
+		return nil
+	}
+	fmt.Printf("%-6s  %s\n", "HASH", "PATH")
+	for _, p := range result.Projects {
+		hash := p.Hash
+		if len(hash) > 8 {
+			hash = hash[:8]
+		}
+		fmt.Printf("%-6s  %s\n", hash, p.Path)
+	}
+	return nil
+}
+
+// cmdLogs tails the singleton daemon log file (~/.synapses/daemon.log).
+func cmdLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
+	n := fs.Int("n", 50, "Number of lines to show")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find home dir: %w", err)
+	}
+	logPath := filepath.Join(home, ".synapses", "daemon.log")
+	if _, statErr := os.Stat(logPath); os.IsNotExist(statErr) {
+		fmt.Println("No daemon log found. Has the daemon started yet?")
+		return nil
+	}
+	lines := tailFile(logPath, *n)
+	for _, line := range lines {
+		fmt.Println(line)
+	}
+	return nil
+}
+
 // cmdStatus loads the cached graph (without re-parsing) and prints statistics.
+// If the singleton daemon is running, it first queries /api/admin/health to
+// surface live indexing progress before falling back to the SQLite snapshot.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
@@ -514,6 +823,28 @@ func cmdStatus(args []string) error {
 	absPath, err := filepath.Abs(*repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	// If the daemon is running and a reindex is active, show live progress
+	// before the cached stats. We do NOT return early — the caller also sees
+	// the last-known index snapshot so they have full context (e.g. when
+	// re-indexing a previously indexed repo).
+	if IsSingletonDaemonRunning() {
+		client := &http.Client{Timeout: 2 * time.Second}
+		resp, httpErr := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
+		if httpErr == nil {
+			var health struct {
+				IndexingProgress IndexingSnapshot `json:"indexing_progress"`
+			}
+			if jsonErr := json.NewDecoder(resp.Body).Decode(&health); jsonErr == nil {
+				p := health.IndexingProgress
+				if p.State == "indexing" {
+					fmt.Printf("indexing: %d/%d files (%d%%)\n\n", p.Done, p.Total, p.Pct)
+					// Fall through to show last-known cached stats below.
+				}
+			}
+			resp.Body.Close()
+		}
 	}
 
 	dbPath, err := store.DefaultPath(absPath)
@@ -586,8 +917,7 @@ func cmdStatus(args []string) error {
 }
 
 // cmdDoctor runs a quick health check of all Synapses components and prints a
-// formatted status table: graph index freshness, brain reachability, and scout
-// reachability.
+// formatted status table: graph index freshness, daemon status, and brain/doc-cache state.
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
@@ -637,21 +967,23 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
-	// ── Brain ────────────────────────────────────────────────────────────────
-	if cfg.Brain.URL != "" {
-		status, detail := pingHealth(cfg.Brain.URL + "/health")
-		fmt.Printf("%-16s%-16s%s\n", "Brain", status, detail)
+	// ── Daemon ───────────────────────────────────────────────────────────────
+	if IsSingletonDaemonRunning() {
+		sockPath, _ := daemonSocketPath(absPath)
+		fmt.Printf("%-16s%-16s%s\n", "Daemon", "running", fmt.Sprintf("http://%s, socket %s", DaemonHTTPAddr, sockPath))
 	} else {
-		fmt.Printf("%-16s%-16s%s\n", "Brain", "not configured", "(no brain.url in synapses.json)")
+		fmt.Printf("%-16s%-16s%s\n", "Daemon", "stopped", "(will auto-start on next 'synapses start')")
 	}
 
-	// ── Scout ────────────────────────────────────────────────────────────────
-	if cfg.Scout.URL != "" {
-		status, detail := pingHealth(cfg.Scout.URL + "/v1/health")
-		fmt.Printf("%-16s%-16s%s\n", "Scout", status, detail)
+	// ── Brain ────────────────────────────────────────────────────────────────
+	if cfg.Brain.Enabled {
+		fmt.Printf("%-16s%-16s%s\n", "Brain", "enabled", fmt.Sprintf("in-process (ollama: %s)", cfg.Brain.OllamaURL))
 	} else {
-		fmt.Printf("%-16s%-16s%s\n", "Scout", "not configured", "(no scout.url in synapses.json)")
+		fmt.Printf("%-16s%-16s%s\n", "Brain", "disabled", "(set brain.enabled:true in synapses.json to activate)")
 	}
+
+	// ── Doc Cache ────────────────────────────────────────────────────────────
+	fmt.Printf("%-16s%-16s%s\n", "Doc Cache", "built-in", "version-pinned Go package docs via webcache (no sidecar needed)")
 
 	// ── Pulse ────────────────────────────────────────────────────────────────
 	if cfg.Pulse.URL != "" {
@@ -728,16 +1060,17 @@ func formatDuration(d time.Duration) string {
 // is attempted first — only changed files are re-parsed, saving significant time
 // on large codebases. Falls back to a full parse if the smart reindex fails.
 // plugins is forwarded to the Walker so external parser plugins handle their extensions.
-func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig) (*graph.Graph, error) {
+func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string) (*graph.Graph, error) {
 	// Always attempt smart reindex first: a fast filesystem mtime walk that
 	// re-parses only changed files. This keeps line numbers accurate after
 	// offline edits made between sessions (when the watcher was not running).
 	// On repos with no changes the walk is cheap and returns immediately.
-	g, err := smartReindex(repoRoot, st, plugins)
+	g, err := smartReindex(repoRoot, st, plugins, pluginCheck)
 	if err == nil {
 		if saveErr := st.SaveGraph(g); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", saveErr)
+			logutil.Error("synapses: cache save failed: %v\n", saveErr)
 		}
+		emitGraphSnapshot(g, pc, projectID) // P2-7: graph topology snapshot
 		// Warm-boot: try to restore the columnar index from the snapshot blob.
 		// This is best-effort — failure is silent (the index will be rebuilt async).
 		tryLoadSnapshot(g, st)
@@ -750,32 +1083,49 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 		// or on repos that predate file-mtime tracking.
 		cached, cacheErr := st.LoadGraph()
 		if cacheErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: cache load failed (%v), re-indexing\n", cacheErr)
+			logutil.Warn("synapses: cache load failed (%v), re-indexing\n", cacheErr)
 		} else if cached != nil {
 			savedAt, _ := st.SavedAt()
-			fmt.Fprintf(os.Stderr, "synapses: loaded from cache (indexed %s)\n",
+			logutil.Info("synapses: loaded from cache (indexed %s)\n",
 				savedAt.Local().Format("2006-01-02 15:04:05"))
 			// Warm-boot: restore columnar index from snapshot blob.
 			tryLoadSnapshot(cached, st)
 			return cached, nil
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "synapses: smart reindex skipped (%v), doing full reindex\n", err)
+		logutil.Warn("synapses: smart reindex skipped (%v), doing full reindex\n", err)
 	}
 
 	// No cache or smart reindex skipped: full parse from scratch.
-	fmt.Fprintf(os.Stderr, "synapses: indexing %s...\n", repoRoot)
+	// Evaluate SYNAPSES_QUIET once here so both the progress display and
+	// buildGraph use the same value without redundant env lookups.
+	quiet := os.Getenv("SYNAPSES_QUIET") == "1"
+
+	// Register per-project progress state so the health endpoint can report
+	// live indexing state without a global singleton. BeginFunc (called by
+	// WalkDir after Phase 1) will call progress.Start(total) with the real
+	// file count, so no placeholder Start(0) call is needed here.
+	progress := RegisterIndexing(repoRoot)
+	defer UnregisterIndexing(repoRoot)
+
 	start := time.Now()
-	g, err = buildGraph(repoRoot, st, plugins)
+	g, err = buildGraph(repoRoot, st, plugins, quiet, progress, pluginCheck, pc, projectID)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "synapses: indexed %d nodes in %s\n",
-		g.NodeCount(), time.Since(start).Round(time.Millisecond))
+	elapsed := time.Since(start).Round(time.Millisecond)
+	snap := progress.Snapshot()
+	if !quiet {
+		logutil.Info("[synapses] indexing... %d/%d files — %d functions, %d edges (%s)\n",
+			snap.Done, snap.Total, g.NodeCount(), g.EdgeCount(), elapsed)
+		logutil.Info("[synapses] ready.\n")
+	}
+	progress.Done()
 
 	if err := st.SaveGraph(g); err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: cache save failed: %v\n", err)
+		logutil.Error("synapses: cache save failed: %v\n", err)
 	}
+	emitGraphSnapshot(g, pc, projectID) // P2-7: graph topology snapshot
 
 	return g, nil
 }
@@ -791,11 +1141,11 @@ func tryLoadSnapshot(g *graph.Graph, st *store.Store) {
 	}
 	idx, err := graph.LoadSnapshot(blob, graph.NewStringPool())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: snapshot load failed (%v), will rebuild\n", err)
+		logutil.Warn("synapses: snapshot load failed (%v), will rebuild\n", err)
 		return
 	}
 	g.SetIndex(idx)
-	fmt.Fprintf(os.Stderr, "synapses: warm-boot: columnar index restored from snapshot\n")
+	logutil.Info("synapses: warm-boot: columnar index restored from snapshot\n")
 }
 
 // loadOrBuildGraph opens a temporary store, loads or builds the graph, then
@@ -810,7 +1160,114 @@ func loadOrBuildGraph(repoRoot string, forceReindex bool) (*graph.Graph, error) 
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
-	return loadOrBuildGraphWithStore(repoRoot, st, forceReindex, nil)
+	return loadOrBuildGraphWithStore(repoRoot, st, forceReindex, nil, nil, nil, "")
+}
+
+// emitGraphSnapshot computes graph topology metrics and emits a GraphSnapshotEvent
+// as a fire-and-forget goroutine. Nil-safe: no-op if pc is nil. (P2-7/P2-11)
+func emitGraphSnapshot(g *graph.Graph, pc *pulse.Client, projectID string) {
+	if pc == nil || g == nil {
+		return
+	}
+	go func() {
+		nodes := g.AllNodes()
+		edges := g.AllEdges()
+		nodesTotal := len(nodes)
+		edgesTotal := len(edges)
+
+		// Single pass over nodes: build nodeFile map, degree arrays, type dist, orphans.
+		nodeFile := make(map[graph.NodeID]string, nodesTotal)
+		fiVals := make([]int, 0, nodesTotal)
+		foVals := make([]int, 0, nodesTotal)
+		typeDist := make(map[string]int)
+		// Fan-in/out computed after edge pass; populate placeholders now.
+		fanIn := make(map[graph.NodeID]int, nodesTotal)
+		fanOut := make(map[graph.NodeID]int, nodesTotal)
+		for _, n := range nodes {
+			nodeFile[n.ID] = n.File
+			typeDist[string(n.Type)]++
+		}
+
+		// Single pass over edges: count CALLS edges, cross-file edges, degrees, type dist.
+		callsEdges := 0
+		crossFileEdges := 0
+		edgeTypeDist := make(map[string]int) // P9-2: edge type distribution
+		for _, e := range edges {
+			fanOut[e.From]++
+			fanIn[e.To]++
+			edgeTypeDist[string(e.Type)]++ // P9-2
+			if e.Type == graph.EdgeCalls {
+				callsEdges++
+			}
+			if nodeFile[e.From] != nodeFile[e.To] {
+				crossFileEdges++
+			}
+		}
+
+		// Second (and final) pass over nodes: orphans + percentile arrays.
+		// Merged from the original three separate node loops.
+		orphans := 0
+		maxFanIn, maxFanOut := 0, 0
+		for _, n := range nodes {
+			fi := fanIn[n.ID]
+			fo := fanOut[n.ID]
+			fiVals = append(fiVals, fi)
+			foVals = append(foVals, fo)
+			if fi > maxFanIn {
+				maxFanIn = fi
+			}
+			if fo > maxFanOut {
+				maxFanOut = fo
+			}
+			if fi == 0 && fo == 0 {
+				orphans++
+			}
+		}
+
+		// Compute density: edges / (N*(N-1)). Use float64 casts to avoid
+		// implicit integer overflow on very large graphs.
+		var density float64
+		if nodesTotal > 1 {
+			density = float64(edgesTotal) / (float64(nodesTotal) * float64(nodesTotal-1))
+		}
+
+		var crossPct float64
+		if edgesTotal > 0 {
+			crossPct = float64(crossFileEdges) / float64(edgesTotal) * 100
+		}
+
+		sort.Ints(fiVals)
+		sort.Ints(foVals)
+		percentile := func(vals []int, pct int) int {
+			if len(vals) == 0 {
+				return 0
+			}
+			return vals[(len(vals)-1)*pct/100]
+		}
+
+		typeDistJSON, _ := json.Marshal(typeDist)
+		edgeTypeDistJSON, _ := json.Marshal(edgeTypeDist) // P9-2
+
+		ev := pulse.GraphSnapshotEvent{
+			SnapshotType:     "full",
+			NodesTotal:       nodesTotal,
+			EdgesTotal:       edgesTotal,
+			EdgesCalls:       callsEdges,
+			OrphanNodes:      orphans,
+			Density:          density,
+			CrossFileEdgePct: crossPct,
+			MaxFanin:         maxFanIn,
+			MaxFanout:        maxFanOut,
+			FanInP50:         percentile(fiVals, 50),
+			FanInP95:         percentile(fiVals, 95),
+			FanOutP50:        percentile(foVals, 50),
+			FanOutP95:        percentile(foVals, 95),
+			NodeTypeDistJSON: string(typeDistJSON),
+			ProjectID:        projectID,
+			EdgeTypeDist:     string(edgeTypeDistJSON), // P9-2
+		}
+		pc.RecordGraphSnapshot(ev)
+	}()
 }
 
 // analyzeDataFlowIfEnabled tags source/sink nodes and creates DATA_FLOWS summary
@@ -818,7 +1275,7 @@ func loadOrBuildGraph(repoRoot string, forceReindex bool) (*graph.Graph, error) 
 // Always runs — built-in heuristics detect common patterns even without config.
 func analyzeDataFlowIfEnabled(g *graph.Graph, cfg *config.Config) {
 	if n := dataflow.AnnotateGraph(g, cfg); n > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: %d DATA_FLOWS edges created\n", n)
+		logutil.Info("synapses: %d DATA_FLOWS edges created\n", n)
 	}
 }
 
@@ -832,15 +1289,19 @@ func enrichMetricsIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 		days = 90
 	}
 	metrics.EnrichChurn(g, root, days)
+	// R3: blame must run after churn — staleness_score reads metadata["churn"].
+	metrics.EnrichBlame(g, root)
+	// R34: commit context — the "why" layer (last 3 commit subjects per function).
+	metrics.EnrichCommitContext(g, root)
 
 	if cfg.CoverageProfile != "" {
 		metrics.EnrichCoverage(g, root, cfg.CoverageProfile)
-		fmt.Fprintf(os.Stderr, "synapses: coverage profile loaded: %s\n", cfg.CoverageProfile)
+		logutil.Info("synapses: coverage profile loaded: %s\n", cfg.CoverageProfile)
 	}
 
 	if cfg.PprofProfile != "" {
 		metrics.EnrichPprof(g, root, cfg.PprofProfile)
-		fmt.Fprintf(os.Stderr, "synapses: pprof profile loaded: %s\n", cfg.PprofProfile)
+		logutil.Info("synapses: pprof profile loaded: %s\n", cfg.PprofProfile)
 	}
 }
 
@@ -851,13 +1312,13 @@ func applyGoTypesIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	if !cfg.UseGoTypes {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: running go/types resolver (use_go_types=true)...\n")
+	logutil.Info("synapses: running go/types resolver (use_go_types=true)...\n")
 	n, err := resolver.ResolveGoTypesCallEdges(g, root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: go/types resolver failed (falling back to tree-sitter results): %v\n", err)
+		logutil.Warn("synapses: go/types resolver failed (falling back to tree-sitter results): %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: go/types added %d new CALLS edges\n", n)
+	logutil.Info("synapses: go/types added %d new CALLS edges\n", n)
 }
 
 // applyTSTypesIfEnabled runs the TypeScript compiler-API resolver when
@@ -868,49 +1329,283 @@ func applyTSTypesIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	if !cfg.UseTSTypes {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: running TypeScript type resolver (use_ts_types=true)...\n")
+	logutil.Info("synapses: running TypeScript type resolver (use_ts_types=true)...\n")
 	n, err := resolver.ResolveTSTypesCallEdges(g, root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "synapses: TS type resolver failed (falling back to tree-sitter results): %v\n", err)
+		logutil.Warn("synapses: TS type resolver failed (falling back to tree-sitter results): %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "synapses: ts/types added %d new CALLS edges\n", n)
+	logutil.Info("synapses: ts/types added %d new CALLS edges\n", n)
 }
 
 // buildGraph parses the repo at root into a new graph.
 // If st is non-nil the parsed file mtimes are saved for future incremental reindexes.
 // plugins registers any external parser plugins before the walk begins.
-func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*graph.Graph, error) {
+// extDisplayName maps common file extensions to short language names for the
+// progress line, e.g. ".go" → "Go". Unknown extensions fall back to the
+// extension string itself (uppercased, dot stripped).
+func extDisplayName(ext string) string {
+	switch ext {
+	case ".go":
+		return "Go"
+	case ".ts", ".tsx":
+		return "TS"
+	case ".js", ".jsx", ".mjs", ".cjs":
+		return "JS"
+	case ".py":
+		return "Py"
+	case ".rs":
+		return "Rust"
+	case ".java":
+		return "Java"
+	case ".rb":
+		return "Ruby"
+	case ".swift":
+		return "Swift"
+	case ".kt", ".kts":
+		return "Kotlin"
+	case ".cs":
+		return "C#"
+	case ".cpp", ".cc", ".cxx":
+		return "C++"
+	case ".c":
+		return "C"
+	case ".sh", ".bash":
+		return "Shell"
+	case ".php":
+		return "PHP"
+	case ".scala":
+		return "Scala"
+	case ".zig":
+		return "Zig"
+	case ".lua":
+		return "Lua"
+	case ".ml", ".mli":
+		return "OCaml"
+	case ".ex", ".exs":
+		return "Elixir"
+	case ".json":
+		return "JSON"
+	case ".yaml", ".yml":
+		return "YAML"
+	case ".toml":
+		return "TOML"
+	case ".proto":
+		return "Proto"
+	default:
+		name := strings.TrimPrefix(ext, ".")
+		if name == "" {
+			return ext
+		}
+		return strings.ToUpper(name[:1]) + name[1:]
+	}
+}
+
+// buildGraph performs a full parse from scratch.
+// quiet suppresses stderr progress output (SYNAPSES_QUIET=1).
+// progress, if non-nil, receives live done/total updates for the health endpoint.
+// pc, if non-nil, receives parse and index telemetry events (P2-8/P2-9).
+func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string) (*graph.Graph, error) {
 	repoID := filepath.Base(root)
 	g := graph.New(repoID)
 	g.SetRoot(root)
 	w := parser.NewWalker()
+	// Full-index: throttle to half workers + nice +10 so the machine stays
+	// responsive during the first-impression index. Incremental updates
+	// (smartReindex / watcher) don't go through buildGraph so are unaffected.
+	w.Throttle = true
+	// P2-9: wire pulse client so WalkDir emits per-file ParseEvents.
+	w.PulseClient = pc
+	w.ProjectID = projectID
 	for _, p := range plugins {
-		w.RegisterPlugin(p.Extensions, p.Command)
+		w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 	}
+
+	// BeginFunc fires after Phase 1 (filesystem scan) with the real total.
+	// This is the correct moment to initialise progress state — not before,
+	// when total is unknown.
+	if progress != nil {
+		w.BeginFunc = func(total int) {
+			progress.Start(int64(total))
+		}
+	}
+
+	// ProgressFunc fires from worker goroutines after each file, throttled
+	// to 200ms. Writes done count to the progress state and, if not quiet,
+	// emits a structured line to stderr.
+	if progress != nil || !quiet {
+		w.ProgressFunc = func(done, total int, byExt map[string]int) {
+			if progress != nil {
+				progress.SetDone(int64(done))
+			}
+			if quiet {
+				return
+			}
+			// Build compact language breakdown: top 3 extensions by count.
+			type lc struct{ name string; count int }
+			langs := make([]lc, 0, len(byExt))
+			for ext, cnt := range byExt {
+				langs = append(langs, lc{extDisplayName(ext), cnt})
+			}
+			sort.Slice(langs, func(i, j int) bool { return langs[i].count > langs[j].count })
+			var parts []string
+			for i := 0; i < len(langs) && i < 3; i++ {
+				parts = append(parts, fmt.Sprintf("%s: %d", langs[i].name, langs[i].count))
+			}
+			suffix := ""
+			if len(parts) > 0 {
+				suffix = " (" + strings.Join(parts, ", ") + ")"
+			}
+			logutil.Info("[synapses] indexing... %d/%d files%s\n", done, total, suffix)
+		}
+	}
+
+	buildStart := time.Now() // P2-8: index timing
 	mtimes, err := w.WalkDir(g, root)
 	if err != nil {
 		return nil, fmt.Errorf("parse repo: %w", err)
 	}
+
+	// File parsing is complete. Switch the progress label so the frontend
+	// shows "Resolving edges…" instead of a confusing "99%" that never moves.
+	if progress != nil {
+		progress.SetLabel("Resolving edges…")
+	}
+
+	// P2-8: capture call site count before draining (for IndexEvent resolution rate).
+	preResolveCallSites := g.PeekCallSites()
+	totalCallSites := len(preResolveCallSites)
+
+	// P9-3: capture per-language call site counts before ResolveCallEdges drains them.
+	langCallSites := make(map[string]int, 16)
+	for _, cs := range preResolveCallSites {
+		if ext := filepath.Ext(cs.CallerFile); ext != "" {
+			langCallSites[extDisplayName(ext)]++
+		}
+	}
+
 	// Persist call sites BEFORE draining them so they can be reloaded and
 	// re-resolved after MergeFrom for cross-project CALLS edge resolution.
 	if st != nil {
 		if saveErr := st.SaveCallSites(g.PeekCallSites()); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: save call sites: %v\n", saveErr)
+			logutil.Error("synapses: save call sites: %v\n", saveErr)
 		}
 	}
 
+	resolverStart := time.Now()
+	if na := resolver.ResolvePathAliases(g); na > 0 {
+		logutil.Info("synapses: resolved %d tsconfig path aliases\n", na)
+	}
 	n := resolver.ResolveCallEdges(g)
-	fmt.Fprintf(os.Stderr, "synapses: resolved %d CALLS edges\n", n)
-	if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
-		fmt.Fprintf(os.Stderr, "synapses: resolved %d IMPLEMENTS edges\n", ni)
+	logutil.Info("synapses: resolved %d CALLS edges\n", n)
+	nh := resolver.ResolveHeritageEdges(g)
+	if nh > 0 {
+		logutil.Info("synapses: resolved %d heritage IMPLEMENTS edges\n", nh)
+	}
+	ni := resolver.ResolveImplementsEdges(g)
+	if ni > 0 {
+		logutil.Info("synapses: resolved %d structural IMPLEMENTS edges\n", ni)
+	}
+	// Proto/GraphQL cross-file type reference resolution.
+	if npt := parser.ResolveProtoTypeRefs(g); npt > 0 {
+		logutil.Info("synapses: resolved %d proto type reference edges\n", npt)
+	}
+	resolverDurationMs := float64(time.Since(resolverStart).Milliseconds())
+	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).
+	if nd := resolver.ResolveDocEdges(g); nd > 0 {
+		logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
+	}
+	// Full-graph NL entity linking: link pre-existing docs/READMEs to code nodes
+	// so they are immediately visible in the knowledge graph on first index.
+	if nc := resolver.ResolveNLEntities(g, nil); len(nc) > 0 {
+		logutil.Info("synapses: NL entity resolution: %d unresolved candidates\n", len(nc))
+	}
+	if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
+		logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
 	}
 
 	if st != nil && len(mtimes) > 0 {
 		if saveErr := st.SaveFileMtimes(mtimes); saveErr != nil {
-			fmt.Fprintf(os.Stderr, "synapses: save file mtimes: %v\n", saveErr)
+			logutil.Error("synapses: save file mtimes: %v\n", saveErr)
 		}
 	}
+
+	// P2-8: emit IndexEvent (fire-and-forget).
+	if pc != nil {
+		unresolved := totalCallSites - n
+		if unresolved < 0 {
+			unresolved = 0
+		}
+		var resRate float64
+		if totalCallSites > 0 {
+			resRate = float64(n) / float64(totalCallSites)
+		}
+		// Build language distribution JSON from mtimes keys (already unique per file).
+		// Avoids allocating a full AllNodes() slice just for file-extension counting.
+		langDist := make(map[string]int, 16)
+		for f := range mtimes {
+			if ext := filepath.Ext(f); ext != "" {
+				langDist[extDisplayName(ext)]++
+			}
+		}
+		langDistJSON, _ := json.Marshal(langDist)
+
+		// P9-3: per-language call-site resolution rate.
+		// langCallSites was captured before ResolveCallEdges drained the call sites.
+		// The resolver doesn't track per-language resolved counts, so we use the
+		// overall rate as a proxy. The JSON still shows which languages contribute
+		// most call sites, enabling identification of problematic language coverage.
+		resRateByLang := make(map[string]float64, len(langCallSites))
+		for lang, count := range langCallSites {
+			if count > 0 {
+				resRateByLang[lang] = resRate
+			}
+		}
+		resByLangJSON, _ := json.Marshal(resRateByLang)
+
+		ev := pulse.IndexEvent{
+			DurationMs:             time.Since(buildStart).Milliseconds(),
+			FilesIndexed:           len(mtimes),
+			TotalNodes:             g.NodeCount(),
+			TotalEdges:             g.EdgeCount(),
+			CallSitesResolved:      n,
+			CallSitesUnresolved:    unresolved,
+			ResolutionRate:         resRate,
+			LanguageDistJSON:       string(langDistJSON),
+			ProjectID:              projectID,
+			ResolverDurationMs:     resolverDurationMs,
+			HeritageEdgesCreated:   nh,                    // P9-6
+			ImplementsEdgesCreated: ni,                    // P9-6
+			ResolutionByLangJSON:   string(resByLangJSON), // P9-3
+		}
+		// P9-5: compute per-language parser coverage on the background goroutine
+		// to avoid blocking startup with a full AllNodes() copy on large repos.
+		langDistCopy := langDist
+		go func() {
+			type langCoverage struct {
+				Files    int `json:"files"`
+				Entities int `json:"entities"`
+			}
+			coverageByLang := make(map[string]*langCoverage, len(langDistCopy))
+			for lang, count := range langDistCopy {
+				coverageByLang[lang] = &langCoverage{Files: count}
+			}
+			for _, node := range g.AllNodes() {
+				if node.File != "" {
+					lang := extDisplayName(filepath.Ext(node.File))
+					if lang != "" {
+						if c, ok := coverageByLang[lang]; ok {
+							c.Entities++
+						}
+					}
+				}
+			}
+			coverageJSON, _ := json.Marshal(coverageByLang)
+			ev.CoverageJSON = string(coverageJSON)
+			pc.RecordIndexEvent(ev)
+		}()
+	}
+
 	return g, nil
 }
 
@@ -918,7 +1613,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig) (*g
 // and returns the updated graph. Used when --reindex is requested and a valid
 // cache exists, avoiding a full re-parse of unchanged files.
 // plugins registers any external parser plugins before the incremental walk.
-func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfig) (*graph.Graph, error) {
+func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
 	g, err := st.LoadGraph()
 	if err != nil || g == nil {
 		return nil, fmt.Errorf("load cached graph: %w", err)
@@ -934,7 +1629,7 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 
 	w := parser.NewWalker()
 	for _, p := range plugins {
-		w.RegisterPlugin(p.Extensions, p.Command)
+		w.RegisterPlugin(p.Extensions, p.Command, pluginCheck)
 	}
 	fresh, changed, removed, err := w.IncrementalReindex(g, repoRoot, known)
 	if err != nil {
@@ -942,19 +1637,36 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 	}
 
 	unchanged := len(fresh) - changed
-	fmt.Fprintf(os.Stderr, "synapses: smart reindex: %d changed, %d unchanged, %d removed\n",
+	logutil.Info("synapses: smart reindex: %d changed, %d unchanged, %d removed\n",
 		changed, unchanged, removed)
 
 	if changed+removed > 0 {
+		// Reload stored call sites from ALL files so ResolveCallEdges can
+		// recreate CALLS edges pointing INTO the re-parsed changed files.
+		// IncrementalReindex called RemoveFile for each changed file, which
+		// deleted those incoming edges. Only the changed files' new call sites
+		// are pending in g.callSites; call sites from unchanged files were
+		// drained during the previous full build and are not in memory.
+		// This mirrors the fix applied to Watcher.reparseFile.
+		if stored, err := st.LoadCallSites(); err == nil {
+			g.BulkAddCallSites(stored)
+		}
 		n := resolver.ResolveCallEdges(g)
-		fmt.Fprintf(os.Stderr, "synapses: resolved %d CALLS edges\n", n)
+		logutil.Info("synapses: resolved %d CALLS edges\n", n)
 		if ni := resolver.ResolveImplementsEdges(g); ni > 0 {
-			fmt.Fprintf(os.Stderr, "synapses: resolved %d IMPLEMENTS edges\n", ni)
+			logutil.Info("synapses: resolved %d IMPLEMENTS edges\n", ni)
+		}
+		// R31: re-resolve doc edges after incremental reparse.
+		if nd := resolver.ResolveDocEdges(g); nd > 0 {
+			logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
+		}
+		if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
+			logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
 		}
 	}
 
 	if saveErr := st.SaveFileMtimes(fresh); saveErr != nil {
-		fmt.Fprintf(os.Stderr, "synapses: save file mtimes: %v\n", saveErr)
+		logutil.Error("synapses: save file mtimes: %v\n", saveErr)
 	}
 	return g, nil
 }
@@ -987,7 +1699,7 @@ func mergeLinkedProject(g *graph.Graph, linkedPath string) error {
 	}
 
 	g.MergeFrom(linked)
-	fmt.Fprintf(os.Stderr, "synapses: merged linked project %s (%d nodes)\n",
+	logutil.Info("synapses: merged linked project %s (%d nodes)\n",
 		filepath.Base(absLinked), linked.NodeCount())
 	return nil
 }
@@ -1048,13 +1760,219 @@ func cmdReset(args []string) error {
 	return nil
 }
 
+// agentMemoryTables are the tables that hold agent-created data — plans, tasks,
+// episodic memory, session state, annotations, and inter-agent coordination.
+// Clearing these removes all AI-generated memory while leaving the code graph intact.
+var agentMemoryTables = []string{
+	"plans", "tasks", "session_state",
+	"episodes", "episodes_fts",
+	"memories", "memories_fts",
+	"annotations", "quality_gaps",
+	"agent_messages", "work_claims",
+	"agents", "agent_context", "events",
+}
+
+// cmdMemory dispatches "synapses memory <subcommand>".
+// cmdAllowPlugin manages the per-machine plugin allowlist.
+// Usage: synapses allow-plugin <command>
+//
+//	synapses allow-plugin --list
+//	synapses allow-plugin --revoke <command>
+func cmdAllowPlugin(args []string) error {
+	sHome, err := synapsesHome()
+	if err != nil {
+		return fmt.Errorf("cannot determine synapses home: %w", err)
+	}
+	checker := parser.NewPluginChecker(sHome)
+
+	if len(args) == 0 {
+		fmt.Println("Usage: synapses allow-plugin <command>")
+		fmt.Println("       synapses allow-plugin --list")
+		fmt.Println("       synapses allow-plugin --revoke <command>")
+		fmt.Println()
+		fmt.Println("Approves an external parser plugin command for execution on this machine.")
+		fmt.Println("Plugin commands are specified in synapses.json and execute arbitrary binaries.")
+		fmt.Println("This allowlist prevents malicious repositories from running code on clone.")
+		return nil
+	}
+
+	switch args[0] {
+	case "--list":
+		approved := checker.ListApproved()
+		if len(approved) == 0 {
+			fmt.Println("No plugins approved.")
+			return nil
+		}
+		fmt.Printf("%d approved plugin(s):\n", len(approved))
+		for _, cmd := range approved {
+			fmt.Printf("  %s\n", cmd)
+		}
+		return nil
+
+	case "--revoke":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: synapses allow-plugin --revoke <command>")
+		}
+		command := strings.Join(args[1:], " ")
+		if err := checker.RevokeCommand(command); err != nil {
+			return fmt.Errorf("revoke plugin: %w", err)
+		}
+		fmt.Printf("Revoked plugin: %s\n", command)
+		return nil
+
+	default:
+		command := strings.Join(args, " ")
+		if err := checker.ApproveCommand(command); err != nil {
+			return fmt.Errorf("approve plugin: %w", err)
+		}
+		fmt.Printf("Approved plugin: %s\n", command)
+		fmt.Printf("This plugin will now execute when loading projects that reference it.\n")
+		return nil
+	}
+}
+
+func cmdMemory(args []string) error {
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("Usage: synapses memory clear -all [--logs]")
+		fmt.Println("  -all    Clear agent memory for all indexed projects")
+		fmt.Println("  --logs  Also clear activity logs (tool_calls)")
+		return nil
+	}
+	switch args[0] {
+	case "clear":
+		return cmdMemoryClear(args[1:])
+	default:
+		return fmt.Errorf("unknown memory subcommand %q — try 'synapses memory help'", args[0])
+	}
+}
+
+// cmdMemoryClear erases agent-generated memory tables from all project databases
+// while preserving the code graph (nodes, edges, file_hashes).
+func cmdMemoryClear(args []string) error {
+	fs := flag.NewFlagSet("memory clear", flag.ContinueOnError)
+	all := fs.Bool("all", false, "Clear memory across all indexed projects")
+	withLogs := fs.Bool("logs", false, "Also clear activity logs (tool_calls)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*all {
+		return fmt.Errorf("specify -all to clear memory for all indexed projects")
+	}
+
+	tables := make([]string, len(agentMemoryTables))
+	copy(tables, agentMemoryTables)
+	if *withLogs {
+		tables = append(tables, "tool_calls")
+	}
+
+	cacheDir, err := store.CacheDir()
+	if err != nil {
+		return fmt.Errorf("locate cache dir: %w", err)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("No indexed projects found.")
+			return nil
+		}
+		return fmt.Errorf("read cache dir: %w", err)
+	}
+
+	cleared := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".db") {
+			continue
+		}
+		dbPath := filepath.Join(cacheDir, entry.Name())
+		if err := clearTablesInDB(dbPath, tables); err != nil {
+			fmt.Printf("  warning: %s: %v\n", entry.Name(), err)
+		} else {
+			fmt.Printf("  cleared  %s\n", entry.Name())
+			cleared++
+		}
+	}
+	if cleared == 0 {
+		fmt.Println("No project databases found.")
+	} else {
+		fmt.Printf("\nAgent memory cleared across %d project(s).\n", cleared)
+	}
+	return nil
+}
+
+// clearTablesInDB opens a SQLite database and deletes all rows from the given
+// tables, ignoring tables that do not exist (older DBs may lack some tables).
+func clearTablesInDB(dbPath string, tables []string) error {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	for _, table := range tables {
+		// Use IF EXISTS equivalent: ignore errors from missing tables.
+		if _, err := db.Exec("DELETE FROM " + table); err != nil {
+			continue
+		}
+	}
+	return nil
+}
+
 // cmdList scans the synapses cache directory and prints a summary row for every
 // project that has been indexed, without loading any full graph.
-func cmdList() error {
+func cmdList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "Output as JSON array")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
 	stats, err := store.ScanAll()
 	if err != nil {
 		return fmt.Errorf("scan projects: %w", err)
 	}
+
+	if *jsonOut {
+		type jsonProject struct {
+			Path        string `json:"path"`
+			Name        string `json:"name"`
+			Nodes       int    `json:"nodes"`
+			Files       int    `json:"files"`
+			Edges       int    `json:"edges"`
+			Scale       string `json:"scale,omitempty"`
+			LastIndexed string `json:"last_indexed,omitempty"`
+		}
+		nodeScale := func(n int) string {
+			switch {
+			case n < 100:
+				return "micro"
+			case n < 500:
+				return "small"
+			case n < 2000:
+				return "medium"
+			default:
+				return "large"
+			}
+		}
+		out := make([]jsonProject, 0, len(stats))
+		for _, s := range stats {
+			ts := ""
+			if !s.SavedAt.IsZero() {
+				ts = s.SavedAt.UTC().Format(time.RFC3339)
+			}
+			out = append(out, jsonProject{
+				Path:        s.RepoRoot,
+				Name:        s.RepoID,
+				Nodes:       s.NodeCount,
+				Files:       s.FileCount,
+				Edges:       s.EdgeCount,
+				Scale:       nodeScale(s.NodeCount),
+				LastIndexed: ts,
+			})
+		}
+		data, _ := json.Marshal(out)
+		fmt.Println(string(data))
+		return nil
+	}
+
 	if len(stats) == 0 {
 		fmt.Println("No indexed projects found. Run: synapses index -path <dir>")
 		return nil
@@ -1084,182 +2002,122 @@ func cmdList() error {
 	return nil
 }
 
-// cmdInit is the zero-friction onboarding command. It:
-//  1. Indexes the project (uses cache if already fresh)
-//  2. Writes / updates .mcp.json in the project root so Claude Code picks it
-//     up automatically — without touching any existing MCP server entries
-//  3. Prints the exact next step the user needs to take
-func cmdInit(args []string) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Repository root to initialise (default: current directory)")
-	forceReindex := fs.Bool("reindex", false, "Force a full re-index even if cache is fresh")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+// cmdInit is defined in init.go — the unified 4-step interactive wizard.
 
-	absPath, err := filepath.Abs(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
+// synapsesSectionStart / synapsesSectionEnd are the HTML comment sentinels
+// that fence the Synapses-managed guidance block in every agent rules file.
+// Identical markers across all agents allow `synapses connect` to be idempotent.
+const (
+	synapsesSectionStart = "<!-- synapses:start -->\n"
+	synapsesSectionEnd   = "<!-- synapses:end -->"
+)
 
-	projectName := filepath.Base(absPath)
-	fmt.Printf("Synapses — setting up %s\n\n", projectName)
+// synapsesSection is the full guidance block (including sentinels) injected
+// into every agent guidance file: .claude/CLAUDE.md, .cursor/rules/synapses.mdc,
+// .windsurfrules. Content is identical for all agents; only the file path and
+// any agent-specific frontmatter differ.
+var synapsesSection = synapsesSectionStart + `## Synapses — Knowledge Substrate (MCP)
 
-	// ── Step 1: Index ──────────────────────────────────────────────────────────
-	fmt.Printf("Indexing...\n")
-	start := time.Now()
-	g, err := loadOrBuildGraph(absPath, *forceReindex)
-	if err != nil {
-		return err
-	}
-	identity := g.ProjectIdentity()
-	elapsed := time.Since(start).Round(time.Millisecond)
-	fmt.Printf("  ✓ %d files   %d nodes   %d edges   (%s)\n\n",
-		identity.Summary.Files,
-		identity.Summary.Files+identity.Summary.Functions+
-			identity.Summary.Methods+identity.Summary.Structs+identity.Summary.Interfaces,
-		identity.Summary.Edges,
-		elapsed)
+### Session Start
+Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at the start of every session. Returns pending tasks, project identity, scale guidance, working state, and proactive tool suggestions in one round-trip. Declare your intent to get relevant tool suggestions automatically.
 
-	// ── Step 2: Write .mcp.json ────────────────────────────────────────────────
-	mcpFile := filepath.Join(absPath, ".mcp.json")
-	if err := writeMCPConfig(mcpFile, absPath); err != nil {
-		return fmt.Errorf("write .mcp.json: %w", err)
-	}
-	fmt.Printf("Writing .mcp.json...\n")
-	fmt.Printf("  ✓ %s\n\n", mcpFile)
+### Key Tools
 
-	// ── Step 3: Write CLAUDE.md ─────────────────────────────────────────────────
-	fmt.Printf("Writing CLAUDE.md...\n")
-	if err := writeProjectCLAUDE(absPath); err != nil {
-		fmt.Printf("  ! could not update CLAUDE.md: %v\n\n", err)
-	} else {
-		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "CLAUDE.md"))
-	}
+These 12 core tools cover 95% of workflows. All 40+ tools remain available — call ` + "`discover_tools(query=\"...\")`" + ` to find specialized ones.
 
-	// ── Step 4: Write .claude/settings.json ────────────────────────────────────
-	fmt.Printf("Writing .claude/settings.json...\n")
-	if err := writeClaudeSettings(absPath); err != nil {
-		fmt.Printf("  ! could not update .claude/settings.json: %v\n\n", err)
-	} else {
-		fmt.Printf("  ✓ %s\n\n", filepath.Join(absPath, ".claude", "settings.json"))
-	}
+| Goal | Tool |
+|---|---|
+| Start session | ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` |
+| Understand code | ` + "`get_context(entity=\"EntityName\", intent=\"understand\")`" + ` |
+| Prepare to modify | ` + "`get_context(entity=\"EntityName\", intent=\"modify\")`" + ` |
+| Find a symbol | ` + "`search(query=\"name\", mode=\"exact\")`" + ` |
+| Search by concept | ` + "`search(query=\"auth caching\", mode=\"semantic\")`" + ` |
+| Check before implementing | ` + "`validate(phase=\"pre\", changes=[...])`" + ` |
+| Verify after writing | ` + "`validate(phase=\"post\", files_written=[\"...\"])`" + ` |
+| Save knowledge | ` + "`memory(action=\"save\", decision=\"...\", agent_id=\"...\")`" + ` |
+| Retrieve knowledge | ` + "`memory(action=\"search\", query=\"...\")`" + ` |
+| Plan tasks | ` + "`tasks(action=\"create_plan\", title=\"...\", tasks=[...])`" + ` |
+| Update task | ` + "`tasks(action=\"update\", id=\"...\", status=\"done\")`" + ` |
+| End session | ` + "`end_session(agent_id=\"...\")`" + ` — persists session knowledge, optionally reports usage |
 
-	// ── Step 5: Ensure sidecars running ────────────────────────────────────────
-	fmt.Printf("Starting background services...\n")
-	if ensureDirs() == nil {
-		daemonStart(allSidecars, false) //nolint:errcheck
-	}
+### Need more?
 
-	// ── Step 6: Next steps ─────────────────────────────────────────────────────
-	fmt.Printf("Next step — reload MCP servers in Claude Code:\n")
-	fmt.Printf("  Type  /mcp  in the chat, or close and reopen the chat panel.\n\n")
-	fmt.Printf("Or register via CLI (user-scoped, works across all projects):\n")
-	fmt.Printf("  claude mcp add --scope user synapses -- synapses start -path %s\n\n", absPath)
-	fmt.Printf("Your agent will then have access to:\n")
-	fmt.Printf("  get_project_identity   get_context   find_entity\n")
-	fmt.Printf("  validate_plan          get_violations\n")
-	return nil
-}
+` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `).
+Synapses exposes 12 tools — read their descriptions via ` + "`tools/list`" + ` to find what you need.
+
+### Cross-Project Queries
+When multiple projects are registered with the daemon, query knowledge across them:
+- ` + "`memory(action=\"search\", query=\"...\", projects=\"*\")`" + ` — search memories across all projects
+Cross-project results appear in separate response fields (e.g. ` + "`cross_project_episodes`" + `).
+Active sessions on related projects are automatically surfaced in ` + "`session_init`" + ` via the Work Ledger.
+
+### Anti-patterns
+- **Prefer** Synapses tools over Grep/Glob for code exploration — they return callers, callees, and architecture rules that raw file scanning misses
+- **Always** run ` + "`validate(phase=\"pre\")`" + ` before multi-file changes — it catches architecture violations before any code is written
+- **Always** track discovered bugs as tasks via ` + "`tasks(action=\"create_plan\")`" + ` immediately
+
+### Memory Tiers
+
+Synapses memory is organized in three tiers. Use ` + "`memory(action=\"save\")`" + ` to save persistent knowledge about your work:
+
+| Tier | Purpose | Persistence | Scope |
+|------|---------|-----------|-------|
+| **Tier 1 — Live** | In-session work tracking, todo lists, blocked tasks. Use ` + "`TodoWrite`" + ` for current work. | Session-only | This conversation |
+| **Tier 2 — Anchored** | Code insights, discovered bugs, architecture decisions linked to graph nodes. Use ` + "`memory(action=\"save\", anchor_nodes=[...])`" + ` to tie memory to code entities. | Persistent; auto-flagged stale if linked node changes | All sessions |
+| **Tier 3 — Durable** | User preferences, feedback, project context, external references. No code links — survives refactoring. Use ` + "`memory(action=\"save\", decision=\"...\")`" + ` without ` + "`anchor_nodes`" + ` for durable facts. | Persistent | All sessions |
+
+**Memory storage rules:**
+- Write memory to separate ` + "`.md`" + ` files in the project's ` + "`/Users/itachi/.claude/projects/{{project}}/memory/`" + ` directory, not to MEMORY.md.
+- Never write these to MEMORY.md: code patterns, file paths, function signatures, architecture, git blame data. These belong in the living code, not memory.
+- Index all memories in ` + "`MEMORY.md`" + ` with brief descriptions and links to the actual ` + "`.md`" + ` files.
+- When a user asks you to remember something, always save it immediately as the correct tier.
+
+### Workflow
+` + "`session_init`" + ` → explore (` + "`get_context`" + `, ` + "`search`" + `) → ` + "`validate(phase=\"pre\")`" + ` → edit files → ` + "`validate(phase=\"post\")`" + ` → ` + "`end_session`" + `
+` + synapsesSectionEnd
+
+// knowledgeSynapsesSection is the guidance block for knowledge-mode projects
+// (no code graph). Focuses on memory, tasks, and cross-project collaboration.
+var knowledgeSynapsesSection = synapsesSectionStart + `## Synapses — Knowledge Substrate (MCP)
+
+This project runs in **knowledge mode** — no code graph, just memory, tasks, events, and cross-project collaboration.
+
+### Session Start
+Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at the start of every session. Returns pending tasks, project identity, and proactive tool suggestions.
+
+### Key Tools
+
+| Goal | Tool |
+|---|---|
+| Start session | ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` |
+| Save knowledge | ` + "`memory(action=\"save\", decision=\"...\", agent_id=\"...\")`" + ` |
+| Retrieve knowledge | ` + "`memory(action=\"search\", query=\"...\")`" + ` |
+| Plan tasks | ` + "`tasks(action=\"create_plan\", title=\"...\", tasks=[...])`" + ` |
+| Update task | ` + "`tasks(action=\"update\", id=\"...\", status=\"done\")`" + ` |
+| Get pending tasks | ` + "`tasks(action=\"pending\")`" + ` |
+| End session | ` + "`end_session(agent_id=\"...\")`" + ` |
+
+### Cross-Project Queries
+When multiple projects are registered with the daemon, query knowledge across them:
+- ` + "`memory(action=\"search\", query=\"...\", projects=\"*\")`" + ` — search memories across all projects
+Cross-project awareness is handled automatically by the Work Ledger — ` + "`session_init`" + ` shows active sessions on related projects.
+
+### Workflow
+` + "`session_init`" + ` → ` + "`memory(action=\"search\")`" + ` / ` + "`tasks(action=\"pending\")`" + ` → work → ` + "`memory(action=\"save\")`" + ` / ` + "`tasks(action=\"update\")`" + ` → ` + "`end_session`" + `
+` + synapsesSectionEnd
 
 // writeProjectCLAUDE writes (or updates) a Synapses-managed section in
 // .claude/CLAUDE.md (preferred by Claude Code). The section is delimited by
-// HTML comments so it can be safely updated on subsequent index runs without
+// HTML comments so it can be safely updated on subsequent connect runs without
 // clobbering the rest of the file. If a root-level CLAUDE.md exists with a
 // Synapses section it is migrated to .claude/CLAUDE.md and the section is
 // removed from the root file.
 func writeProjectCLAUDE(repoRoot string) error {
-	const (
-		sectionStart = "<!-- synapses:start -->\n"
-		sectionEnd   = "<!-- synapses:end -->"
-	)
-
-	section := sectionStart + `## Synapses — Code Intelligence (MCP)
-
-This project is indexed by **Synapses**, a graph-based code intelligence server.
-
-### Session Start
-Call **one tool** at the start of every session:
-` + "```" + `
-session_init()   ← replaces get_pending_tasks + get_project_identity + get_working_state
-` + "```" + `
-Returns: pending tasks, project identity, working state, recent agent events, and **scale_guidance** — a repo-size-aware recommendation on which tools to prefer.
-
-### Tool Selection — follow scale_guidance from session_init
-
-| Repo scale | When to use Synapses | When to use Read/Grep |
-|---|---|---|
-| micro (<100 nodes) | Structural analysis, multi-file understanding | Simple targeted edits to a known file |
-| small (100–499) | Code exploration, cross-file analysis | Targeted single-file edits |
-| medium (500–1999) | All code exploration — Glob/Grep surfaces too much noise | Writing to a specific file you already identified |
-| large (2000+) | Always — direct scanning is too noisy at this scale | Writing to a specific file you already identified |
-
-### Code Exploration
-
-| When you want to... | Use this |
-|---|---|
-| Not sure which tool to use | ` + "`discover_tools(query=\"what I'm trying to do\")`" + ` |
-| Understand a function, struct, or interface | ` + "`get_context(entity=\"Name\")`" + ` |
-| Pin to a specific file (avoids wrong-entity picks) | ` + "`get_context(entity=\"Name\", file=\"cmd/server/main.go\")`" + ` |
-| Boost nodes linked to current task | ` + "`get_context(entity=\"Name\", task_id=\"...\")`" + ` |
-| Find a symbol by name or substring | ` + "`find_entity(query=\"name\")`" + ` |
-| Search by concept ("auth", "rate limiting") | ` + "`search(query=\"...\", mode=\"semantic\")`" + ` |
-| List all entities in a file | ` + "`get_file_context(file=\"path/to/file\")`" + ` |
-| Trace how function A calls function B | ` + "`get_call_chain(from=\"A\", to=\"B\")`" + ` |
-| Find what breaks if a symbol changes | ` + "`get_impact(symbol=\"Name\")`" + ` |
-
-### Before Writing Code
-
-| When you want to... | Use this |
-|---|---|
-| Check proposed changes against architecture rules | ` + "`validate_plan(changes=[...])`" + ` |
-| View current architecture violations | ` + "`get_violations()`" + ` |
-| Create or update an architectural constraint | ` + "`upsert_rule(rule_id=\"...\", description=\"...\", severity=\"error\")`" + ` |
-| Reserve a scope before editing (multi-agent) | ` + "`claim_work(agent_id=\"...\", scope=\"pkg/auth\")`" + ` |
-| Check for conflicting edits by other agents | ` + "`get_conflicts(agent_id=\"...\")`" + ` |
-| Release locks when done | ` + "`release_claims(agent_id=\"...\")`" + ` |
-
-### Task & Session Management
-
-| When you want to... | Use this |
-|---|---|
-| Save a plan with tasks for future sessions | ` + "`create_plan(title=\"...\", tasks=[...])`" + ` |
-| List all plans and completion counts | ` + "`get_plans()`" + ` |
-| Get your own pending tasks | ` + "`get_my_tasks(agent_id=\"...\")`" + ` |
-| Link a task to relevant code entities | ` + "`link_task_nodes(task_id=\"...\", node_ids=[...])`" + ` |
-| Mark a task as done or add notes | ` + "`update_task(id=\"...\", status=\"done\", notes=\"...\")`" + ` |
-| Save progress so next session can resume | ` + "`save_session_state(task_id=\"...\")`" + ` |
-| Resume from exact saved state | ` + "`get_session_state(task_id=\"...\")`" + ` |
-| Leave a note on a code entity for other agents | ` + "`annotate_node(node_id=\"...\", note=\"...\")`" + ` |
-| See recent file/task/annotation events | ` + "`get_events(since_seq=N)`" + ` (use latest_event_seq from session_init) |
-| See all active agents | ` + "`get_agents()`" + ` |
-
-### Web Intelligence (requires synapses-scout sidecar)
-
-| When you want to... | Use this |
-|---|---|
-| Search for docs, error solutions, API references | ` + "`web_search(query=\"...\")`" + ` |
-| Fetch and read a documentation page | ` + "`web_fetch(input=\"https://...\")`" + ` |
-| Deep multi-query research on a topic | ` + "`web_deep_search(query=\"...\")`" + ` |
-| Persist web findings to a code entity | ` + "`web_annotate(node_id=\"...\", note=\"...\", hits=[...])`" + ` |
-
-### NEVER do these (anti-patterns)
-- **NEVER** use ` + "`Grep`" + ` to understand code structure, find what calls a function, or explore cross-file relationships — use ` + "`get_context`" + ` or ` + "`get_impact`" + ` instead.
-- **NEVER** use ` + "`Glob`" + ` to discover where a symbol is defined — use ` + "`find_entity(query=\"name\")`" + ` instead.
-- **NEVER** use ` + "`Read`" + ` to explore unfamiliar code — use ` + "`get_context(entity=\"Name\")`" + ` instead. Reserve ` + "`Read`" + ` for writing to a specific file you have already identified.
-- **NEVER** use ` + "`Bash`" + ` + ` + "`grep`" + ` as a substitute for ` + "`search(mode=\"semantic\")`" + ` when looking for a concept across the codebase.
-- **NEVER** skip ` + "`validate_plan()`" + ` before a multi-file change — it catches architecture violations before any code is written.
-- **NEVER** leave bugs or discovered issues untracked — always add them as tasks via ` + "`create_plan()`" + ` so future sessions can find them.
-
-### Rules
-- **Read/Grep** are for *writing* code (editing a specific file you have already found). For *understanding* code structure, always prefer Synapses tools.
-- **Call ` + "`session_init()`" + `** at the start of every session. It replaces the 3-call startup ritual.
-- **Workflow:** ` + "`session_init`" + ` → ` + "`prepare_context`" + ` (or specific tools) → write code → ` + "`validate_plan`" + ` → edit files.
-- **When unsure** which tool to use, call ` + "`discover_tools(query=\"...\")`" + ` — it returns the right tool + example in one call.
-- **Call ` + "`validate_plan()`" + `** before implementing multi-file changes.
-- When ` + "`get_context`" + ` returns ` + "`other_candidates`" + `, re-call with ` + "`file=`" + ` to pin to the right entity.
-- **Track all bugs and tasks** via ` + "`create_plan()`" + ` immediately when discovered — do not rely on memory across sessions.
-` + sectionEnd
+	// Choose template based on project mode from config.
+	section := synapsesSection
+	if cfg, err := config.Load(repoRoot); err == nil && cfg.Mode == "knowledge" {
+		section = knowledgeSynapsesSection
+	}
 
 	clauDir := filepath.Join(repoRoot, ".claude")
 	if err := os.MkdirAll(clauDir, 0o755); err != nil {
@@ -1272,17 +2130,17 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 	rootCLAUDE := filepath.Join(repoRoot, "CLAUDE.md")
 	if rootData, err := os.ReadFile(rootCLAUDE); err == nil {
 		rs := string(rootData)
-		si := strings.Index(rs, sectionStart)
+		si := strings.Index(rs, synapsesSectionStart)
 		if si != -1 {
-			ei := strings.Index(rs, sectionEnd)
+			ei := strings.Index(rs, synapsesSectionEnd)
 			if ei != -1 {
-				cleaned := rs[:si] + rs[ei+len(sectionEnd):]
+				cleaned := rs[:si] + rs[ei+len(synapsesSectionEnd):]
 				cleaned = strings.TrimRight(cleaned, "\n") + "\n"
 				_ = os.WriteFile(rootCLAUDE, []byte(cleaned), 0o644)
 			}
 		}
 		// Remove root CLAUDE.md entirely if it is now empty/whitespace-only.
-		if strings.TrimSpace(string(rootData)) == "" || strings.TrimSpace(rs[:strings.Index(rs, sectionStart)]) == "" {
+		if strings.TrimSpace(string(rootData)) == "" || (si != -1 && strings.TrimSpace(rs[:si]) == "") {
 			_ = os.Remove(rootCLAUDE)
 		}
 	}
@@ -1293,12 +2151,12 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 	}
 
 	content := string(existing)
-	startIdx := strings.Index(content, sectionStart)
+	startIdx := strings.Index(content, synapsesSectionStart)
 	if startIdx != -1 {
 		// Replace the existing Synapses section.
-		endIdx := strings.Index(content, sectionEnd)
+		endIdx := strings.Index(content, synapsesSectionEnd)
 		if endIdx != -1 {
-			content = content[:startIdx] + section + content[endIdx+len(sectionEnd):]
+			content = content[:startIdx] + section + content[endIdx+len(synapsesSectionEnd):]
 		} else {
 			content = content[:startIdx] + section
 		}
@@ -1319,8 +2177,8 @@ Returns: pending tasks, project identity, working state, recent agent events, an
 
 // writeClaudeSettings writes (or updates) .claude/settings.json to add hooks
 // that guide LLMs to use Synapses tools:
-//   - SessionStart: stdout IS fed to the LLM as context — primary mechanism
-//   - PreToolUse on Glob|Grep: reminder shown in verbose mode
+//   - SessionStart: cats the context file (auto-injected real data, no tool call needed)
+//   - PostToolUse on Write|Edit: nudges agent to call verify_implementation
 func writeClaudeSettings(repoRoot string) error {
 	dir := filepath.Join(repoRoot, ".claude")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1344,26 +2202,40 @@ func writeClaudeSettings(repoRoot string) error {
 		raw["hooks"] = hooks
 	}
 
-	// ── SessionStart hook (stdout is fed to the LLM as context) ──────────
+	// ── Clean up stale hooks from previous versions ──────────────────────
+	// The Glob|Grep hard block and low-value PostToolUse confirmations were
+	// removed — clean them from already-connected projects on re-connect.
+	removeHookEntry(hooks, "PreToolUse", "Glob|Grep")
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan")  // legacy cleanup
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate")       // cleanup if validate hook was auto-added
+	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan")
+
+	// ── SessionStart: cat the daemon-written context file instead of a static echo.
+	// The context file contains project identity, pending tasks, and tool cheat sheet.
+	// If the daemon is not running the file won't exist and the fallback echo fires.
+	ctxFilePath, ctxErr := contextfile.ContextFilePath(repoRoot)
+	var sessionStartCmd string
+	if ctxErr == nil {
+		sessionStartCmd = fmt.Sprintf(
+			"cat %q 2>/dev/null || echo '[Synapses] Daemon not running — start via the Synapses app or: synapses start'",
+			ctxFilePath,
+		)
+	} else {
+		// Fallback to static reminder if we can't compute the path.
+		sessionStartCmd = "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — " +
+			"it returns pending tasks, project identity, working state, and scale_guidance in one call. " +
+			"WORKFLOW: session_init → get_context → validate(phase=pre) → edit files → validate(phase=post) → end_session.'"
+	}
 	upsertHookEntry(hooks, "SessionStart", "startup", map[string]interface{}{
-		"type": "command",
-		"command": "echo '[Synapses] MANDATORY: Call session_init() as your FIRST action — it returns pending tasks, " +
-			"project identity, working state, and scale_guidance in one call. " +
-			"WORKFLOW: session_init → prepare_context (or specific tools) → validate_plan → edit files. " +
-			"CODE EXPLORATION: use get_context(entity), find_entity(query), search(mode=semantic), get_call_chain, get_impact. " +
-			"NEVER use Grep/Glob/Read to understand code structure — those are for writing to files you already found. " +
-			"UNSURE which tool? Call discover_tools(query=\"what you need\"). " +
-			"TRACK all bugs/tasks via create_plan() immediately when discovered — never rely on memory across sessions.'",
+		"type":    "command",
+		"command": sessionStartCmd,
 	})
 
-	// ── PreToolUse hook on Glob|Grep (feedback loop against tool drift) ──
-	upsertHookEntry(hooks, "PreToolUse", "Glob|Grep", map[string]interface{}{
+	// ── PostToolUse: nudge validate(phase=post) after any file write/edit.
+	upsertHookEntry(hooks, "PostToolUse", "Write|Edit", map[string]interface{}{
 		"type": "command",
-		"command": "echo '[Synapses] STOP — this project is indexed. For code understanding use Synapses instead: " +
-			"find_entity(query) to locate a symbol, get_context(entity) to understand it, " +
-			"search(query, mode=semantic) to find by concept, get_impact(symbol) to find dependents. " +
-			"Grep/Glob are only appropriate when WRITING to a specific file you have already identified. " +
-			"If unsure, call discover_tools(query=\"...\") to find the right tool.'",
+		"command": "echo '[Synapses] Files written. Now call validate(phase=\"post\", files_written=[\"<path>\"]) " +
+			"to check your changes against architecture rules before continuing.'",
 	})
 
 	// ── Pre-allow all Synapses MCP tools so users are never prompted ─────
@@ -1391,6 +2263,23 @@ func writeClaudeSettings(repoRoot string) error {
 		return err
 	}
 	return os.WriteFile(settingsPath, append(out, '\n'), 0o644)
+}
+
+// removeHookEntry removes a hook entry from a given event type list by matcher.
+// Used to clean up stale hooks from previously-connected projects on re-connect.
+func removeHookEntry(hooks map[string]interface{}, eventType, matcher string) {
+	list, _ := hooks[eventType].([]interface{})
+	for i, existing := range list {
+		if m, ok := existing.(map[string]interface{}); ok && m["matcher"] == matcher {
+			list = append(list[:i], list[i+1:]...)
+			break
+		}
+	}
+	if len(list) == 0 {
+		delete(hooks, eventType)
+	} else {
+		hooks[eventType] = list
+	}
 }
 
 // upsertHookEntry adds or replaces a hook entry in a given event type list,
@@ -1455,6 +2344,185 @@ func writeMCPConfig(mcpFile, repoRoot string) error {
 		return err
 	}
 	return os.WriteFile(mcpFile, append(out, '\n'), 0o644)
+}
+
+// ── Agent connect helpers ─────────────────────────────────────────────────────
+
+// mcpURL returns the Synapses MCP endpoint with the project path embedded as
+// a query parameter, which the daemon requires to route requests correctly.
+func mcpURL(projectRoot string) string {
+	return "http://127.0.0.1:11435/mcp?project=" + url.QueryEscape(projectRoot)
+}
+
+// writeHTTPMCPServerEntry merges a synapses HTTP entry into a JSON file that
+// uses the standard { "mcpServers": { … } } shape (Claude .mcp.json, Cursor,
+// Windsurf, Antigravity). Creates the file and its parent directories if missing.
+func writeHTTPMCPServerEntry(file, projectRoot string) error {
+	raw := map[string]interface{}{"mcpServers": map[string]interface{}{}}
+	if data, err := os.ReadFile(file); err == nil {
+		parsed := map[string]interface{}{}
+		if json.Unmarshal(data, &parsed) == nil {
+			raw = parsed
+		}
+	}
+	if _, ok := raw["mcpServers"]; !ok {
+		raw["mcpServers"] = map[string]interface{}{}
+	}
+	servers, _ := raw["mcpServers"].(map[string]interface{})
+	if servers == nil {
+		servers = map[string]interface{}{}
+		raw["mcpServers"] = servers
+	}
+	servers["synapses"] = map[string]interface{}{
+		"type": "http",
+		"url":  mcpURL(projectRoot),
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, append(out, '\n'), 0o644)
+}
+
+// writeZedMCPConfig merges a synapses entry into .zed/settings.json using
+// Zed's context_servers format for HTTP MCP servers.
+func writeZedMCPConfig(repoRoot string) error {
+	file := filepath.Join(repoRoot, ".zed", "settings.json")
+	raw := map[string]interface{}{}
+	if data, err := os.ReadFile(file); err == nil {
+		json.Unmarshal(data, &raw) //nolint:errcheck
+	}
+	cs, _ := raw["context_servers"].(map[string]interface{})
+	if cs == nil {
+		cs = map[string]interface{}{}
+		raw["context_servers"] = cs
+	}
+	cs["synapses"] = map[string]interface{}{
+		"settings": map[string]interface{}{"url": mcpURL(repoRoot)},
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".zed"), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, append(out, '\n'), 0o644)
+}
+
+
+// writeGuidanceFile writes (or updates) the Synapses guidance section in a
+// plain-markdown rules file (e.g. .windsurfrules). frontmatter is prepended
+// only on first creation; subsequent runs update only the synapses section.
+func writeGuidanceFile(repoRoot, file, frontmatter string) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	section := synapsesSection
+	if cfg, err := config.Load(repoRoot); err == nil && cfg.Mode == "knowledge" {
+		section = knowledgeSynapsesSection
+	}
+	existing, _ := os.ReadFile(file)
+	content := string(existing)
+	if si := strings.Index(content, synapsesSectionStart); si != -1 {
+		ei := strings.Index(content, synapsesSectionEnd)
+		if ei != -1 {
+			content = content[:si] + section + content[ei+len(synapsesSectionEnd):]
+		} else {
+			content = content[:si] + section
+		}
+	} else {
+		if frontmatter != "" && len(content) == 0 {
+			content = frontmatter
+		} else if len(content) > 0 && !strings.HasSuffix(content, "\n\n") {
+			if strings.HasSuffix(content, "\n") {
+				content += "\n"
+			} else {
+				content += "\n\n"
+			}
+		}
+		content += section + "\n"
+	}
+	return os.WriteFile(file, []byte(content), 0o644)
+}
+
+// cmdConnect wires an AI coding agent into an indexed project. For each agent
+// it writes the MCP config file and an agent-specific guidance/rules file so
+// the AI uses Synapses tools by default. For Claude Code it also writes
+// .claude/settings.json (hooks + permissions).
+func cmdConnect(args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	agent := fs.String("agent", "", "Agent to connect: claude, cursor, windsurf, zed, antigravity")
+	repoPath := fs.String("path", ".", "Path to the project root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *agent == "" {
+		return fmt.Errorf("--agent is required (claude, cursor, windsurf, zed, antigravity)")
+	}
+	absPath, err := filepath.Abs(*repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+
+	type result struct {
+		path string
+		err  error
+	}
+	var results []result
+	add := func(path string, err error) {
+		results = append(results, result{path, err})
+	}
+
+	switch *agent {
+	case "claude":
+		mcpFile := filepath.Join(absPath, ".mcp.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		claudeMD := filepath.Join(absPath, ".claude", "CLAUDE.md")
+		add(claudeMD, writeProjectCLAUDE(absPath))
+		settingsFile := filepath.Join(absPath, ".claude", "settings.json")
+		add(settingsFile, writeClaudeSettings(absPath))
+
+	case "cursor":
+		mcpFile := filepath.Join(absPath, ".cursor", "mcp.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		rulesFile := filepath.Join(absPath, ".cursor", "rules", "synapses.mdc")
+		frontmatter := "---\ndescription: Synapses code intelligence — always use these MCP tools for code exploration\nalwaysApply: true\n---\n\n"
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, frontmatter))
+
+	case "windsurf":
+		mcpFile := filepath.Join(absPath, ".windsurf", "mcp_config.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		rulesFile := filepath.Join(absPath, ".windsurfrules")
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
+
+	case "zed":
+		settingsFile := filepath.Join(absPath, ".zed", "settings.json")
+		add(settingsFile, writeZedMCPConfig(absPath))
+
+	case "antigravity":
+		// Antigravity (https://antigravity.google) stores workspace MCP config
+		// at .agent/mcp.json and agent rules at .agent/rules/
+		mcpFile := filepath.Join(absPath, ".agent", "mcp.json")
+		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		rulesFile := filepath.Join(absPath, ".agent", "rules", "synapses.md")
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
+
+	default:
+		return fmt.Errorf("unknown agent %q — supported: claude, cursor, windsurf, zed, antigravity", *agent)
+	}
+
+	for _, r := range results {
+		if r.err != nil {
+			logutil.Warn("%s: %v\n", r.path, r.err)
+		} else {
+			fmt.Printf("  wrote %s\n", r.path)
+		}
+	}
+	return nil
 }
 
 func printSummaryTable(
@@ -1529,7 +2597,6 @@ func printSummaryTable(
 
 // cmdQuery loads the cached graph for a project and outputs a single entity's
 // context as JSON — name, type, file, line, callers, callees, and metadata.
-// This is the backend used by the VS Code extension hover provider.
 func cmdQuery(args []string) error {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Repository root")
@@ -1569,8 +2636,8 @@ func cmdQuery(args []string) error {
 	// Resolution order:
 	//   1. Exact name match (e.g. "Store", "cmdQuery")
 	//   2. Suffix match — bare word matches "Type.Method" suffix (e.g. "AddEdge" → "Graph.AddEdge")
-	//      This lets the VS Code hover provider (word-under-cursor) find methods without
-	//      the caller needing the fully-qualified "TypeName.Method" form.
+	//      This lets callers (word-under-cursor) find methods without
+	//      the fully-qualified "TypeName.Method" form.
 	// Within each tier: fn/method beats struct/other.
 	suffix := "." + *entityName
 	pickBetter := func(cur, candidate *graph.Node) *graph.Node {
@@ -1766,206 +2833,44 @@ func printUsage() {
 USAGE:
   synapses <command> [flags]
 
-GETTING STARTED (one command):
-  cd /your/project && synapses init
+GETTING STARTED:
+  synapses init                     Set up everything: index, daemon, agents
+  synapses init --path /project     Target a specific directory
+  synapses init --yes               Non-interactive (CI/scripting)
 
-COMMANDS:
-  init    [-path <dir>]            Index + write .mcp.json (recommended first step)
-  start   -path <dir>              Index repo and start MCP server (stdio)
-  index   -path <dir>              Index repo and save to cache
-  query   -path <dir> -entity <n>  Dump entity context as JSON (for tooling/IDE)
-  status  -path <dir>              Show index statistics for one project
-  list                             List all indexed projects (global overview)
-  brief   -path <dir>              Concise session brief (for startup hooks)
-  doctor  -path <dir>              Health check (index, brain, scout)
-  reset   -path <dir>              Remove the cached index for a project
-  reset   -all                     Remove ALL cached indexes
-  version                          Print version
-  help                             Print this message
+DAEMON:
+  start     -path <dir>   Start daemon and register project (MCP proxy)
+  stop                    Stop the daemon
+  projects                List registered projects
+  logs      [-n N]        Tail daemon log
+  status    -path <dir>   Index stats and daemon health
+  doctor    -path <dir>   Full health check
 
-FLAGS (init / index / start):
-  -path <dir>    Repository root (default: current directory)
-  -reindex       Force full re-index, ignoring cache
-  -no-watch      Disable file watcher (start only)
+INDEX:
+  index     -path <dir>   Index/reindex a project
+  list                    List all indexed projects
+  reset     -path <dir>   Remove cached index
+  reset     -all          Remove ALL cached indexes
 
-FLAGS (reset):
-  -path <dir>    Repository root to reset (default: current directory)
-  -all           Remove all project indexes
+AGENTS:
+  connect   --agent <name> --path <dir>   Write per-agent MCP config
 
-MCP TOOLS EXPOSED:
-  get_project_identity   Compact architectural handshake
-  get_context            N-hop ego-subgraph around an entity
-  find_entity            Locate nodes by name or substring
-  validate_plan          Check changes against architectural rules
-  get_violations         List all current rule violations
+UPDATE:
+  update               Check for updates and install
+  update    --check    Check only, don't download
 
-AGENT SETUP:
-  mcp-setup  -agent <name>   Write MCP config for the specified agent
-  Supported agents: cursor, gemini, zed, windsurf, claude, all
+CLEANUP:
+  uninstall -path <dir>       Remove Synapses from a project (agent configs, index)
+  uninstall --global          Full system removal (daemon, data, binary)
+  uninstall --keep-data       Keep indexes, remove everything else
+  uninstall --keep-binary     Keep the binary, remove everything else
+
+OTHER:
+  query, brief, export, benchmark, memory, version, help
 `, version)
 }
 
-// cmdMCPSetup writes per-agent MCP configuration files so that AI coding
-// agents other than Claude Code can discover and use the Synapses MCP server.
-//
-// Usage:
-//
-//	synapses mcp-setup --agent cursor|gemini|zed|windsurf|claude|all [--path .]
-//
-// All per-project config files are written relative to --path (default ".").
-// Windsurf writes to the global user config (~/.codeium/windsurf/mcp_config.json).
-func cmdMCPSetup(args []string) error {
-	fs := flag.NewFlagSet("mcp-setup", flag.ContinueOnError)
-	agent := fs.String("agent", "all", "Agent to configure: cursor|gemini|zed|windsurf|claude|all")
-	repoPath := fs.String("path", ".", "Project root to write per-project configs into")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	absPath, err := filepath.Abs(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	// The MCP server entry common to all stdio-based agents.
-	type stdioServer struct {
-		Command string   `json:"command"`
-		Args    []string `json:"args"`
-		Type    string   `json:"type"`
-	}
-
-	serverEntry := stdioServer{
-		Command: "synapses",
-		Args:    []string{"start", "--path", "."},
-		Type:    "stdio",
-	}
-
-	// mergeStdioConfig reads an existing JSON file (if any), sets/updates the
-	// "synapses" key inside the top-level "mcpServers" object, and writes back.
-	mergeStdioConfig := func(filePath string) error {
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-			return err
-		}
-		existing := make(map[string]interface{})
-		if data, err := os.ReadFile(filePath); err == nil {
-			_ = json.Unmarshal(data, &existing)
-		}
-		servers, _ := existing["mcpServers"].(map[string]interface{})
-		if servers == nil {
-			servers = make(map[string]interface{})
-		}
-		servers["synapses"] = serverEntry
-		existing["mcpServers"] = servers
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filePath, append(out, '\n'), 0o644)
-	}
-
-	// mergeZedConfig handles Zed's different "context_servers" key shape.
-	mergeZedConfig := func(filePath string) error {
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-			return err
-		}
-		existing := make(map[string]interface{})
-		if data, err := os.ReadFile(filePath); err == nil {
-			_ = json.Unmarshal(data, &existing)
-		}
-		ctxServers, _ := existing["context_servers"].(map[string]interface{})
-		if ctxServers == nil {
-			ctxServers = make(map[string]interface{})
-		}
-		ctxServers["synapses"] = map[string]interface{}{
-			"command": map[string]interface{}{
-				"path": "synapses",
-				"args": []string{"start", "--path", "."},
-			},
-		}
-		existing["context_servers"] = ctxServers
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(filePath, append(out, '\n'), 0o644)
-	}
-
-	type agentSetup struct {
-		name    string
-		setup   func() error
-		cfgPath string // for display only
-	}
-
-	homeDir, _ := os.UserHomeDir()
-
-	agents := []agentSetup{
-		{
-			name:    "cursor",
-			cfgPath: filepath.Join(absPath, ".cursor", "mcp.json"),
-			setup: func() error {
-				return mergeStdioConfig(filepath.Join(absPath, ".cursor", "mcp.json"))
-			},
-		},
-		{
-			name:    "gemini",
-			cfgPath: filepath.Join(absPath, ".gemini", "settings.json"),
-			setup: func() error {
-				return mergeStdioConfig(filepath.Join(absPath, ".gemini", "settings.json"))
-			},
-		},
-		{
-			name:    "zed",
-			cfgPath: filepath.Join(absPath, ".zed", "settings.json"),
-			setup: func() error {
-				return mergeZedConfig(filepath.Join(absPath, ".zed", "settings.json"))
-			},
-		},
-		{
-			name:    "windsurf",
-			cfgPath: filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json"),
-			setup: func() error {
-				return mergeStdioConfig(filepath.Join(homeDir, ".codeium", "windsurf", "mcp_config.json"))
-			},
-		},
-		{
-			name:    "claude",
-			cfgPath: "via `claude mcp add` (Claude Code CLI)",
-			setup: func() error {
-				cmd := exec.Command("claude", "mcp", "add", "synapses", "--", "synapses", "start", "--path", ".")
-				cmd.Dir = absPath
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				if err := cmd.Run(); err != nil {
-					// Not fatal — Claude Code may not be installed.
-					fmt.Fprintf(os.Stderr, "  ! claude CLI not available (%v). Manual setup: claude mcp add synapses -- synapses start --path .\n", err)
-				}
-				return nil
-			},
-		},
-	}
-
-	target := strings.ToLower(*agent)
-	wrote := 0
-	for _, a := range agents {
-		if target != "all" && target != a.name {
-			continue
-		}
-		if err := a.setup(); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %-12s %v\n", a.name, err)
-		} else {
-			fmt.Printf("  \033[32m✓\033[0m %-12s %s\n", a.name, a.cfgPath)
-			wrote++
-		}
-	}
-
-	if wrote == 0 && target != "all" {
-		return fmt.Errorf("unknown agent %q — choose one of: cursor, gemini, zed, windsurf, claude, all", *agent)
-	}
-
-	fmt.Printf("\n  Done. Restart your AI agent to pick up the new MCP server.\n")
-	fmt.Printf("  Note: make sure 'synapses' is on PATH before starting your agent.\n")
-	return nil
-}
+// cmdMCPSetup is replaced by "synapses init" — see init.go.
 
 // buildIngestCode constructs the ingest code string for a node (signature + doc comment).
 func buildIngestCode(n *graph.Node) string {
@@ -1981,17 +2886,118 @@ func buildIngestCode(n *graph.Node) string {
 	return code
 }
 
+// fetchTopNSummaries eagerly fetches summaries for the top N most-connected
+// nodes and writes them back as annotations. Called with a short initial wait
+// so hot entities are enriched before the first agent context request.
+// Runs concurrently with bulkIngestToBrain + fetchAndWriteBackSummaries.
+// ctx should be the daemon's appCtx so goroutines cancel on shutdown.
+func fetchTopNSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, st *store.Store, n int) {
+	if st == nil || n <= 0 {
+		return
+	}
+	all := g.AllNodes()
+	// Collect non-structural nodes and sort by fanin descending.
+	nodes := make([]*graph.Node, 0, len(all))
+	for _, node := range all {
+		t := string(node.Type)
+		if t == "package" || t == "file" {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return g.Fanin(nodes[i].ID) > g.Fanin(nodes[j].ID)
+	})
+	if len(nodes) > n {
+		nodes = nodes[:n]
+	}
+
+	// Poll brain readiness using HealthCheck (unambiguous signal: success means
+	// brain is reachable and serving, regardless of whether summaries exist yet).
+	// Up to 3 attempts with 1s gaps. Exits immediately if ctx is cancelled.
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			return // daemon shutting down
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := bc.HealthCheck(probeCtx)
+		probeCancel()
+		if err == nil {
+			break // brain is reachable
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+	}
+	// If ctx was cancelled during polling, exit before spawning goroutines.
+	if ctx.Err() != nil {
+		return
+	}
+
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	written := 0
+	var mu sync.Mutex
+	for _, node := range nodes {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(nd *graph.Node) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return // daemon shutting down
+			}
+			summary := bc.GetSummary(ctx, string(nd.ID))
+			if summary == "" || strings.Contains(strings.ToLower(summary), "in progress") {
+				return
+			}
+			if _, ok, err := st.AddAnnotationIfNew(string(nd.ID), "brain", summary, 24*time.Hour); err == nil && ok {
+				mu.Lock()
+				written++
+				mu.Unlock()
+			}
+		}(node)
+	}
+	wg.Wait()
+	logutil.Info("synapses: eager brain write-back complete (%d/%d top entities enriched)\n", written, len(nodes))
+}
+
 // bulkIngestToBrain sends all code nodes to the brain sidecar for prose summary generation.
 // With qwen3.5:0.8b as the ingest model (~3s per node on CPU), a 500-node codebase
 // completes in ~3min at 8× concurrency — runs in background, does not block startup.
 // Summaries are stored in brain.sqlite and surfaced in get_context responses.
 // Sort order: high-fanin nodes first so the most-used code gets summaries soonest.
+// mainEmbedResolver adapts embed.Client + store.Store into the resolver.EmbedResolver
+// interface for post-embed discovery passes (doc↔code linking, knowledge relations).
+type mainEmbedResolver struct {
+	ec *embed.Client
+	st *store.Store
+}
+
+func (r *mainEmbedResolver) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	return r.ec.Embed(ctx, text)
+}
+
+func (r *mainEmbedResolver) SearchByVector(queryVec []float32, k int) []resolver.EmbedMatch {
+	results, err := r.st.VectorSearch(queryVec, k)
+	if err != nil || len(results) == 0 {
+		return nil
+	}
+	out := make([]resolver.EmbedMatch, len(results))
+	for i, sr := range results {
+		out[i] = resolver.EmbedMatch{NodeID: sr.ID, Score: sr.Score}
+	}
+	return out
+}
+
 // embedAllNodes generates vector embeddings for every graph node that does not
 // yet have one, storing results in the node_embeddings table. Runs in a
 // background goroutine after startup so the MCP server is never delayed.
 // Rate-limited to ~10 req/s to avoid saturating a local Ollama instance.
 // Fail-silent: any error per-node is logged to stderr and skipped.
-func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *store.Store) {
+func embedAllNodes(ctx context.Context, ec *embed.Client, g *graph.Graph, st *store.Store, onComplete ...func()) {
 	if ec == nil || st == nil {
 		return
 	}
@@ -2001,7 +3007,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
+	logutil.Info("synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
 
 	const batchSize = 16
 	done := 0
@@ -2049,7 +3055,7 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 					continue
 				}
 				if err := st.UpsertEmbedding(nodeID, ec.Model(), vec); err != nil {
-					fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+					logutil.Error("synapses: embed store error for %s: %v\n", nodeID, err)
 				}
 				done++
 			}
@@ -2059,16 +3065,137 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, _ *graph.Graph, st *st
 		// Store all batch results.
 		for j, nodeID := range validIDs {
 			if err := st.UpsertEmbedding(nodeID, ec.Model(), vecs[j]); err != nil {
-				fmt.Fprintf(os.Stderr, "synapses: embed store error for %s: %v\n", nodeID, err)
+				logutil.Error("synapses: embed store error for %s: %v\n", nodeID, err)
 			}
 			done++
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+	logutil.Info("synapses: embedding complete (%d/%d nodes indexed)\n", done, len(nodeIDs))
+
+	// Rebuild HNSW so new vectors are immediately searchable.
+	if done > 0 {
+		st.RebuildNodeHNSW()
+	}
+
+	// Post-embed discovery: create doc↔code, knowledge, and community edges
+	// now that HNSW is populated. These passes are idempotent.
+	if g != nil {
+		er := &mainEmbedResolver{ec: ec, st: st}
+		dcCount := resolver.DiscoverDocCodeRelations(g, er, 0.60)
+		erCount := resolver.DiscoverEmbedRelations(g, er, 0.55)
+		comCount := resolver.DetectCommunities(g, 10)
+		if dcCount+erCount+comCount > 0 {
+			logutil.Info("synapses: post-embed discovery: %d doc-code, %d relations, %d communities\n",
+				dcCount, erCount, comCount)
+			// Persist new discovery edges to SQLite.
+			var newEdges []graph.Edge
+			for _, e := range g.AllEdges() {
+				switch e.Type {
+				case graph.EdgeExplains, graph.EdgeDocumentedBy, graph.EdgeRelatesTo,
+					graph.EdgeCausedBy, graph.EdgeInstanceOf, graph.EdgeContradicts:
+					newEdges = append(newEdges, *e)
+				}
+			}
+			if len(newEdges) > 0 {
+				if err := st.SaveDiscoveryEdges(newEdges); err != nil {
+					logutil.Warn("synapses: persist discovery edges: %v\n", err)
+				} else {
+					logutil.Info("synapses: persisted %d discovery edges\n", len(newEdges))
+				}
+			}
+		}
+	}
+
+	for _, fn := range onComplete {
+		fn()
+	}
 }
 
-func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
+// createMemoryEmbedder creates a memory Embedder based on the config's Embeddings mode.
+// Returns nil if embeddings are disabled.
+func createMemoryEmbedder(cfg *config.Config) embed.Embedder {
+	mode := cfg.Embeddings
+	if mode == "" {
+		mode = detectEmbedMode()
+	}
+	switch mode {
+	case "off":
+		return nil
+	case "ollama":
+		endpoint := cfg.EmbeddingEndpoint
+		if endpoint == "" {
+			endpoint = "http://localhost:11434/api/embeddings"
+		}
+		e := embed.NewOllamaEmbedder(endpoint, cfg.EmbeddingModel)
+		if e == nil {
+			return nil
+		}
+		// Validate the model is actually available before committing to Ollama.
+		// If warmup fails (model not pulled, server flaky), fall back to builtin
+		// ONNX so embeddings still work — just slower.
+		if err := e.WarmUp(context.Background()); err != nil {
+			logutil.Warn("synapses: ollama embedder warmup failed (%v) — falling back to builtin\n", err)
+			return createBuiltinEmbedder(cfg)
+		}
+		logutil.Info("synapses: memory embeddings via ollama (%s)\n", endpoint)
+		return e
+	case "builtin":
+		return createBuiltinEmbedder(cfg)
+	default:
+		logutil.Warn("synapses: unknown embeddings mode %q, disabling\n", mode)
+		return nil
+	}
+}
+
+// createBuiltinEmbedder creates the in-process ONNX embedder. Extracted so
+// the Ollama path can fall back to it when warmup fails.
+func createBuiltinEmbedder(cfg *config.Config) embed.Embedder {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		logutil.Error("synapses: cannot determine home dir for builtin embeddings: %v\n", err)
+		return nil
+	}
+	modelsDir := filepath.Join(homeDir, ".synapses", "models")
+	logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
+	if cfg.EmbedPoolSize > 0 {
+		return embed.NewBuiltinEmbedderWithPoolSize(modelsDir, cfg.EmbedPoolSize)
+	}
+	return embed.NewBuiltinEmbedder(modelsDir)
+}
+
+// detectEmbedMode probes localhost:11434 for a running Ollama instance.
+// If Ollama is reachable (responds within 500ms), returns "ollama" for 20x
+// faster Metal GPU embeddings. Otherwise falls back to "builtin" (in-process
+// ONNX on CPU). This makes Ollama the default when available without requiring
+// explicit config — users can still override via synapses.json "embeddings" field.
+func detectEmbedMode() string {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://localhost:11434/api/version")
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			logutil.Info("synapses: detected Ollama at localhost:11434 — using ollama embeddings\n")
+			return "ollama"
+		}
+	}
+	return "builtin"
+}
+
+// embedAllMemories generates embeddings for all un-embedded memories.
+// Wraps the mcp package helper for use from main. pc may be nil (pulse disabled).
+func embedAllMemories(ctx context.Context, embedder embed.Embedder, st *store.Store, pc *pulse.Client) {
+	mcpsrv.EmbedAllMemories(ctx, embedder, st, pc)
+}
+
+// pathProjectID returns a stable 8-hex-char project identifier derived from the project root path.
+func pathProjectID(absPath string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(absPath))
+	return fmt.Sprintf("%x", h.Sum32())
+}
+
+func bulkIngestToBrain(ctx context.Context, bc *brain.Client, g *graph.Graph, projectID string) {
 	all := g.AllNodes()
 
 	// Collect all non-structural nodes (skip package/file nodes — no code to summarize).
@@ -2088,53 +3215,76 @@ func bulkIngestToBrain(bc *brain.Client, g *graph.Graph) {
 
 	sem := make(chan struct{}, 8) // 8 concurrent — qwen3.5:0.8b is fast enough to handle more
 	var wg sync.WaitGroup
+dispatch:
 	for _, n := range nodes {
+		// Acquire semaphore slot and check cancellation atomically.
+		// A two-step check+block would allow the goroutine to block on sem
+		// after cancellation, holding up shutdown for the duration of LLM calls.
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(node *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			bc.Ingest(context.Background(), brain.IngestRequest{
-				NodeID:   string(node.ID),
-				NodeName: node.Name,
-				NodeType: string(node.Type),
-				Package:  node.Package,
-				Code:     buildIngestCode(node),
+			bc.Ingest(ctx, brain.IngestRequest{
+				ProjectID: projectID,
+				NodeID:    string(node.ID),
+				NodeName:  node.Name,
+				NodeType:  string(node.Type),
+				Package:   node.Package,
+				Code:      buildIngestCode(node),
 			})
 		}(n)
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "synapses: ingested %d nodes to brain (full coverage)\n", len(nodes))
+	logutil.Info("synapses: ingested %d nodes to brain (full coverage)\n", len(nodes))
 }
 
 // fetchAndWriteBackSummaries waits for the brain to process ingested nodes,
 // then fetches each node's summary and writes it back as a graph annotation.
 // This surfaces brain summaries in get_context.annotations, find_entity, etc.
 // Runs after bulkIngestToBrain completes; all errors are silently discarded.
-func fetchAndWriteBackSummaries(bc *brain.Client, g *graph.Graph, st *store.Store) {
+func fetchAndWriteBackSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, st *store.Store) {
 	if st == nil {
 		return
 	}
 	// Give the brain time to process the ingest queue before fetching summaries.
-	time.Sleep(10 * time.Second)
+	// Use ctx-aware sleep so shutdown cancels the wait immediately.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(10 * time.Second):
+	}
 
 	nodes := g.AllNodes()
 	sem := make(chan struct{}, 4) // 4 concurrent fetches (brain's LLM is mostly single-threaded)
 	var wg sync.WaitGroup
 	written := 0
 	var mu sync.Mutex
+dispatch:
 	for _, n := range nodes {
 		if string(n.Type) == "package" || string(n.Type) == "file" {
 			continue
 		}
+		// Acquire semaphore slot and check cancellation atomically so shutdown
+		// cannot be blocked by a slow LLM call holding all semaphore slots.
+		select {
+		case <-ctx.Done():
+			break dispatch
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(node *graph.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			summary := bc.GetSummary(context.Background(), string(node.ID))
+			summary := bc.GetSummary(ctx, string(node.ID))
 			if summary != "" {
-				if _, err := st.AddAnnotation(string(node.ID), "brain", summary); err == nil {
+				// Use AddAnnotationIfNew with a 24-hour window to prevent duplicate
+				// brain annotations when the daemon is restarted within a day.
+				if _, ok, err := st.AddAnnotationIfNew(string(node.ID), "brain", summary, 24*time.Hour); err == nil && ok {
 					mu.Lock()
 					written++
 					mu.Unlock()
@@ -2143,7 +3293,7 @@ func fetchAndWriteBackSummaries(bc *brain.Client, g *graph.Graph, st *store.Stor
 		}(n)
 	}
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "synapses: brain write-back complete (%d summaries stored)\n", written)
+	logutil.Info("synapses: brain write-back complete (%d summaries stored)\n", written)
 }
 
 // cmdExport loads the cached graph and writes it to stdout as DOT, Mermaid, or
@@ -2248,16 +3398,15 @@ func cmdExport(args []string) error {
 	return nil
 }
 
-// cmdSetup configures a project for use with synapses (and optionally the
-// brain sidecar). It:
-//  1. Checks whether `brain` is installed; if not, prints install instructions.
-//  2. Runs `brain setup` to configure Ollama + pull the model.
-//  3. Writes (or updates) synapses.json in the project root with the brain URL.
-//  4. Prints the `claude mcp add` command to wire everything into Claude Code.
-func cmdSetup(args []string) error {
-	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Project root (default: current directory)")
-	skipBrain := fs.Bool("core", false, "Skip brain setup (Tier 1 only)")
+// cmdSetup is replaced by "synapses init" — see init.go.
+
+// cmdBenchmark runs self-validating benchmark scenarios against an indexed repo.
+// Each scenario derives ground truth from the graph's own topology — no hardcoded
+// node IDs, portable across any indexed codebase.
+func cmdBenchmark(args []string) error {
+	fs := flag.NewFlagSet("benchmark", flag.ContinueOnError)
+	repoPath := fs.String("path", ".", "Repository root")
+	scenario := fs.String("scenario", "all", "Scenario to run: all, context-completeness, search-accuracy, impact-coverage, graph-reachability, fts-ranking")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2267,86 +3416,90 @@ func cmdSetup(args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Println("  Synapses setup")
-	fmt.Println("  ──────────────────────────────────────")
-
-	// ── Step 1: brain ────────────────────────────────────────────────────────
-	brainPath, brainFound := "", false
-	if !*skipBrain {
-		if p, err := exec.LookPath("brain"); err == nil {
-			brainPath = p
-			brainFound = true
-			fmt.Printf("  \033[32m✓\033[0m brain found  (%s)\n", brainPath)
-		} else {
-			fmt.Println("  \033[33m!\033[0m brain not found — skipping AI enrichment (Tier 1 only)")
-			fmt.Println()
-			fmt.Println("    To install the brain sidecar later:")
-			fmt.Println("      curl -fsSL https://raw.githubusercontent.com/synapses/synapses/main/install.sh | sh -s -- --full")
-			fmt.Println("    or:  go install github.com/SynapsesOS/synapses-intelligence/cmd/brain@latest")
-			fmt.Println("    Then re-run:  synapses setup --path", absPath)
-		}
-	}
-
-	// ── Step 2: brain setup ──────────────────────────────────────────────────
-	if brainFound {
-		fmt.Println()
-		fmt.Println("  \033[1mRunning brain setup...\033[0m")
-		fmt.Println()
-		cmd := exec.Command(brainPath, "setup")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Println()
-			fmt.Println("  \033[33m!\033[0m brain setup failed (see above).")
-			fmt.Println("    Fix the issue, then run:  brain setup")
-			fmt.Println("    Continuing with Tier 1 config...")
-			brainFound = false
-		}
-	}
-
-	// ── Step 3: write / update synapses.json ─────────────────────────────────
-	cfgFile := filepath.Join(absPath, "synapses.json")
-	existingJSON := map[string]interface{}{}
-
-	if data, err := os.ReadFile(cfgFile); err == nil {
-		// Preserve existing keys; we only add/update the brain block.
-		if jsonErr := json.Unmarshal(data, &existingJSON); jsonErr != nil {
-			return fmt.Errorf("parse existing synapses.json: %w", jsonErr)
-		}
-	}
-
-	if brainFound {
-		existingJSON["brain"] = map[string]interface{}{
-			"url":        "http://localhost:11435",
-			"enable_llm": true,
-		}
-	}
-
-	out, err := json.MarshalIndent(existingJSON, "", "  ")
+	dbPath, err := store.DefaultPath(absPath)
 	if err != nil {
-		return fmt.Errorf("marshal synapses.json: %w", err)
+		return err
 	}
-	if err := os.WriteFile(cfgFile, append(out, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write synapses.json: %w", err)
+	st, err := store.OpenReadOnly(dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
 	}
-	fmt.Printf("  \033[32m✓\033[0m synapses.json written  (%s)\n", cfgFile)
+	defer st.Close()
 
-	// ── Step 4: final instructions ───────────────────────────────────────────
-	fmt.Println()
-	fmt.Println("  ──────────────────────────────────────")
-	fmt.Println("  \033[1mDone. Final steps:\033[0m")
-	fmt.Println()
-	if brainFound {
-		fmt.Println("  1. Start the brain (keep it running):")
-		fmt.Println("       brain serve")
-		fmt.Println()
-		fmt.Println("  2. Wire synapses into Claude Code:")
-		fmt.Printf("       claude mcp add synapses -- synapses start --path %s\n", absPath)
-	} else {
-		fmt.Println("  Wire synapses into Claude Code:")
-		fmt.Printf("    claude mcp add synapses -- synapses start --path %s\n", absPath)
+	g, err := st.LoadGraph()
+	if err != nil {
+		return fmt.Errorf("load graph: %w", err)
 	}
-	fmt.Println()
+	if g == nil {
+		return fmt.Errorf("no index found — run 'synapses index --path %s' first", absPath)
+	}
+
+	fmt.Fprintf(os.Stderr, "synapses benchmark: %d nodes, %d edges\n", g.NodeCount(), g.EdgeCount())
+
+	var result *benchmark.Result
+	if *scenario == "" || *scenario == "all" {
+		result = benchmark.RunAll(g, st)
+	} else {
+		sc, err := benchmark.FindScenario(*scenario)
+		if err != nil {
+			return err
+		}
+		result = benchmark.RunScenarios(g, st, []benchmark.Scenario{sc})
+	}
+
+	b, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	fmt.Println(string(b))
 	return nil
+}
+
+// offerGitInit checks whether absPath has a git repository. If not, it
+// prompts the user to initialize one.  This is called during "synapses index"
+// which is always run by a human at a terminal.
+//
+// Git gives synapses 6 features: churn analysis, blame/ownership tracking,
+// commit context, working state diffs, task commit linking, and federation
+// drift detection.  Without git, synapses still works but with reduced
+// intelligence.
+func offerGitInit(absPath string) {
+	// Already has git?
+	dotGit := filepath.Join(absPath, ".git")
+	if info, err := os.Stat(dotGit); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("  No git repository detected.")
+	fmt.Println()
+	fmt.Println("  Git enables richer intelligence for synapses:")
+	fmt.Println("    - Churn analysis    (which files change most)")
+	fmt.Println("    - Blame tracking    (who owns what code)")
+	fmt.Println("    - Commit context    (why code was changed)")
+	fmt.Println("    - Working state     (what changed since last commit)")
+	fmt.Println("    - Task tracking     (link tasks to commits)")
+	fmt.Println("    - Drift detection   (detect cross-project breakage)")
+	fmt.Println()
+	fmt.Printf("  Initialize git repository? [Y/n] ")
+
+	reader := bufio.NewReader(os.Stdin)
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(strings.ToLower(answer))
+
+	if answer != "" && answer != "y" && answer != "yes" {
+		fmt.Println("  Skipped. You can run 'git init' later to enable these features.")
+		fmt.Println()
+		return
+	}
+
+	ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel30()
+	cmd := exec.CommandContext(ctx30, "git", "init", absPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("  git init failed: %v\n  %s\n", err, strings.TrimSpace(string(out)))
+		return
+	}
+	fmt.Printf("  Initialized git repository at %s\n", absPath)
+	fmt.Println()
 }

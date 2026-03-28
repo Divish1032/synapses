@@ -1,6 +1,7 @@
 package graph_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -52,6 +53,53 @@ func TestEdgeCount(t *testing.T) {
 	g := buildFixture(t)
 	if got := g.EdgeCount(); got != 5 {
 		t.Errorf("EdgeCount() = %d, want 5", got)
+	}
+}
+
+func TestCrossRepoCalls_NoFederation(t *testing.T) {
+	g := buildFixture(t)
+	count, repos := g.CrossRepoCalls("testrepo")
+	if count != 0 {
+		t.Errorf("CrossRepoCalls count = %d, want 0 (no federated edges)", count)
+	}
+	if len(repos) != 0 {
+		t.Errorf("CrossRepoCalls repos = %v, want empty", repos)
+	}
+}
+
+func TestCrossRepoCalls_WithFederation(t *testing.T) {
+	g := graph.New("primary")
+	// primary repo calls into repoA and repoB.
+	g.AddNode(&graph.Node{ID: "primary::a.go::Caller", Type: graph.NodeFunction, Name: "Caller", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "repoA::b.go::Callee", Type: graph.NodeFunction, Name: "Callee", File: "b.go"})
+	g.AddNode(&graph.Node{ID: "repoB::c.go::Other", Type: graph.NodeFunction, Name: "Other", File: "c.go"})
+	g.AddEdge(&graph.Edge{From: "primary::a.go::Caller", To: "repoA::b.go::Callee", Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: "primary::a.go::Caller", To: "repoB::c.go::Other", Type: graph.EdgeCalls})
+
+	count, repos := g.CrossRepoCalls("primary")
+	if count != 2 {
+		t.Errorf("CrossRepoCalls count = %d, want 2", count)
+	}
+	if len(repos) != 2 {
+		t.Errorf("CrossRepoCalls repos = %v, want [repoA repoB]", repos)
+	}
+	// Returned slice must be sorted.
+	if len(repos) == 2 && (repos[0] != "repoA" || repos[1] != "repoB") {
+		t.Errorf("CrossRepoCalls repos = %v, want [repoA repoB] (sorted)", repos)
+	}
+}
+
+func TestCrossRepoCalls_PrimaryExcludedFromLinkedRepos(t *testing.T) {
+	g := graph.New("primary")
+	g.AddNode(&graph.Node{ID: "primary::a.go::Caller", Type: graph.NodeFunction, Name: "Caller", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "sibling::b.go::Callee", Type: graph.NodeFunction, Name: "Callee", File: "b.go"})
+	g.AddEdge(&graph.Edge{From: "primary::a.go::Caller", To: "sibling::b.go::Callee", Type: graph.EdgeCalls})
+
+	_, repos := g.CrossRepoCalls("primary")
+	for _, r := range repos {
+		if r == "primary" {
+			t.Errorf("CrossRepoCalls linkedRepos should not include primaryRepoID %q", r)
+		}
 	}
 }
 
@@ -323,5 +371,247 @@ func TestMigrateStableID_NoMatchGetsNewUUID(t *testing.T) {
 	}
 	if newID == original {
 		t.Error("completely different function should not reuse the original StableID")
+	}
+}
+
+// ── UpdateFileNodeMetadata ────────────────────────────────────────────────────
+
+// TestUpdateFileNodeMetadata_OnlyMatchingFile verifies that the callback is
+// invoked for every node whose File matches and never for nodes in other files.
+func TestUpdateFileNodeMetadata_OnlyMatchingFile(t *testing.T) {
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{ID: "r::a.go::Foo", Type: graph.NodeFunction, Name: "Foo", Package: "p", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "r::a.go::Bar", Type: graph.NodeFunction, Name: "Bar", Package: "p", File: "a.go"})
+	g.AddNode(&graph.Node{ID: "r::b.go::Baz", Type: graph.NodeFunction, Name: "Baz", Package: "p", File: "b.go"})
+
+	g.UpdateFileNodeMetadata("a.go", func(n *graph.Node) {
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["touched"] = "yes"
+	})
+
+	for _, n := range g.NodesForFile("a.go") {
+		if n.Metadata["touched"] != "yes" {
+			t.Errorf("node %s in a.go was not updated", n.Name)
+		}
+	}
+	for _, n := range g.NodesForFile("b.go") {
+		if n.Metadata["touched"] == "yes" {
+			t.Errorf("node %s in b.go was incorrectly updated", n.Name)
+		}
+	}
+}
+
+// TestUpdateFileNodeMetadata_NoMatchIsNoop verifies that calling with a file
+// that has no nodes does not panic and returns cleanly.
+func TestUpdateFileNodeMetadata_NoMatchIsNoop(t *testing.T) {
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{ID: "r::a.go::Foo", Type: graph.NodeFunction, Name: "Foo", Package: "p", File: "a.go"})
+
+	// Should not panic on a file with no nodes.
+	g.UpdateFileNodeMetadata("nonexistent.go", func(n *graph.Node) {
+		t.Error("callback should not be called for a file with no nodes")
+	})
+}
+
+// TestUpdateFileNodeMetadata_NilMetadataInitialisedByCaller verifies that the
+// callback can safely initialise a nil Metadata map — the write lock ensures
+// no other goroutine observes the intermediate nil state.
+func TestUpdateFileNodeMetadata_NilMetadataInitialisedByCaller(t *testing.T) {
+	g := graph.New("repo")
+	g.AddNode(&graph.Node{ID: "r::a.go::Foo", Type: graph.NodeFunction, Name: "Foo", Package: "p", File: "a.go"})
+
+	g.UpdateFileNodeMetadata("a.go", func(n *graph.Node) {
+		if n.Metadata == nil {
+			n.Metadata = make(map[string]string)
+		}
+		n.Metadata["k"] = "v"
+	})
+
+	nodes := g.NodesForFile("a.go")
+	if len(nodes) == 0 || nodes[0].Metadata["k"] != "v" {
+		t.Error("metadata not set after UpdateFileNodeMetadata with nil initial map")
+	}
+}
+
+// TestUpdateFileNodeMetadata_ConcurrentAccess exercises UpdateFileNodeMetadata
+// concurrently with AllNodes (which takes an RLock) to verify the write lock
+// prevents data races. Run with -race to catch violations.
+func TestUpdateFileNodeMetadata_ConcurrentAccess(t *testing.T) {
+	g := graph.New("repo")
+	for i := 0; i < 20; i++ {
+		id := graph.NodeID("r::a.go::F" + string(rune('A'+i)))
+		g.AddNode(&graph.Node{ID: id, Type: graph.NodeFunction, Name: string(rune('A' + i)), Package: "p", File: "a.go"})
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers * 2)
+
+	// Writers: update metadata concurrently.
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			g.UpdateFileNodeMetadata("a.go", func(n *graph.Node) {
+				if n.Metadata == nil {
+					n.Metadata = make(map[string]string)
+				}
+				n.Metadata["writer"] = "1"
+			})
+		}(i)
+	}
+
+	// Readers: read all nodes concurrently.
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_ = g.AllNodes()
+		}()
+	}
+
+	wg.Wait()
+}
+
+// ─── Variable Type Tracking ──────────────────────────────────────────────────
+
+func TestAddVarType_StoresVarType(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "*Database")
+
+	types := g.GetVarTypes("app.go")
+	if types == nil {
+		t.Fatal("expected GetVarTypes to return map, got nil")
+	}
+	if types["db"] != "*Database" {
+		t.Errorf("expected var type *Database, got %q", types["db"])
+	}
+}
+
+func TestGetVarTypes_ReturnsNilForUnknownFile(t *testing.T) {
+	g := graph.New("testrepo")
+	types := g.GetVarTypes("nonexistent.go")
+	if types != nil {
+		t.Errorf("expected nil for unknown file, got %v", types)
+	}
+}
+
+func TestAddVarType_IgnoresEmptyVarName(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "", "*Database")
+
+	types := g.GetVarTypes("app.go")
+	if types != nil && len(types) > 0 {
+		t.Error("expected empty entry for empty var name")
+	}
+}
+
+func TestAddVarType_IgnoresEmptyTypeName(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "")
+
+	types := g.GetVarTypes("app.go")
+	if types != nil && len(types) > 0 {
+		t.Error("expected empty entry for empty type name")
+	}
+}
+
+func TestAddVarType_MultipleVars(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "*Database")
+	g.AddVarType("app.go", "cache", "Cache")
+	g.AddVarType("app.go", "logger", "Logger")
+
+	types := g.GetVarTypes("app.go")
+	if len(types) != 3 {
+		t.Errorf("expected 3 types, got %d", len(types))
+	}
+	if types["db"] != "*Database" {
+		t.Errorf("db type mismatch")
+	}
+	if types["cache"] != "Cache" {
+		t.Errorf("cache type mismatch")
+	}
+	if types["logger"] != "Logger" {
+		t.Errorf("logger type mismatch")
+	}
+}
+
+func TestAddVarType_OverwritesExisting(t *testing.T) {
+	g := graph.New("testrepo")
+	g.AddVarType("app.go", "db", "*Database")
+	g.AddVarType("app.go", "db", "*sql.DB")
+
+	types := g.GetVarTypes("app.go")
+	if types["db"] != "*sql.DB" {
+		t.Errorf("expected overwritten type *sql.DB, got %q", types["db"])
+	}
+}
+
+// ─── SetIndex Coverage ───────────────────────────────────────────────────────
+
+func TestSetIndex_SetsIndexProvider(t *testing.T) {
+	g := graph.New("testrepo")
+	if g.Index() != nil {
+		t.Fatal("expected nil index initially")
+	}
+
+	// Create and set an index
+	index := &graph.GraphIndex{}
+	g.SetIndex(index)
+
+	if g.Index() == nil {
+		t.Error("expected non-nil index after SetIndex")
+	}
+}
+
+// ─── RemoveFile Coverage ────────────────────────────────────────────────────
+
+func TestRemoveFile_RemovesFileAndDependentEdges(t *testing.T) {
+	g := buildFixture(t)
+
+	// Verify file exists
+	authFile := g.MakeNodeID("auth.go", "auth.go")
+	nodes := g.FindByName("auth.go")
+	if len(nodes) == 0 {
+		t.Fatal("auth.go not found before removal")
+	}
+
+	// Remove file
+	g.RemoveFile("auth.go")
+
+	// Verify file is gone
+	nodes = g.FindByName("auth.go")
+	if len(nodes) != 0 {
+		t.Error("auth.go should be removed")
+	}
+
+	// Verify edges are cleaned up
+	outEdges := g.OutEdges(authFile)
+	if len(outEdges) != 0 {
+		t.Errorf("expected 0 outgoing edges after removal, got %d", len(outEdges))
+	}
+}
+
+// ─── MergeFrom Coverage ──────────────────────────────────────────────────────
+
+func TestMergeFrom_MergesGraphs(t *testing.T) {
+	g1 := graph.New("repo1")
+	g2 := graph.New("repo2")
+
+	// Add nodes to g1
+	id1 := g1.MakeNodeID("file1.go", "Func1")
+	g1.AddNode(&graph.Node{ID: id1, Type: graph.NodeFunction, Name: "Func1", File: "file1.go"})
+
+	// Add nodes to g2
+	id2 := g2.MakeNodeID("file2.go", "Func2")
+	g2.AddNode(&graph.Node{ID: id2, Type: graph.NodeFunction, Name: "Func2", File: "file2.go"})
+
+	initialCount := g1.NodeCount()
+	g1.MergeFrom(g2)
+	finalCount := g1.NodeCount()
+
+	if finalCount <= initialCount {
+		t.Errorf("expected node count to increase after merge, got %d → %d", initialCount, finalCount)
 	}
 }

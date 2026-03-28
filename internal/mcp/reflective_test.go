@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,16 +11,35 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// openMCPTestStore opens a temporary SQLite store for mcp-level tests.
+// openMCPTestStore creates a test store by copying pre-initialized template
+// databases from TestMain. Avoids re-running 50+ DDL migrations per test.
 func openMCPTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "test.db")
-	st, err := store.Open(path)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	knowledgePath := store.KnowledgePath(dbPath)
+
+	// Copy template files.
+	copyTestFile(t, templateGraphDB, dbPath)
+	copyTestFile(t, templateKnowledgeDB, knowledgePath)
+
+	st, err := store.Open(dbPath)
 	if err != nil {
-		t.Fatalf("store.Open: %v", err)
+		t.Fatalf("openMCPTestStore: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
 	return st
+}
+
+func copyTestFile(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("copyTestFile %s: %v", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("copyTestFile → %s: %v", dst, err)
+	}
 }
 
 // buildReflectiveGraph returns a graph where hubFunc has fanin=5 (above the
@@ -70,9 +90,10 @@ func TestWriteRetrospectiveAnnotations(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir()) // default config, no rules
 
 	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
 
 	// Create a task linked to both nodes.
-	planID, err := st.CreatePlan("refactor", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("refactor", "", "", []store.TaskInput{
 		{
 			Title:       "Refactor auth handler",
 			Priority:    "p1",
@@ -134,8 +155,9 @@ func TestWriteRetrospectiveAnnotations_NoLinkedNodes(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir())
 
 	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
 
-	planID, err := st.CreatePlan("empty", "", "", []store.TaskInput{
+	planID, _, err := st.CreatePlan("empty", "", "", []store.TaskInput{
 		{Title: "No linked nodes", Priority: "p2"},
 	})
 	if err != nil {
