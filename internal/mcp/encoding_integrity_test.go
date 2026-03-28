@@ -126,17 +126,16 @@ func TestNoMojibakeInGoSources(t *testing.T) {
 	}
 }
 
-// TestFindEntityDescriptionIsValidUTF8 verifies that the find_entity tool
-// description, as it exists on disk, is valid UTF-8 and contains the correct
-// em-dash and middle-dot characters rather than mojibake surrogates.
-func TestFindEntityDescriptionIsValidUTF8(t *testing.T) {
+// TestServerGoIsValidUTF8 verifies that server.go is valid UTF-8 and contains
+// known Unicode characters (em-dash) rather than mojibake surrogates.
+func TestServerGoIsValidUTF8(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
 	root := moduleRoot(cwd)
 
-	// Read server.go where the find_entity description lives.
+	// Read server.go where tool descriptions live.
 	serverPath := filepath.Join(root, "synapses", "internal", "mcp", "server.go")
 	data, err := os.ReadFile(serverPath)
 	if err != nil {
@@ -153,18 +152,11 @@ func TestFindEntityDescriptionIsValidUTF8(t *testing.T) {
 		t.Error("server.go is not valid UTF-8 — check for mixed encodings")
 	}
 
-	// Verify the canonical description text is present.
+	// Verify em-dash characters are present (used in tool descriptions).
 	content := string(data)
-	wantEmdash := "one line per match \u2014" // — (U+2014)
-	wantMiddleDot := "type \u00B7 file:line"  // · (U+00B7)
-
+	wantEmdash := "\u2014" // — (U+2014)
 	if !strings.Contains(content, wantEmdash) {
-		t.Errorf("find_entity description missing em-dash (—); "+
-			"check server.go for mojibake near 'one line per match'")
-	}
-	if !strings.Contains(content, wantMiddleDot) {
-		t.Errorf("find_entity description missing middle-dot (·); "+
-			"check server.go for mojibake near 'file:line'")
+		t.Errorf("server.go missing em-dash (—); check for mojibake")
 	}
 }
 

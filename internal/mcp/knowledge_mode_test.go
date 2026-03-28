@@ -196,14 +196,14 @@ func TestKnowledgeMode_GraphToolStub(t *testing.T) {
 	}
 
 	// Verify that knowledge tools are in the set.
-	for _, name := range []string{"session_init", "remember", "recall", "create_plan", "send_message"} {
+	for _, name := range []string{"session_init", "memory", "tasks", "validate"} {
 		if !knowledgeTools[name] {
 			t.Errorf("expected %q to be in knowledgeTools", name)
 		}
 	}
 
 	// Verify graph tools are NOT in the knowledge set.
-	for _, name := range []string{"get_context", "get_impact", "find_entity", "search", "get_call_chain"} {
+	for _, name := range []string{"get_context", "get_impact", "search", "annotate"} {
 		if knowledgeTools[name] {
 			t.Errorf("%q should NOT be in knowledgeTools", name)
 		}

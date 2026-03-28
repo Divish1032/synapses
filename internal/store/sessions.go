@@ -602,6 +602,10 @@ func (s *Store) PruneOldSessions(age time.Duration) (int64, error) {
 	if _, err := tx.Exec(`DELETE FROM session_tasks WHERE session_id NOT IN (SELECT id FROM sessions)`); err != nil {
 		return 0, fmt.Errorf("prune session_tasks: %w", err)
 	}
+	// Sprint 24: prune old work ledger entries alongside sessions.
+	if _, err := tx.Exec(`DELETE FROM work_ledger WHERE created_at < datetime('now', '-24 hours')`); err != nil {
+		return 0, fmt.Errorf("prune work_ledger: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit prune tx: %w", err)
 	}

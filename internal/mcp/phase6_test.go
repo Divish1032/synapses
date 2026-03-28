@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -108,23 +109,17 @@ func TestDiscoverTools_NoPromotedStatus(t *testing.T) {
 // ── Hidden tools tests (Sprint 8 #1) ─────────────────────────────────────────
 
 func TestHiddenTools_SetContainsExpectedTools(t *testing.T) {
-	expected := []string{
-		"get_working_state", "get_project_identity", "report_usage",
-		"check_plan_safety", "get_edge_types", "plan_context",
-	}
-	for _, name := range expected {
-		if !hiddenTools[name] {
-			t.Errorf("expected %q in hiddenTools set", name)
-		}
+	// Sprint 25: all tools merged, no hidden tools remain.
+	if len(hiddenTools) != 0 {
+		t.Errorf("expected hiddenTools to be empty after Phase 5 consolidation, got %d entries", len(hiddenTools))
 	}
 }
 
 func TestHiddenTools_CoreToolsNotHidden(t *testing.T) {
 	// Core tools must never be hidden.
 	coreNames := []string{
-		"session_init", "prepare_context", "search", "find_entity",
-		"validate_plan", "verify_implementation", "remember", "recall",
-		"create_plan", "update_task", "end_session", "discover_tools",
+		"session_init", "get_context", "search", "validate",
+		"memory", "tasks", "rules", "annotate", "end_session",
 	}
 	for _, name := range coreNames {
 		if hiddenTools[name] {
@@ -134,29 +129,18 @@ func TestHiddenTools_CoreToolsNotHidden(t *testing.T) {
 }
 
 func TestDiscoverTools_HiddenToolStatus(t *testing.T) {
+	// Sprint 25: discover_tools removed and hiddenTools empty after Phase 5 consolidation.
+	// This test now verifies the validate tool (which absorbed check_plan_safety) is registered.
 	s := newTestServer(t)
-	// check_plan_safety is in the tool catalog and hidden — search for it.
-	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
-		"query": "safety check failed before similar risk interjection",
-	}))
-	m := mustResult(t, res, err)
-	matches, ok := m["matches"].([]any)
-	if !ok || len(matches) == 0 {
-		t.Fatal("expected matches for safety query")
+	result, err := s.DispatchTool(context.Background(), "validate", map[string]interface{}{
+		"phase":            "safety",
+		"plan_description": "test plan",
+	})
+	if err != nil {
+		t.Fatalf("validate(phase=safety) dispatch error: %v", err)
 	}
-	found := false
-	for _, raw := range matches {
-		match := raw.(map[string]any)
-		if match["name"] == "check_plan_safety" {
-			found = true
-			status := match["status"].(string)
-			if status != "hidden — not in tools/list, still callable" {
-				t.Errorf("check_plan_safety status = %q, want hidden", status)
-			}
-		}
-	}
-	if !found {
-		t.Error("check_plan_safety not found in discover_tools results — should be discoverable even when hidden")
+	if result == nil {
+		t.Fatal("expected non-nil result")
 	}
 }
 

@@ -70,6 +70,82 @@ func (s *Server) registerResources() {
 		),
 		s.handleViolationsResource,
 	)
+
+	// ── Sprint 24: Tools → Resources migration ──────────────────────────────
+
+	// synapses://repo-map (was get_repo_map tool)
+	s.mcp.AddResource(
+		mcp.NewResource(
+			"synapses://repo-map",
+			"Repository Map",
+			mcp.WithResourceDescription(
+				"Navigable package+entity map grouped by architectural layer "+
+					"(entry points, API surface, core logic, persistence, config). "+
+					"Top 3 entities per package by fanin. Cached until structural change.",
+			),
+			mcp.WithMIMEType("text/plain"),
+		),
+		s.handleRepoMapResource,
+	)
+
+	// synapses://edge-types (was get_edge_types tool)
+	s.mcp.AddResource(
+		mcp.NewResource(
+			"synapses://edge-types",
+			"Edge Type Catalog",
+			mcp.WithResourceDescription(
+				"Semantic catalog of all graph edge types with BFS weights, "+
+					"direction, domain tags, and descriptions. Compact text table format.",
+			),
+			mcp.WithMIMEType("text/plain"),
+		),
+		s.handleEdgeTypesResource,
+	)
+
+	// synapses://analytics (was get_my_analytics tool)
+	s.mcp.AddResource(
+		mcp.NewResource(
+			"synapses://analytics",
+			"Agent Analytics",
+			mcp.WithResourceDescription(
+				"Personal analytics summary: tool call counts, context deliveries, "+
+					"tokens saved, cost savings, and cache hit rate. Defaults to last 7 days.",
+			),
+			mcp.WithMIMEType("text/plain"),
+		),
+		s.handleAnalyticsResource,
+	)
+
+	// synapses://decision-log (was get_decision_log tool)
+	if s.getBrainClient() != nil {
+		s.mcp.AddResource(
+			mcp.NewResource(
+				"synapses://decision-log",
+				"Decision Log",
+				mcp.WithResourceDescription(
+					"Agent decision audit trail: action, agent, SDLC phase, entity, "+
+						"and outcome. Last 20 entries. Requires brain.url configured.",
+				),
+				mcp.WithMIMEType("text/plain"),
+			),
+			s.handleDecisionLogResource,
+		)
+	}
+
+	// synapses://query/{q} (was query_graph tool)
+	s.mcp.AddResourceTemplate(
+		mcp.NewResourceTemplate(
+			"synapses://query/{q}",
+			"Graph Query",
+			mcp.WithTemplateDescription(
+				"Constrained DSL for direct graph node filtering. "+
+					"Syntax: NODES WHERE package=\"auth\" AND fanin > 5. "+
+					"Fields: package, type, domain, file, name, exported, fanin, fanout.",
+			),
+			mcp.WithTemplateMIMEType("text/plain"),
+		),
+		s.handleQueryResource,
+	)
 }
 
 // notifyResourceChanged sends a notifications/resources/updated delta to all
@@ -447,4 +523,78 @@ func (s *Server) InvalidatePacketCacheForFile(changedFile string) {
 		s.notifyResourceChanged("synapses://file/" + relFile)
 		s.warmBrainCache(changedFile)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 24: Tool → Resource handlers
+// ---------------------------------------------------------------------------
+// These resource handlers reuse the existing tool handler logic by calling
+// the handler with a synthetic request and extracting the text from the result.
+
+// toolResultToResource calls a tool handler and wraps its text output as a Resource.
+func toolResultToResource(uri string, handler func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error), args map[string]any) ([]mcp.ResourceContents, error) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		return nil, err
+	}
+	text := ""
+	if result != nil {
+		if result.IsError {
+			return nil, fmt.Errorf("resource handler error: %v", result.Content)
+		}
+		if len(result.Content) > 0 {
+			if tc, ok := result.Content[0].(mcp.TextContent); ok {
+				text = tc.Text
+			}
+		}
+	}
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      uri,
+			MIMEType: "text/plain",
+			Text:     text,
+		},
+	}, nil
+}
+
+func (s *Server) handleRepoMapResource(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return toolResultToResource("synapses://repo-map", s.handleGetRepoMap, map[string]any{"detail": "compact"})
+}
+
+func (s *Server) handleEdgeTypesResource(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return toolResultToResource("synapses://edge-types", s.handleGetEdgeTypes, map[string]any{"format": "compact"})
+}
+
+func (s *Server) handleAnalyticsResource(ctx context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return toolResultToResource("synapses://analytics", s.handleGetMyAnalytics, map[string]any{})
+}
+
+func (s *Server) handleDecisionLogResource(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return toolResultToResource("synapses://decision-log", s.handleGetDecisionLog, map[string]any{})
+}
+
+func (s *Server) handleQueryResource(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	// Extract query from URI: synapses://query/{q}
+	uri := req.Params.URI
+	q := ""
+	if idx := strings.Index(uri, "synapses://query/"); idx >= 0 {
+		q = uri[len("synapses://query/"):]
+	}
+	if q == "" {
+		return []mcp.ResourceContents{
+			mcp.TextResourceContents{
+				URI:      uri,
+				MIMEType: "text/plain",
+				Text:     "Error: query parameter required. Example: synapses://query/NODES WHERE package=\"auth\"",
+			},
+		}, nil
+	}
+	// URL-decode the query
+	decoded, err := url.QueryUnescape(q)
+	if err == nil {
+		q = decoded
+	}
+	return toolResultToResource(uri, s.handleQueryGraph, map[string]any{"query": q})
 }

@@ -231,6 +231,10 @@ type Server struct {
 	// Key: memoryID (string), Value: struct{}.
 	failedEmbedIDs sync.Map
 
+	// ledgerWatermarks tracks per-session deduplication state for cross-session alerts.
+	// Key: Synapses session ID (string), Value: *ledgerWatermark.
+	ledgerWatermarks sync.Map
+
 	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
 	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
 	// the exact same handler functions. In knowledge mode, graph-tool entries hold
@@ -1296,87 +1300,54 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 // and finish. Always available regardless of repo size.
 // Phase 6 (Proactive Context Engine): updated to match the design doc's core set.
 // All other tools are deferred and auto-promoted on first call.
+// Sprint 24 Phase 6: final 12-tool set. All tools are core — no tiers needed.
 var coreTierTools = map[string]bool{
-	"session_init":          true,
-	"prepare_context":       true,
-	"search":                true,
-	"validate_plan":         true,
-	"verify_implementation": true,
-	"remember":              true,
-	"recall":                true,
-	"create_plan":           true,
-	"update_task":           true,
-	"end_session":           true,
-	"discover_tools":        true,
-	"annotate_node":         true,
+	"session_init":    true,
+	"search":          true,
+	"get_context":     true,
+	"get_file_context": true,
+	"get_impact":      true,
+	"validate":        true,
+	"memory":          true,
+	"end_session":     true,
+	"tasks":           true,
+	"rules":           true,
+	"annotate":        true,
+	"lookup_docs":     true,
 }
 
-// standardTierTools are the ~20 tools registered for small and medium repos.
-// Adds coordination, memory, and exploration tools on top of the core set.
+// standardTierTools = coreTierTools (all 12 tools are core after consolidation).
 var standardTierTools = map[string]bool{
-	// Core (same as above, duplicated for O(1) lookup).
-	"session_init":          true,
-	"prepare_context":       true,
-	"search":                true,
-	"validate_plan":         true,
-	"verify_implementation": true,
-	"remember":              true,
-	"recall":                true,
-	"create_plan":           true,
-	"update_task":           true,
-	"end_session":           true,
-	"discover_tools":        true,
-	"annotate_node":         true,
-	"link_entities":         true,
-	"unlink_entities":       true,
-	"confirm_edge":          true,
-	// Standard additions.
-	"get_context":       true,
-	"find_entity":       true,
-	"get_pending_tasks": true,
-	"get_file_context":  true,
-	"get_impact":        true,
-	"get_call_chain":    true,
-	"get_working_state": true,
-	"get_violations":    true,
+	"session_init":    true,
+	"search":          true,
+	"get_context":     true,
+	"get_file_context": true,
+	"get_impact":      true,
+	"validate":        true,
+	"memory":          true,
+	"end_session":     true,
+	"tasks":           true,
+	"rules":           true,
+	"annotate":        true,
+	"lookup_docs":     true,
 }
 
 // knowledgeTools are the tools available when the server runs in knowledge mode
 // (no code graph). All other tools return a clear error message.
+// Sprint 24: removed deleted/absorbed tools.
 var knowledgeTools = map[string]bool{
-	"session_init":       true,
-	"end_session":        true,
-	"remember":           true,
-	"recall":             true,
-	"send_message":       true,
-	"get_messages":       true,
-	"create_plan":        true,
-	"get_pending_tasks":  true,
-	"update_task":        true,
-	"save_session_state": true,
-	"get_session_state":  true,
-	"get_agents":         true,
-	"get_events":         true,
-	"discover_tools":     true,
-	"get_plans":          true,
-	"link_task_nodes":    true,
-	"check_plan_safety":  true,
-	"rank_candidates":    true, // embedding-only, no graph needed
-	"report_usage":        true,
-	"get_my_analytics":    true,
-	"export_knowledge":    true,
+	"session_init": true,
+	"end_session":  true,
+	"memory":       true, // remember + recall + get_episodes
+	"tasks":        true, // create_plan + get_plans + get_pending_tasks + update_task + save/get_session_state + link_task_nodes
+	"validate":     true, // includes check_plan_safety (phase=safety)
 }
 
 // hiddenTools are deprecated or subsumed tools that remain callable but are
-// filtered from tools/list to reduce the default tool surface (Sprint 8 #1).
-// Power users can still discover and call them via discover_tools.
+// filtered from tools/list to reduce the default tool surface.
+// Sprint 24: many tools removed/absorbed — only plan_context remains hidden.
 var hiddenTools = map[string]bool{
-	"get_working_state":    true, // subsumed by session_init
-	"get_project_identity": true, // subsumed by session_init
-	"report_usage":         true, // absorbed by end_session
-	"check_plan_safety":    true, // absorbed by plan_context and validate_plan(check_safety=true)
-	"get_edge_types":       true, // implementation detail
-	"plan_context":         true, // power-user compound tool; Sprint 8 #2
+	// Sprint 25: all tools now merged — no hidden tools remain.
 }
 
 // toolInTier reports whether name should be registered at startup given
@@ -1407,9 +1378,7 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 		stub := func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"Tool %q is not available in knowledge mode (no code graph). "+
-					"Available tools: session_init, remember, recall, create_plan, "+
-					"update_task, get_pending_tasks, send_message, get_messages, "+
-					"get_agents, get_events, discover_tools, end_session.", t.Name)), nil
+					"Available tools: session_init, end_session, memory, tasks, validate.", t.Name)), nil
 		}
 		s.mcp.AddTool(t, stub)
 		s.toolHandlersMu.Lock()
@@ -1424,9 +1393,52 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 	// OF-S5: wrap every handler with the loop guard so that agent loops are
 	// detected and rejected uniformly — no per-handler wiring needed.
 	guarded := s.lg.wrap(rateLimited)
-	s.mcp.AddTool(t, guarded)
+
+	// Sprint 24: Work Ledger wrapper — passively records entity/file signals
+	// from every tool call and injects cross-session overlap alerts.
+	toolName := t.Name
+	ledgerWrapped := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		result, err := guarded(ctx, req)
+		if err != nil || result == nil || s.store == nil {
+			return result, err
+		}
+
+		args := req.GetArguments()
+		entities, files := extractSignals(toolName, args)
+		sessionID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+		if sessionID == "" {
+			return result, nil
+		}
+
+		// Async write — never blocks the response
+		if len(entities) > 0 || len(files) > 0 {
+			entry := store.LedgerEntry{
+				SessionID: sessionID,
+				ProjectID: s.projectID,
+				ToolName:  toolName,
+				EntityIDs: entities,
+				FilePaths: files,
+			}
+			s.goBackground(func() {
+				_ = s.store.AppendLedger(entry)
+			})
+		}
+
+		// Sync overlap check — fast indexed query, <1ms
+		if len(entities) > 0 || len(files) > 0 {
+			alerts := s.checkOverlaps(sessionID, entities, files)
+			alerts = s.filterSeenAlerts(sessionID, alerts)
+			if len(alerts) > 0 {
+				injectAlerts(result, alerts)
+			}
+		}
+
+		return result, nil
+	}
+
+	s.mcp.AddTool(t, ledgerWrapped)
 	s.toolHandlersMu.Lock()
-	s.toolHandlers[t.Name] = guarded
+	s.toolHandlers[t.Name] = ledgerWrapped
 	s.toolHandlersMu.Unlock()
 }
 
@@ -1517,397 +1529,149 @@ func (s *Server) registerTools() {
 		s.handleSessionInit,
 	)
 
-	// report_usage: agent self-reports its LLM token usage after a response (Option B).
-	s.addOrDefer(
-		mcp.NewTool(
-			"report_usage",
-			mcp.WithDescription(
-				"Report your LLM token usage for this response. Call after completing a major task "+
-					"to give Synapses accurate data on model cost and token consumption. "+
-					"All fields are optional but model is strongly recommended. "+
-					"This is the complement to session_init(model=...) — session_init records the model once, "+
-					"report_usage records per-response token counts. "+
-					"Prefer end_session(model=..., input_tokens=..., output_tokens=...) instead — "+
-					"it absorbs report_usage and also persists session knowledge.",
-			),
-			mcp.WithString("model",
-				mcp.Required(),
-				mcp.Description("Model name, e.g. 'claude-sonnet-4-6' or 'gpt-4o'."),
-			),
-			mcp.WithString("provider",
-				mcp.Description("Model provider: 'anthropic', 'openai', 'google', etc."),
-			),
-			mcp.WithNumber("input_tokens",
-				mcp.Description("Input/prompt tokens consumed by this response."),
-			),
-			mcp.WithNumber("output_tokens",
-				mcp.Description("Output/completion tokens generated by this response."),
-			),
-			mcp.WithNumber("cost_usd",
-				mcp.Description("Actual USD cost if known. Leave unset to let Synapses estimate from token counts."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Agent identifier. Defaults to the agent_id from the most recent session_init."),
-			),
-		),
-		s.handleReportUsage,
-	)
-
-	// get_my_analytics: agent-facing analytics summary (Bug 57 — STO-D.4.5).
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_my_analytics",
-			mcp.WithDescription(
-				"Returns a personal analytics summary for this agent and project: "+
-					"tool call counts, context deliveries, tokens saved, cost savings, "+
-					"cache hit rate, and effectiveness insights for top entities. "+
-					"Use this to understand how well Synapses is working for you and "+
-					"which entities are being served accurately vs. needing correction.",
-			),
-			mcp.WithNumber("days",
-				mcp.Description("Window in days (1–90). Defaults to 7."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Agent identifier. Defaults to the agent_id from the most recent session_init."),
-			),
-		),
-		s.handleGetMyAnalytics,
-	)
-
-	// explain_codebase: first-5-minutes orientation narrative (R11)
-	s.addOrDefer(
-		mcp.NewTool(
-			"explain_codebase",
-			mcp.WithDescription(
-				"Returns a ~1000 token natural-language orientation of the codebase: "+
-					"entry points, key types by fanin, architectural patterns detected, "+
-					"package structure, and tech stack. Built entirely from the graph — no LLM required. "+
-					"Cached until a structural change occurs. "+
-					"Use this at the start of a session on an unfamiliar repo instead of 5-10 Grep/Read calls.",
-			),
-		),
-		s.handleExplainCodebase,
-	)
-
-	// get_repo_map: navigable package+entity overview (R12)
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_repo_map",
-			mcp.WithDescription(
-				"Returns a navigable text map of the repository: packages grouped by architectural layer "+
-					"(entry points, api surface, core logic, persistence, config) with their top entities by fanin. "+
-					"detail=\"compact\" (~500 tokens, top 3 entities per package — default). "+
-					"detail=\"full\" (~2000 tokens, top 10 entities per package). "+
-					"Pure graph query — no LLM. Cached until structural change. "+
-					"Use to explore an unfamiliar area of the codebase without burning tokens on Glob/Read.",
-			),
-			mcp.WithString("detail",
-				mcp.Description("Output verbosity: \"compact\" (top 3 entities/package, default) or \"full\" (top 10)."),
-			),
-		),
-		s.handleGetRepoMap,
-	)
-
-	// discover_tools: lightweight tool finder
-	s.addOrDefer(
-		mcp.NewTool(
-			"discover_tools",
-			mcp.WithDescription(
-				"Finds the right Synapses tool for a task. Describe what you need in natural language "+
-					"and get back the top matching tools with usage examples. "+
-					"Use this instead of scanning all tool definitions. ~300 tokens vs ~4200.",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Natural language description of what you need, e.g. 'check what calls this function' or 'save my progress'."),
-			),
-			mcp.WithBoolean("debug",
-				mcp.Description("When true, returns all scored tools (not just top 3) with per-tool score breakdowns showing which keywords, name tokens, and description words matched. Useful for tuning and auditing scoring logic."),
-			),
-		),
-		s.handleDiscoverTools,
-	)
+	// Sprint 24: report_usage absorbed into end_session.
+	// Sprint 24: get_my_analytics moved to MCP Resource synapses://analytics.
+	// Sprint 24: explain_codebase, get_repo_map, get_project_identity absorbed into session_init.
+	// Sprint 24: discover_tools removed — unnecessary with 12 tools.
+	// Sprint 24: get_edge_types moved to MCP Resource synapses://edge-types.
 
 	// ── Code Graph Tools ────────────────────────────────────────────────────
 
-	// get_project_identity
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_project_identity",
-			mcp.WithDescription(
-				"Returns a compact architectural summary of the indexed project: "+
-					"node counts, entry points, highest-connectivity entities, and active rules. "+
-					"Prefer session_init instead — it includes project_identity along with "+
-					"pending tasks, working state, and scale guidance in one call.",
-			),
-		),
-		s.handleGetProjectIdentity,
-	)
-
-	// get_edge_types: semantic catalog of all graph edge types (R36)
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_edge_types",
-			mcp.WithDescription(
-				"Returns the semantic catalog of all graph edge types: name, BFS weight, direction, domain tag (code/docs/infra/api), "+
-					"and human-readable description. "+
-					"Foundation for multi-domain BFS — use this to understand how traversal weights are assigned "+
-					"or to select domain-specific edges for cross-domain queries (Sprint 12). "+
-					"format=\"json\" (default): full structured catalog. format=\"compact\": aligned text table.",
-			),
-			mcp.WithString("format",
-				mcp.Description("Output format: \"json\" (default, full structured catalog) or \"compact\" (text table, ~200 tokens)."),
-			),
-		),
-		s.handleGetEdgeTypes,
-	)
-
-	// get_context
+	// get_context (absorbs prepare_context via mode=intent, get_call_chain via mode=path)
 	s.addOrDefer(
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"Advanced/low-level graph traversal with full parameter control (depth, format, known_hash, detail_level). "+
-					"Most agents should START with prepare_context (intent-based, one round-trip). "+
-					"Use get_context only when you need specific BFS parameters, conditional fetching via known_hash, "+
-					"or fine-grained output control that prepare_context doesn't expose. "+
-					"Returns a relevance-ranked subgraph centred on the named entity. "+
-					"Uses BFS/PPR with edge-type-weighted decay. Response includes a cross_domain object with sub-keys: "+
-					"deploys (infra resources this entity deploys to), consumes (APIs/services called), "+
-					"configured_by (config entities governing this), documented_in (doc nodes covering this), "+
-					"mentions (knowledge nodes referencing this), manual (user-defined links), "+
-					"related (multi-hop cross-domain). Enables traversal from a Go function to its Terraform deployment or API spec in one call.",
+				"Unified context retrieval. mode='context' (default): BFS/PPR ego-subgraph with full param control. "+
+					"mode='intent': intent-based assembly (declare intent + target, one round-trip). "+
+					"mode='path': shortest call chain between two entities (requires from + to params).",
 			),
 			mcp.WithString("entity",
-				mcp.Required(),
-				mcp.Description("The name of the code entity to carve context around (e.g. 'AuthService')."),
-			),
-			mcp.WithNumber("depth",
-				mcp.Description("BFS hop limit. Defaults to the project config value (usually 2)."),
-			),
-			mcp.WithNumber("token_budget",
-				mcp.Description("Maximum approximate tokens in the response. Defaults to 4000."),
-			),
-			mcp.WithString("task_id",
-				mcp.Description("Optional task ID from get_pending_tasks. Nodes linked to this task get a relevance boost."),
+				mcp.Description("Entity name for mode=context (e.g. 'AuthService'). Required for mode=context."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("'explore' (default): ego-subgraph BFS. 'impact': reverse-BFS showing what depends on this entity (same as get_impact)."),
+				mcp.Description("'context' (default): BFS graph traversal. 'intent': intent-based context assembly. 'path': call chain between two entities."),
 			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to pin the lookup to a specific file (e.g. 'cmd/synapses/main.go'). Use when entity names are ambiguous across multiple files."),
+			// mode=context params
+			mcp.WithNumber("depth",
+				mcp.Description("BFS hop limit (mode=context). Defaults to project config value."),
 			),
-			mcp.WithString("format",
-				mcp.Description("Output format: 'compact' (default, natural-language briefing ~400-600 tokens) or 'json' (full JSON blob ~2000-3800 tokens). Use 'json' when you need structured machine-readable data."),
-			),
-			mcp.WithString("detail_level",
-				mcp.Description("Only used with format='compact'. Controls verbosity: 'summary' (~50 tokens, root entity header + warnings only), 'neighbors' (~200 tokens, adds Calls/Called-by name lists), 'full' (default, ~400-600 tokens, adds callee detail blocks and insight)."),
-			),
-			mcp.WithBoolean("helpful",
-				mcp.Description("Optional explicit feedback signal (true=context was useful, false=context missed what you needed). Recorded as an episode to improve future context delivery. Omit if you don't have a clear signal yet."),
-			),
-			mcp.WithBoolean("include_inferred",
-				mcp.Description("R1: When false, strips synthetic framework routing nodes (NodeRoute / ⚡ inferred) from the response, returning only AST-proven static edges. Default: true (inferred route nodes included)."),
-			),
-			mcp.WithString("known_hash",
-				mcp.Description("Optional. Pass the entity_hash value from a previous get_context response for the same entity. "+
-					"If the ego-graph is structurally unchanged, returns {\"unchanged\": true, \"entity_hash\": \"...\", \"entity\": \"...\"} "+
-					"instead of the full payload — saving tokens on repeated calls in tight reasoning loops. "+
-					"Ignored when mode='impact'."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Your agent ID (same value passed to session_init). "+
-					"When provided, this call is recorded as a watched symbol — if another agent "+
-					"subsequently edits that file, a dependency_alert will surface in your next session_init. "+
-					"Omit in read-only or exploratory sessions where you don't want peer tracking."),
-			),
-			mcp.WithString("intent",
-				mcp.Description("Optional. Shapes the traversal direction and edge weights: "+
-					"'modify' (prefer callees — what this breaks), 'debug' (prefer callers — what triggers this), "+
-					"'review' (balanced — full contract surface), 'add', 'plan', 'understand'. "+
-					"When omitted, defaults to a balanced callee-slight preference. "+
-					"For intent-driven one-call workflows, prefer prepare_context which sets this automatically."),
-			),
-			mcp.WithString("projects",
-				mcp.Description("Optional. Comma-separated federation aliases to include sibling project results "+
-					"(e.g. 'core,app'). When provided, also returns matching entities from sibling stores."),
-			),
-			mcp.WithNumber("cross_domain_decay",
-				mcp.Description("Optional. Multiplier applied to relevance when BFS/PPR crosses a domain boundary "+
-					"(e.g. code→infra, code→api). Range (0, 1]. Default 0.5 — cross-domain neighbors score at "+
-					"half the relevance of same-domain neighbors at equal structural distance. Use 1.0 to disable "+
-					"the penalty. Cross-domain nodes appear in the structured cross_domain response object (grouped by edge type) regardless of this value."),
-			),
-		),
-		s.handleGetContext,
-	)
-
-	// find_entity
-	s.addOrDefer(
-		mcp.NewTool(
-			"find_entity",
-			mcp.WithDescription(
-				"Locates nodes in the graph by name or substring. "+
-					"Returns matching node references (ID, type, file, line) without full context. "+
-					"Use this to discover the exact entity name before calling get_context.",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description("Name or substring to search for (case-insensitive)."),
-			),
-			mcp.WithString("format",
-				mcp.Description("Output format. \"compact\" (default): one line per match — \"[Name] type · file:line\". "+
-					"\"json\": full structured response with IDs and metadata."),
-			),
-		),
-		s.handleFindEntity,
-	)
-
-	// validate_plan
-	s.addOrDefer(
-		mcp.NewTool(
-			"validate_plan",
-			mcp.WithDescription(
-				"Checks a list of proposed code changes against the project's architectural rules. "+
-					"Returns any violations before a single line of code is written. "+
-					"Call this before implementing a plan that touches multiple files. "+
-					"Pass check_safety=true to also run a failure-episode safety check inline. "+
-					`Example: validate_plan(changes=[{"file": "internal/auth/service.go", "adds_call_to": "ValidateToken"}]).`,
-			),
-			mcp.WithString("changes",
-				mcp.Required(),
-				mcp.Description(
-					"JSON array of proposed changes. "+
-						`Minimum: [{"file": "internal/auth/service.go"}]. `+
-						`Full form: [{"file": "path/to/file.go", "adds_call_to": "SomeFunction", "removes_call_to": "OtherFunction"}]. `+
-						"With file only: freshness warning (if modified <10s ago), logic anomaly checks, and cross-project drift checks all run — "+
-						"but architectural graph-rule checks are skipped (they require adds_call_to to build the proposed edge). "+
-						"Note: removes_call_to is accepted but not yet enforced against rules; use it for documentation purposes.",
-				),
-			),
-			mcp.WithBoolean("check_safety",
-				mcp.Description("When true, also runs a failure-episode safety check inline and adds safety_check to the response."),
-			),
-			mcp.WithString("plan_description",
-				mcp.Description("Natural language description of the plan (used for safety check). Auto-derived from changed files if omitted."),
-			),
-			mcp.WithBoolean("skip_logic_checks",
-				mcp.Description("When true, skips heuristic logic-level anomaly checks (zero-value identifiers, missing cleanup, tilde paths, nil method calls, concurrent map writes). Default false."),
-			),
-		),
-		s.handleValidatePlan,
-	)
-
-	// verify_implementation — post-write complement to validate_plan
-	s.addOrDefer(
-		mcp.NewTool(
-			"verify_implementation",
-			mcp.WithDescription(
-				"Post-write verification: checks the actual graph state of files you just wrote "+
-					"against architectural rules. Returns violations, entity counts, and freshness warnings. "+
-					"Optionally pass task_id to verify linked entities still exist in the graph. "+
-					"Call this AFTER writing code to close the plan→implement→verify loop.",
-			),
-			mcp.WithString("files_written",
-				mcp.Required(),
-				mcp.Description(
-					`JSON array of file paths that were written, e.g. ["internal/auth/service.go", "internal/auth/handler.go"].`,
-				),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max tokens in response. Defaults to 4000 (context) or intent-specific."),
 			),
 			mcp.WithString("task_id",
-				mcp.Description("Optional task ID. If provided, verifies that the task's linked_nodes still exist in the graph after implementation."),
-			),
-		),
-		s.handleVerifyImplementation,
-	)
-
-	// get_violations (absorbs get_violation_log via rule_id + limit params)
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_violations",
-			mcp.WithDescription(
-				"Lists all current architectural rule violations found in the graph. "+
-					"Returns rule ID, severity, affected nodes, and a human-readable description. "+
-					"Pass rule_id to filter to a specific rule. Pass include_log=true to also return the historical audit log.",
-			),
-			mcp.WithString("rule_id",
-				mcp.Description("Optional. Filter violations to a specific rule ID."),
-			),
-			mcp.WithBoolean("include_log",
-				mcp.Description("When true, also returns the historical violation log entries. Default false."),
-			),
-			mcp.WithNumber("log_limit",
-				mcp.Description("Max historical log entries to return when include_log=true. Default 50."),
-			),
-		),
-		s.handleGetViolations,
-	)
-
-	// upsert_gap — R32: record a quality gap on a code entity
-	s.addOrDefer(
-		mcp.NewTool(
-			"upsert_gap",
-			mcp.WithDescription(
-				"Record or update a quality gap on a specific code entity. "+
-					"Quality gaps are agent-discovered findings that require reasoning to find — "+
-					"edge cases, incomplete coverage, known limitations — unlike architecture violations "+
-					"which are deterministic rule checks. Gaps persist across sessions and surface in "+
-					"get_violations() and get_context() so future agents never re-discover the same issue. "+
-					"Use status=\"fixed\" with fix_notes to close a gap after it is resolved.",
-			),
-			mcp.WithString("node_id",
-				mcp.Required(),
-				mcp.Description("The node ID of the code entity this gap applies to. Use find_entity() to resolve the ID."),
-			),
-			mcp.WithString("gap_id",
-				mcp.Required(),
-				mcp.Description("A short stable slug for this gap, e.g. \"dist-relative-path\". Used as the dedup key."),
-			),
-			mcp.WithString("description",
-				mcp.Required(),
-				mcp.Description("Human-readable description of the gap, including what is missing and why it matters."),
-			),
-			mcp.WithString("severity",
-				mcp.Description("low | medium | high | critical. Default: medium."),
-			),
-			mcp.WithString("status",
-				mcp.Description("open | fixed | wontfix. Default: open. Use \"fixed\" once the gap is resolved."),
-			),
-			mcp.WithString("fix_notes",
-				mcp.Description("Optional. Explanation of how the gap was fixed. Only relevant when status=\"fixed\"."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier for attribution."),
-			),
-		),
-		s.handleUpsertGap,
-	)
-
-	// get_gaps — R32: query quality gaps
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_gaps",
-			mcp.WithDescription(
-				"Query quality gaps on code entities. Default returns open gaps only. "+
-					"Use as a tech debt inventory (no filters), a pre-merge quality gate (file= filter), "+
-					"or to check a specific entity's known issues (node_id= filter). "+
-					"Open gaps also appear in get_violations() and at the top of get_context() responses.",
-			),
-			mcp.WithString("node_id",
-				mcp.Description("Optional. Filter to gaps on a specific node ID."),
+				mcp.Description("Optional task ID for relevance boosting."),
 			),
 			mcp.WithString("file",
-				mcp.Description("Optional. Filter to gaps on nodes belonging to this file path."),
+				mcp.Description("Optional file path suffix to disambiguate entity names."),
 			),
-			mcp.WithString("severity",
-				mcp.Description("Optional. Filter by severity: low | medium | high | critical."),
+			mcp.WithString("format",
+				mcp.Description("Output format: 'compact' (default) or 'json'. Mode=context only."),
 			),
-			mcp.WithString("status",
-				mcp.Description("Optional. Filter by status: open | fixed | wontfix | all. Default: open."),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity for format=compact: 'summary', 'neighbors', 'full' (default). Mode=context only."),
+			),
+			mcp.WithBoolean("helpful",
+				mcp.Description("Feedback signal (true=useful, false=missed). Mode=context only."),
+			),
+			mcp.WithBoolean("include_inferred",
+				mcp.Description("When false, strips inferred route nodes. Default true. Mode=context only."),
+			),
+			mcp.WithString("known_hash",
+				mcp.Description("Entity hash for conditional fetch. Mode=context only."),
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Agent ID for peer tracking."),
+			),
+			mcp.WithString("intent",
+				mcp.Description("For mode=context: shapes traversal weights. For mode=intent: required — 'modify'|'understand'|'review'|'debug'|'add'|'plan'."),
+			),
+			mcp.WithString("projects",
+				mcp.Description("Comma-separated federation aliases for cross-project context."),
+			),
+			mcp.WithNumber("cross_domain_decay",
+				mcp.Description("Cross-domain relevance multiplier (0,1]. Default 0.5. Mode=context only."),
+			),
+			// mode=intent params
+			mcp.WithString("target",
+				mcp.Description("Entity name, file path, or query. Required for mode=intent."),
+			),
+			// mode=path params
+			mcp.WithString("from",
+				mcp.Description("Starting entity for call chain. Required for mode=path."),
+			),
+			mcp.WithString("to",
+				mcp.Description("Target entity for call chain. Required for mode=path."),
 			),
 		),
-		s.handleGetGaps,
+		s.handleGetContextDispatch,
 	)
+
+	// Sprint 25: find_entity absorbed into search(mode="exact").
+
+	// validate (merges validate_plan, verify_implementation, get_violations, plan_context, check_plan_safety)
+	s.addOrDefer(
+		mcp.NewTool(
+			"validate",
+			mcp.WithDescription(
+				"Unified validation tool. phase='pre' (default): check proposed changes against rules. "+
+					"phase='post': verify files after writing. phase='list': list current violations. "+
+					"phase='full': compound pre-implementation gate (safety+rules+scope). "+
+					"phase='safety': search failure episodes for similar past failures.",
+			),
+			mcp.WithString("phase",
+				mcp.Description("'pre' (default), 'post', 'list', 'full', or 'safety'."),
+			),
+			// phase=pre params
+			mcp.WithString("changes",
+				mcp.Description("JSON array of proposed changes. Required for phase=pre/full."),
+			),
+			mcp.WithBoolean("check_safety",
+				mcp.Description("When true with phase=pre, also runs failure-episode safety check."),
+			),
+			mcp.WithString("plan_description",
+				mcp.Description("Natural language plan description. Used by phase=pre (safety) and phase=safety/full."),
+			),
+			mcp.WithBoolean("skip_logic_checks",
+				mcp.Description("Skip heuristic logic checks. Phase=pre only. Default false."),
+			),
+			// phase=post params
+			mcp.WithString("files_written",
+				mcp.Description("JSON array of written file paths. Required for phase=post."),
+			),
+			mcp.WithString("task_id",
+				mcp.Description("Optional task ID for phase=post verification or phase=full relevance."),
+			),
+			// phase=list params
+			mcp.WithString("rule_id",
+				mcp.Description("Filter violations to a rule ID. Phase=list only."),
+			),
+			mcp.WithBoolean("include_log",
+				mcp.Description("Include historical violation log. Phase=list only."),
+			),
+			mcp.WithNumber("log_limit",
+				mcp.Description("Max log entries. Phase=list only. Default 50."),
+			),
+			// phase=full params
+			mcp.WithString("target",
+				mcp.Description("Entity/file for scope assessment. Required for phase=full."),
+			),
+			mcp.WithString("file",
+				mcp.Description("File path suffix to disambiguate. Phase=full only."),
+			),
+			// phase=safety params
+			mcp.WithString("agent_id",
+				mcp.Description("Agent identifier for attribution."),
+			),
+			mcp.WithString("project_id",
+				mcp.Description("Repo context for scoping failure search. Phase=safety only."),
+			),
+		),
+		s.handleValidateDispatch,
+	)
+
+	// Sprint 25: upsert_gap absorbed into annotate(action="add_gap").
+	// Sprint 25: get_gaps absorbed into annotate(action="list_gaps").
 
 	// get_file_context
 	s.addOrDefer(
@@ -1929,174 +1693,97 @@ func (s *Server) registerTools() {
 		s.handleGetFileContext,
 	)
 
-	// search (absorbs semantic_search via mode param)
+	// search (absorbs semantic_search via mode param, find_entity via mode=exact)
 	s.addOrDefer(
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
-				"Search across entity names and doc comments. "+
-					"mode='keyword' (default): exact/prefix/substring match — fastest, best for known names. "+
-					"mode='fulltext': FTS5 BM25 ranked full-text search by concept ('rate limiting', 'JWT validation'). "+
-					"mode='semantic': HyDE-enhanced vector search — brain generates a hypothetical code definition "+
-					"matching the query, embeds it, and searches the HNSW index. Best for concept queries "+
-					"('how does auth work', 'find the rate limiter'). Falls back to raw query embedding when brain "+
-					"is unavailable. CamelCase names are auto-split: 'carve' finds 'CarveEgoGraph'.",
+				"Search across entity names, doc comments, and graph nodes. "+
+					"mode='keyword' (default): substring match. mode='fulltext': FTS5 BM25. "+
+					"mode='semantic': HyDE vector search. mode='exact': name lookup returning "+
+					"node refs (ID, type, file, line) — use to resolve entity names before get_context.",
 			),
 			mcp.WithString("query",
 				mcp.Required(),
 				mcp.Description("Search term (case-insensitive)."),
 			),
 			mcp.WithString("mode",
-				mcp.Description("Search mode: 'keyword' (default), 'fulltext' (FTS5 BM25), or 'semantic' (HyDE-enhanced vector search when brain available, falls back to vector+FTS5)."),
+				mcp.Description("'keyword' (default), 'fulltext', 'semantic', or 'exact' (name lookup)."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Maximum results to return (default 20, max 50). Only used for mode=semantic or mode=fulltext."),
+				mcp.Description("Maximum results to return (default 20, max 50). Used for fulltext/semantic."),
 			),
 			mcp.WithBoolean("hyde",
-				mcp.Description("HyDE hypothesis generation (default true). Set hyde=false to skip hypothesis generation and embed the raw query directly — useful for exact-name lookups where the query is already a code identifier. Only applies when mode='semantic'."),
+				mcp.Description("HyDE hypothesis generation (default true). Only applies when mode='semantic'."),
+			),
+			mcp.WithString("format",
+				mcp.Description("Output format for mode='exact': 'compact' (default) or 'json'."),
 			),
 		),
-		s.handleSearch,
+		s.handleSearchDispatch,
 	)
 
-	// get_call_chain
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_call_chain",
-			mcp.WithDescription(
-				"Finds the shortest call path between two entities by following CALLS edges. "+
-					"Answers 'how does A reach B?' Use this to understand the execution path "+
-					"between entry points and deep implementation details.",
-			),
-			mcp.WithString("from",
-				mcp.Required(),
-				mcp.Description("Name of the starting entity (caller side)."),
-			),
-			mcp.WithString("to",
-				mcp.Required(),
-				mcp.Description("Name of the target entity (callee side)."),
-			),
-		),
-		s.handleGetCallChain,
-	)
+	// Sprint 25: get_call_chain absorbed into get_context(mode="path").
 
-	// annotate_node
+	// annotate (merges annotate_node, web_annotate, upsert_gap, get_gaps, get_entity_history)
 	s.addOrDefer(
 		mcp.NewTool(
-			"annotate_node",
+			"annotate",
 			mcp.WithDescription(
-				"Attaches a note to a graph node, visible to all agents via get_context. "+
-					"Use this as a shared whiteboard: Agent A can annotate a function with "+
-					"'known race condition here' and Agent B will see it in context queries. "+
-					"Annotations persist across sessions.",
+				"Unified annotation tool. action='add' (default): attach note to node. "+
+					"action='add_web': persist web findings as annotation. action='add_gap': record quality gap. "+
+					"action='list_gaps': query gaps. action='history': entity timeline.",
 			),
+			mcp.WithString("action",
+				mcp.Description("'add' (default), 'add_web', 'add_gap', 'list_gaps', 'history'."),
+			),
+			// add / add_web params
 			mcp.WithString("node_id",
-				mcp.Required(),
-				mcp.Description("The node ID to annotate (from find_entity or get_context)."),
+				mcp.Description("Node ID. Required for action=add/add_web/add_gap."),
 			),
 			mcp.WithString("note",
-				mcp.Required(),
-				mcp.Description("The annotation text."),
+				mcp.Description("Annotation text. Required for action=add, optional for add_web."),
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier for attribution."),
+				mcp.Description("Agent identifier for attribution."),
+			),
+			// add_web params
+			mcp.WithString("hits",
+				mcp.Description("JSON array of {title,url,snippet} web hits. action=add_web."),
+			),
+			// add_gap params
+			mcp.WithString("gap_id",
+				mcp.Description("Short stable slug for gap dedup. Required for action=add_gap."),
+			),
+			mcp.WithString("description",
+				mcp.Description("Gap description. Required for action=add_gap."),
+			),
+			mcp.WithString("severity",
+				mcp.Description("low|medium|high|critical. action=add_gap/list_gaps."),
+			),
+			mcp.WithString("status",
+				mcp.Description("open|fixed|wontfix. action=add_gap. list_gaps: open|fixed|wontfix|all."),
+			),
+			mcp.WithString("fix_notes",
+				mcp.Description("How the gap was fixed. action=add_gap with status=fixed."),
+			),
+			// list_gaps params
+			mcp.WithString("file",
+				mcp.Description("Filter gaps by file path. action=list_gaps. Disambiguate for action=history."),
+			),
+			// history params
+			mcp.WithString("entity",
+				mcp.Description("Entity name. Required for action=history."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Max timeline events. action=history. Default 50."),
 			),
 		),
-		s.handleAnnotateNode,
+		s.handleAnnotateDispatch,
 	)
 
-	// link_entities
-	s.addOrDefer(
-		mcp.NewTool(
-			"link_entities",
-			mcp.WithDescription(
-				"Creates a user-defined cross-domain edge between two entities. "+
-					"Use this to express relationships that automatic parsers haven't discovered yet — "+
-					"e.g. 'PaymentService DEPLOYS prod-cluster', 'AuthHandler DEPENDS_ON redis-config'. "+
-					"Edges persist across restarts and are immediately traversable by get_context and get_impact. "+
-					"Use standard relation types (CALLS, DEPENDS_ON, IMPLEMENTS, etc.) for full BFS traversal. "+
-					"Cross-domain labels (DEPLOYS, CONSUMES, CONFIGURED_BY, DOCUMENTS, MENTIONS) are first-class catalog types with BFS weights.",
-			),
-			mcp.WithString("a",
-				mcp.Required(),
-				mcp.Description("Source entity: name (e.g. 'PaymentService') or full node ID (e.g. 'repo::file.go::PaymentService')."),
-			),
-			mcp.WithString("b",
-				mcp.Required(),
-				mcp.Description("Target entity: name or full node ID."),
-			),
-			mcp.WithString("relation",
-				mcp.Required(),
-				mcp.Description("Edge type label. Standard: CALLS, DEPENDS_ON, IMPLEMENTS, EMBEDS, DATA_FLOWS. Cross-domain: DEPLOYS (code→infra), CONSUMES (code→API), CONFIGURED_BY (code→config), DOCUMENTS (docs→code), MENTIONS (name-match). All types are BFS-traversable."),
-			),
-			mcp.WithString("domain",
-				mcp.Description("Optional. Semantic domain of the relationship, e.g. 'code-to-infra', 'code-to-api', 'explicit'. Defaults to empty (code-to-code assumed)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Agent identifier for attribution."),
-			),
-		),
-		s.handleLinkEntities,
-	)
-
-	// unlink_entities
-	s.addOrDefer(
-		mcp.NewTool(
-			"unlink_entities",
-			mcp.WithDescription(
-				"Removes a previously created manual edge between two entities. "+
-					"Only removes edges that were created via link_entities — "+
-					"does not affect auto-discovered structural edges. "+
-					"The removal takes effect immediately in the live graph and persists across restarts.",
-			),
-			mcp.WithString("a",
-				mcp.Required(),
-				mcp.Description("Source entity: name or full node ID."),
-			),
-			mcp.WithString("b",
-				mcp.Required(),
-				mcp.Description("Target entity: name or full node ID."),
-			),
-			mcp.WithString("relation",
-				mcp.Required(),
-				mcp.Description("The relation label of the edge to remove (must match exactly what was used in link_entities)."),
-			),
-		),
-		s.handleUnlinkEntities,
-	)
-
-	// confirm_edge
-	s.addOrDefer(
-		mcp.NewTool(
-			"confirm_edge",
-			mcp.WithDescription(
-				"Approves or permanently rejects any cross-domain edge — "+
-					"whether auto-created by the name-matcher (MENTIONS) or manually via link_entities. "+
-					"confirmed=true: edge confidence → 1.0, name-matcher will never re-score it, edge stays live. "+
-					"confirmed=false: edge suppressed immediately and permanently — "+
-					"removed from the live graph, not re-created by the matcher, invisible to get_context. "+
-					"Auto-retries reversed direction (a↔b) since the matcher stores edges heavy-domain-first. "+
-					"Use link_entities to undo a rejection.",
-			),
-			mcp.WithString("a",
-				mcp.Required(),
-				mcp.Description("Source entity of the edge: name or full node ID."),
-			),
-			mcp.WithString("b",
-				mcp.Required(),
-				mcp.Description("Target entity of the edge: name or full node ID."),
-			),
-			mcp.WithString("relation",
-				mcp.Required(),
-				mcp.Description("The edge type label, e.g. MENTIONS, DEPLOYS, CONSUMES. Must match exactly."),
-			),
-			mcp.WithBoolean("confirmed",
-				mcp.Required(),
-				mcp.Description("true to approve the edge (confidence → 1.0), false to reject it permanently."),
-			),
-		),
-		s.handleConfirmEdge,
-	)
+	// Sprint 24: link_entities, unlink_entities, confirm_edge removed.
+	// Graph edge management is no longer agent-facing.
 
 	// get_impact
 	s.addOrDefer(
@@ -2145,149 +1832,90 @@ func (s *Server) registerTools() {
 		s.handleGetImpact,
 	)
 
-	// get_entity_history: chronological timeline compositing 5 data sources (Sprint 10 #4)
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_entity_history",
-			mcp.WithDescription(
-				"Returns a chronological timeline for a named code entity, compositing "+
-					"memories, episodes, annotations, task references, and git changes. "+
-					"One tool call instead of 5. Answers: 'what happened to this entity?'",
-			),
-			mcp.WithString("entity",
-				mcp.Required(),
-				mcp.Description("Name of the code entity (e.g. 'AuthService', 'handleLogin'). "+
-					"Resolved via FindByName with automatic disambiguation."),
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to disambiguate when multiple entities share the same name "+
-					"(e.g. 'internal/auth/service.go')."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum timeline events to return (default 50, max 200). "+
-					"Events are sorted by timestamp descending (newest first)."),
-			),
-		),
-		s.handleGetEntityHistory,
-	)
+	// Sprint 25: get_entity_history absorbed into annotate(action="history").
 
 	// ── Agent Task Memory Tools ──────────────────────────────────────────────
 	// These tools give Synapses session continuity: plans and tasks agreed in
 	// one LLM conversation are stored in SQLite and surfaced to future sessions.
 
-	// create_plan
+	// tasks (merges create_plan, get_plans, get_pending_tasks, get_my_tasks, save_session_state, get_session_state, update_task, link_task_nodes)
 	s.addOrDefer(
 		mcp.NewTool(
-			"create_plan",
+			"tasks",
 			mcp.WithDescription(
-				"Saves a named plan with actionable tasks to persistent storage. "+
-					"Call this when the user approves an implementation plan so that future "+
-					"LLM sessions can resume the work via get_pending_tasks. "+
-					"Each task has a title, description, priority (p0–p3), and optional linked node IDs.",
+				"Unified task management. action='create_plan': save a plan with tasks. "+
+					"action='list_plans': overview of all plans. action='pending': list pending/in-progress tasks. "+
+					"action='update': change task status. action='save_state'/'get_state': session state. "+
+					"action='link_nodes': link task to graph nodes.",
 			),
-			mcp.WithString("title",
+			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("Short name for the plan, e.g. 'v1.0.1 context quality improvements'."),
+				mcp.Description("'create_plan', 'list_plans', 'pending', 'update', 'save_state', 'get_state', 'link_nodes'."),
+			),
+			// create_plan params
+			mcp.WithString("title",
+				mcp.Description("Plan title. Required for action=create_plan."),
 			),
 			mcp.WithString("description",
-				mcp.Description("Optional longer description of what the plan achieves."),
+				mcp.Description("Plan description. action=create_plan."),
 			),
 			mcp.WithString("tasks",
-				mcp.Required(),
-				mcp.Description(
-					`JSON array of task objects. Each: {"title":"...", "description":"...", "priority":"p0|p1|p2|p3", "linked_nodes":["nodeID",...]}.`,
-				),
+				mcp.Description("JSON array of task objects. Required for action=create_plan."),
 			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier, e.g. 'claude-code-session-1'. Recorded as plan creator."),
-			),
-		),
-		s.handleCreatePlan,
-	)
-
-	// get_pending_tasks (absorbs get_my_tasks via agent_id + suggest_next)
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_pending_tasks",
-			mcp.WithDescription(
-				"Returns all pending and in-progress tasks, ordered by priority (p0 first). "+
-					"Call this at the start of every session to discover what work was agreed "+
-					"in previous sessions and resume from exactly where the last session stopped. "+
-					"Pass agent_id= to scope to your own tasks. Pass suggest_next=true to get the top unblocked task highlighted.",
-			),
+			// pending params
 			mcp.WithString("plan_id",
-				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
+				mcp.Description("Filter by plan ID. action=pending."),
 			),
 			mcp.WithString("agent_id",
-				mcp.Description("Optional. Filter to tasks assigned to a specific agent. Use your own agent_id to see only your tasks."),
+				mcp.Description("Agent identifier. Filters tasks (pending), attribution (create_plan/update/save_state)."),
 			),
 			mcp.WithBoolean("suggest_next",
-				mcp.Description("When true, adds a suggested_next field with the top unblocked pending task."),
+				mcp.Description("Highlight top unblocked task. action=pending."),
 			),
-		),
-		s.handleGetPendingTasks,
-	)
-
-	// get_my_tasks — scoped view of pending tasks for a specific agent
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_my_tasks",
-			mcp.WithDescription(
-				"Returns unblocked pending tasks assigned to a specific agent. "+
-					"Requires agent_id. Use this to focus on your own work queue without "+
-					"seeing tasks assigned to other agents.",
+			// update params
+			mcp.WithString("id",
+				mcp.Description("Task ID. Required for action=update."),
 			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The agent identifier to filter tasks by (e.g. 'implementer', 'reviewer')."),
+			mcp.WithString("status",
+				mcp.Description("New status: pending|in_progress|done|cancelled. Required for action=update."),
 			),
-			mcp.WithString("plan_id",
-				mcp.Description("Optional. Filter to tasks belonging to a specific plan."),
+			mcp.WithString("notes",
+				mcp.Description("Timestamped notes to append. action=update."),
 			),
-		),
-		s.handleGetMyTasks,
-	)
-
-	// save_session_state
-	s.addOrDefer(
-		mcp.NewTool(
-			"save_session_state",
-			mcp.WithDescription(
-				"Saves the exact working state for an in-progress task so the next LLM session "+
-					"can resume from precisely where this session stopped. Call this at the end of "+
-					"a session or whenever significant progress is made. "+
-					"The state is included automatically in get_pending_tasks() for in_progress tasks.",
+			mcp.WithString("intent",
+				mcp.Description("Free-text intent visible to peers. action=update."),
 			),
+			// save_state params
 			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID from get_pending_tasks."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier."),
+				mcp.Description("Task ID. Required for action=save_state/get_state/link_nodes."),
 			),
 			mcp.WithString("approach",
-				mcp.Description("Current strategy or approach being taken for this task."),
+				mcp.Description("Current approach. action=save_state."),
 			),
 			mcp.WithString("files_modified",
-				mcp.Description("JSON array of file paths modified so far, e.g. [\"internal/store/tasks.go\"]."),
+				mcp.Description("JSON array of modified files. action=save_state."),
 			),
 			mcp.WithString("completed_steps",
-				mcp.Description("JSON array of step descriptions already completed."),
+				mcp.Description("JSON array of completed steps. action=save_state."),
 			),
 			mcp.WithString("remaining_steps",
-				mcp.Description("JSON array of step descriptions still to do."),
+				mcp.Description("JSON array of remaining steps. action=save_state."),
 			),
 			mcp.WithString("blockers",
-				mcp.Description("JSON array of blocker descriptions (empty if none)."),
+				mcp.Description("JSON array of blockers. action=save_state."),
 			),
 			mcp.WithString("decisions",
-				mcp.Description("JSON array of key decisions made during this session."),
+				mcp.Description("JSON array of decisions. action=save_state."),
 			),
 			mcp.WithString("context_snapshot",
-				mcp.Description("Free-form text snapshot of the current LLM context (key facts, state, etc.)."),
+				mcp.Description("Free-form context snapshot. action=save_state."),
+			),
+			// link_nodes params
+			mcp.WithString("node_ids",
+				mcp.Description("JSON array of node ID strings. Required for action=link_nodes."),
 			),
 		),
-		s.handleSaveSessionState,
+		s.handleTasksDispatch,
 	)
 
 	// end_session: captures session knowledge and optionally reports usage.
@@ -2338,258 +1966,98 @@ func (s *Server) registerTools() {
 		s.handleEndSession,
 	)
 
-	// get_session_state
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_session_state",
-			mcp.WithDescription(
-				"Returns the saved session state for a task, enabling exact-moment resumption "+
-					"of work started in a previous LLM session. "+
-					"Note: get_pending_tasks() already includes session state for in_progress tasks inline; "+
-					"use this tool only when you need to fetch state for a specific task explicitly.",
-			),
-			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID to retrieve session state for."),
-			),
-		),
-		s.handleGetSessionState,
-	)
-
-	// update_task
-	s.addOrDefer(
-		mcp.NewTool(
-			"update_task",
-			mcp.WithDescription(
-				"Updates the status of a task and optionally appends timestamped notes. "+
-					"Use this to mark tasks done as you complete them, "+
-					"or to leave context notes for the next LLM session.",
-			),
-			mcp.WithString("id",
-				mcp.Required(),
-				mcp.Description("The task ID returned by get_pending_tasks."),
-			),
-			mcp.WithString("status",
-				mcp.Required(),
-				mcp.Description("New status: pending | in_progress | done | cancelled."),
-			),
-			mcp.WithString("notes",
-				mcp.Description("Optional notes to append (timestamped). Use to leave context for the next session."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier. Recorded as last_updated_by."),
-			),
-			mcp.WithString("intent",
-				mcp.Description("Optional. Short free-text declaration of what you are working on — visible to peer agents. E.g. 'implementing R1 framework edge injection'. Pass space to clear."),
-			),
-		),
-		s.handleUpdateTask,
-	)
+	// Sprint 25: get_session_state absorbed into tasks(action="get_state").
+	// Sprint 25: update_task absorbed into tasks(action="update").
 
 	// ── Coordination & Multi-Agent Tools ────────────────────────────────────
 
-	// get_plans
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_plans",
-			mcp.WithDescription(
-				"List all saved plans with task completion counts. "+
-					"Use this to get an overview of all active and completed work across sessions.",
-			),
-		),
-		s.handleGetPlans,
-	)
+	// Sprint 25: get_plans absorbed into tasks(action="list_plans").
+	// Sprint 25: link_task_nodes absorbed into tasks(action="link_nodes").
 
-
-
-	// link_task_nodes
-	s.addOrDefer(
-		mcp.NewTool(
-			"link_task_nodes",
-			mcp.WithDescription(
-				"Explicitly links a task to graph node IDs. "+
-					"Linked nodes get a relevance boost when get_context is called with task_id=. "+
-					"Replaces any existing links for the task.",
-			),
-			mcp.WithString("task_id",
-				mcp.Required(),
-				mcp.Description("The task ID to link nodes to."),
-			),
-			mcp.WithString("node_ids",
-				mcp.Required(),
-				mcp.Description("JSON array of node ID strings, e.g. [\"repo::pkg/auth.go::AuthService\"]."),
-			),
-		),
-		s.handleLinkTaskNodes,
-	)
-
-	// get_agents
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_agents",
-			mcp.WithDescription(
-				"Returns all agents that have interacted with Synapses, ordered by last-seen timestamp. "+
-					"Useful for understanding who else is working in this repository.",
-			),
-			mcp.WithString("projects",
-				mcp.Description("Comma-separated project names (or \"*\" for all) to also query agents from sibling daemon-registered projects. Only works in daemon mode."),
-			),
-		),
-		s.handleGetAgents,
-	)
-
-	// get_events
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_events",
-			mcp.WithDescription(
-				"Returns recent events from the pull-based event log: file_change, task_update, "+
-					"annotation_added, agent_activity. Poll with since_seq cursor (from session_init "+
-					"or the previous call's latest_seq) to get only new events.",
-			),
-			mcp.WithNumber("since_seq",
-				mcp.Description("Return events with seq greater than this value. Use 0 for all recent events."),
-			),
-			mcp.WithString("types",
-				mcp.Description("Comma-separated list of event types to filter by, e.g. 'file_change,task_update'. Omit for all types."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum events to return. Defaults to 50."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Filter events to only those emitted by this agent ID. Use to view a specific peer's activity stream (Tier 3 on-demand signal)."),
-			),
-			mcp.WithString("projects",
-				mcp.Description("Comma-separated project names (or \"*\" for all) to also query from sibling daemon-registered projects. Only works in daemon mode."),
-			),
-		),
-		s.handleGetEvents,
-	)
+	// Sprint 24: get_agents, get_events, send_message, get_messages removed.
+	// Cross-session awareness is now handled by the Work Ledger (ambient coordination).
 
 	// ── Rule Management Tools ────────────────────────────────────────────────
 
-	// upsert_rule
+	// rules (merges upsert_rule, delete_rule, get_rule_candidates, upsert_adr, get_adrs)
 	s.addOrDefer(
 		mcp.NewTool(
-			"upsert_rule",
+			"rules",
 			mcp.WithDescription(
-				"Create or update a dynamic architectural rule. "+
-					"Persisted to SQLite and active immediately — no daemon restart required. "+
-					"Subsequent validate_plan and get_violations calls enforce it. "+
-					"Use this when you detect a pattern that should be formalised as a constraint.",
+				"Unified rule and ADR management. action='upsert': create/update architectural rule. "+
+					"action='delete': remove rule. action='candidates': failure episodes not yet promoted. "+
+					"action='upsert_adr': create/update ADR. action='list_adrs': query ADRs.",
 			),
-			mcp.WithString("rule_id",
+			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("Unique identifier for the rule, e.g. 'no-db-in-handler'. Used to update an existing rule."),
+				mcp.Description("'upsert', 'delete', 'candidates', 'upsert_adr', 'list_adrs'."),
+			),
+			// upsert params
+			mcp.WithString("rule_id",
+				mcp.Description("Rule ID. Required for action=upsert/delete."),
 			),
 			mcp.WithString("description",
-				mcp.Required(),
-				mcp.Description("Human-readable explanation of what this rule prevents and why."),
+				mcp.Description("Rule/gap description. Required for action=upsert."),
 			),
 			mcp.WithString("severity",
-				mcp.Required(),
-				mcp.Description("'error' or 'warning'."),
+				mcp.Description("'error' or 'warning'. Required for action=upsert."),
 			),
 			mcp.WithString("edge_type",
-				mcp.Description("Edge type to forbid: CALLS, IMPORTS, IMPLEMENTS, etc. Empty = any edge type."),
+				mcp.Description("Edge type to forbid. action=upsert."),
 			),
 			mcp.WithString("from_file_pattern",
-				mcp.Description("Glob matched against the base name of the source file, e.g. '*/handlers/*'."),
+				mcp.Description("Source file glob. action=upsert."),
 			),
 			mcp.WithString("to_file_pattern",
-				mcp.Description("Glob matched against the base name of the target file, e.g. '*/db/*'."),
+				mcp.Description("Target file glob. action=upsert."),
 			),
 			mcp.WithString("to_name_pattern",
-				mcp.Description("Substring that must appear in the target entity name."),
+				mcp.Description("Target entity name substring. action=upsert."),
 			),
 			mcp.WithString("path_pattern",
-				mcp.Description(
-					"Optional comma-separated sequence of edge types for multi-hop path checking, "+
-						"e.g. 'CALLS,CALLS'. When set, the rule fires when a from-matching node can "+
-						"reach a to-matching node via the exact edge sequence (up to 8 hops). "+
-						"Enables constraints like 'no handler→database path without service layer'. "+
-						"When path_pattern is set, edge_type is ignored.",
-				),
+				mcp.Description("Comma-separated edge sequence for multi-hop checks. action=upsert."),
 			),
 			mcp.WithString("context_source",
-				mcp.Description(
-					"Optional provenance of the context that led to this rule. "+
-						"If 'external' or 'generated', the call is rejected — rules derived from "+
-						"low-trust sources (web content, codegen headers) must not become "+
-						"architectural constraints. Omit when context is user-authored code.",
-				),
+				mcp.Description("Provenance. Rejects 'external'/'generated'. action=upsert."),
+			),
+			// upsert_adr params
+			mcp.WithString("id",
+				mcp.Description("ADR ID (kebab-case). Required for action=upsert_adr."),
+			),
+			mcp.WithString("title",
+				mcp.Description("ADR title. Required for action=upsert_adr."),
+			),
+			mcp.WithString("decision",
+				mcp.Description("The decision made. Required for action=upsert_adr."),
+			),
+			mcp.WithString("status",
+				mcp.Description("proposed|accepted|deprecated|superseded. action=upsert_adr."),
+			),
+			mcp.WithString("context",
+				mcp.Description("Problem context. action=upsert_adr."),
+			),
+			mcp.WithString("consequences",
+				mcp.Description("Trade-offs. action=upsert_adr."),
+			),
+			mcp.WithArray("linked_files",
+				mcp.Description("File patterns for ADR. action=upsert_adr."),
+				mcp.Items(map[string]any{"type": "string"}),
+			),
+			// list_adrs params
+			mcp.WithString("file",
+				mcp.Description("File path to filter ADRs. action=list_adrs."),
 			),
 		),
-		s.handleUpsertRule,
-	)
-
-	// delete_rule
-	s.addOrDefer(
-		mcp.NewTool(
-			"delete_rule",
-			mcp.WithDescription(
-				"Delete a dynamic architectural rule by ID. "+
-					"Removes the rule from both in-memory validation and persistent storage — "+
-					"validate_plan() will no longer check this rule after deletion. "+
-					"Returns status=\"not_found\" (not an error) when the rule ID does not exist.",
-			),
-			mcp.WithString("rule_id",
-				mcp.Required(),
-				mcp.Description("The rule ID to delete (same ID used in upsert_rule)."),
-			),
-		),
-		s.handleDeleteRule,
+		s.handleRulesDispatch,
 	)
 
 	// ── Session Awareness Tools ──────────────────────────────────────────────
 
-	// get_working_state
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_working_state",
-			mcp.WithDescription(
-				"Returns recent file changes detected by the file watcher, answering "+
-					"'what was the developer just working on?' "+
-					"Also includes a git diff stat for the current working tree. "+
-					"Prefer session_init instead — it includes working_state along with "+
-					"pending tasks, project identity, and scale guidance in one call.",
-			),
-			mcp.WithNumber("window_minutes",
-				mcp.Description("Look-back window in minutes. Defaults to 15."),
-			),
-		),
-		s.handleGetWorkingState,
-	)
+	// Sprint 24: get_working_state absorbed into session_init.
 
 	// ── Web Tools ─────────────────────────────────────────────────────────────
 
-	// web_annotate
-	s.addOrDefer(
-		mcp.NewTool(
-			"web_annotate",
-			mcp.WithDescription(
-				"Persists web findings as a graph node annotation so they survive across sessions "+
-					"and appear in get_context for that node. "+
-					"This is the 'context sharing' pattern: web research becomes a first-class "+
-					"data object attached to a code entity, visible to all future agent sessions. "+
-					"Pass hits (JSON array of {title,url,snippet} objects) or a plain note string, or both.",
-			),
-			mcp.WithString("node_id",
-				mcp.Required(),
-				mcp.Description("The node ID to annotate (from find_entity or get_context)."),
-			),
-			mcp.WithString("note",
-				mcp.Description("Plain-text note summarising what was found. Used as-is or prepended to hits."),
-			),
-			mcp.WithString("hits",
-				mcp.Description("JSON array of web hits, e.g. [{\"title\":\"...\",\"url\":\"...\",\"snippet\":\"...\"}]."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Optional. Self-declared agent identifier for attribution."),
-			),
-		),
-		s.handleWebAnnotate,
-	)
+	// Sprint 25: web_annotate absorbed into annotate(action="add_web").
 
 	// lookup_docs
 	s.addOrDefer(
@@ -2621,577 +2089,116 @@ func (s *Server) registerTools() {
 		s.handleLookupDocs,
 	)
 
-	// upsert_adr
-	s.addOrDefer(
-		mcp.NewTool(
-			"upsert_adr",
-			mcp.WithDescription(
-				"Creates or updates an Architectural Decision Record (ADR) in the brain. "+
-					"ADRs are persistent cold-memory entries for significant design choices — "+
-					"they appear in get_context compact output when linked_files match the entity's file. "+
-					"IMPORTANT: always pass linked_files=[\"path/to/file.go\"] when creating an ADR — "+
-					"without it, get_adrs(file=...) will never return this ADR for that file. "+
-					"Requires brain.url to be configured in synapses.json. "+
-					"Typical workflow: (1) get_rule_candidates() to find structural patterns, "+
-					"(2) upsert_rule(rule_id=...) to enforce the pattern, "+
-					"(3) upsert_adr(id=..., context=\"Enforced via rule <rule_id>\", linked_files=[...]) to document the decision.",
-			),
-			mcp.WithString("id",
-				mcp.Required(),
-				mcp.Description("Unique identifier for the ADR, e.g. 'adr-001-no-cgo'. Use kebab-case."),
-			),
-			mcp.WithString("title",
-				mcp.Required(),
-				mcp.Description("Short, declarative title of the decision, e.g. 'No CGo — use modernc/sqlite'."),
-			),
-			mcp.WithString("decision",
-				mcp.Required(),
-				mcp.Description("The decision made, in 1-3 sentences."),
-			),
-			mcp.WithString("status",
-				mcp.Description("One of: proposed, accepted, deprecated, superseded. Defaults to 'proposed'."),
-			),
-			mcp.WithString("context",
-				mcp.Description("Problem context and forces that led to this decision."),
-			),
-			mcp.WithString("consequences",
-				mcp.Description("Consequences and trade-offs of this decision."),
-			),
-			mcp.WithArray("linked_files",
-				mcp.Description("File path patterns to associate with this ADR (e.g. [\"internal/auth/\", \"cmd/server.go\"]). Used by get_adrs(file=) to surface relevant ADRs for a given file."),
-				mcp.Items(map[string]any{"type": "string"}),
-			),
-		),
-		s.handleUpsertADR,
-	)
+	// Sprint 25: upsert_adr absorbed into rules(action="upsert_adr").
 
-	// prepare_context — intent-based context assembly (replaces multi-tool chains).
-	s.addOrDefer(
-		mcp.NewTool(
-			"prepare_context",
-			mcp.WithDescription(
-				"THE canonical context tool — start here for all code exploration tasks. "+
-					"Intent-based context assembly: declare WHAT you need and a target; "+
-					"Synapses composes the right context in one round-trip. "+
-					"Replaces chains like get_context→get_impact→get_violations.\n"+
-					"Intents: 'modify' (safe-edit briefing), 'understand' (structure), "+
-					"'review' (quality/risk), 'debug' (call-path trace), "+
-					"'add' (conventions for new code), 'plan' (dry-run scope assessment).",
-			),
-			mcp.WithString("intent",
-				mcp.Required(),
-				mcp.Description("'modify' | 'understand' | 'review' | 'debug' | 'add' | 'plan'"),
-			),
-			mcp.WithString("target",
-				mcp.Required(),
-				mcp.Description("Entity name, file path suffix, or search query."),
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to disambiguate entity names."),
-			),
-			mcp.WithString("task_id",
-				mcp.Description("Optional task ID for relevance boosting."),
-			),
-			mcp.WithNumber("token_budget",
-				mcp.Description("Max tokens for the response. Defaults vary by intent (1500–3500)."),
-			),
-			mcp.WithString("projects",
-				mcp.Description("Optional. Comma-separated federation aliases to include cross-project context "+
-					"(e.g. 'core'). Enriches response with sibling entity data, memories, and drift status."),
-			),
-		),
-		s.handlePrepareContext,
-	)
+	// Sprint 25: prepare_context absorbed into get_context(mode="intent").
 
 	// ── Agent Message Bus ────────────────────────────────────────────────────
-	// Phase 1: direct + broadcast messaging between ephemeral agent sessions.
-	// Transport: SQLite (not HTTP) — agents are ephemeral, need a broker.
-	// Semantics: A2A-lite (topic-based, task-linked payloads, lifecycle: unread→read).
+	// Sprint 24: send_message, get_messages removed — replaced by Work Ledger.
 
-	// send_message
+	// memory (merges remember, recall, get_episodes)
 	s.addOrDefer(
 		mcp.NewTool(
-			"send_message",
+			"memory",
 			mcp.WithDescription(
-				"Sends a message from one agent to another, or broadcasts it to all agents. "+
-					"Use this to notify peers about API changes, task blockers, or plan updates. "+
-					"to_agent omitted = broadcast. payload must be valid JSON.",
+				"Unified episodic memory. action='save': record a decision/failure episode. "+
+					"action='search': FTS5/semantic search across memories (with query) or chronological browse (without). "+
+					"action='list': chronological episode browser with filters.",
 			),
-			mcp.WithString("from_agent",
+			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("Self-declared sender identity (e.g. 'backend-claude')."),
+				mcp.Description("'save', 'search', or 'list'."),
 			),
-			mcp.WithString("topic",
-				mcp.Required(),
-				mcp.Description("Message topic, e.g. 'api_changed', 'task_blocked', 'plan_updated'."),
-			),
-			mcp.WithString("payload",
-				mcp.Description("JSON payload with message details. Defaults to '{}'. Example: '{\"endpoint\":\"/api/users\",\"change\":\"added role field\"}'."),
-			),
-			mcp.WithString("to_agent",
-				mcp.Description("Target agent ID. Omit (or leave empty) to broadcast to all agents."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Optional repo context identifier (e.g. 'my-backend'). Used for cross-project coordination."),
-			),
-		),
-		s.handleSendMessage,
-	)
-
-	// get_messages
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_messages",
-			mcp.WithDescription(
-				"Retrieves messages from the agent message bus visible to the calling agent. "+
-					"Includes direct messages and broadcasts (to_agent omitted). "+
-					"Use since_seq cursor for efficient polling. unread_only=true by default.",
-			),
+			// action=save params
 			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("The calling agent's ID. Only messages addressed to this agent or broadcast are returned."),
-			),
-			mcp.WithNumber("since_seq",
-				mcp.Description("Return messages with seq greater than this value. Use 0 or omit for all. Use latest_seq from previous call as cursor."),
-			),
-			mcp.WithString("topic_filter",
-				mcp.Description("Optional. Only return messages with this exact topic (e.g. 'api_changed')."),
-			),
-			mcp.WithBoolean("unread_only",
-				mcp.Description("If true (default), only return unread messages. Pass false to retrieve all messages including already-read ones."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum messages to return. Defaults to 50."),
-			),
-			mcp.WithString("mark_read_ids",
-				mcp.Description("JSON array of message IDs to mark as read in the same call, e.g. [\"id1\",\"id2\"]. Replaces separate mark_read calls."),
-			),
-			mcp.WithString("projects",
-				mcp.Description("Comma-separated project names (or \"*\" for all) to also query messages from sibling daemon-registered projects. Only works in daemon mode."),
-			),
-		),
-		s.handleGetMessages,
-	)
-
-	// remember
-	s.addOrDefer(
-		mcp.NewTool(
-			"remember",
-			mcp.WithDescription(
-				"Records a decision or failure as an episode in persistent memory. "+
-					"Use episode_type='failure' + outcome='failure' to populate the Hall of Shame "+
-					"so validate_plan(check_safety=true) can warn future agents. "+
-					"Use episode_type='decision' for general architectural choices.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Required(),
-				mcp.Description("Self-declared agent identifier (e.g. 'claude-code-session-1')."),
+				mcp.Description("Agent identifier. Required for action=save."),
 			),
 			mcp.WithString("decision",
-				mcp.Required(),
-				mcp.Description("The decision made or failure observed. Concise, 1-2 sentences."),
+				mcp.Description("Decision or failure text. Required for action=save."),
 			),
 			mcp.WithString("episode_type",
-				mcp.Description("One of: decision (default), failure, pattern, rule_proposal."),
+				mcp.Description("decision (default), failure, pattern, rule_proposal."),
 			),
 			mcp.WithString("outcome",
-				mcp.Description("One of: success, failure, partial, unknown (default)."),
+				mcp.Description("success, failure, partial, unknown (default). action=save."),
 			),
 			mcp.WithString("rationale",
-				mcp.Description("Why this decision was made or why it failed (1-3 sentences)."),
+				mcp.Description("Why this decision was made. action=save."),
 			),
 			mcp.WithString("trigger",
-				mcp.Description("What prompted this episode, e.g. 'modifying auth_handler.go'."),
+				mcp.Description("What prompted this episode. action=save."),
 			),
 			mcp.WithString("affected_files",
-				mcp.Description("JSON array of file paths involved, e.g. '[\"cmd/server/main.go\"]'."),
+				mcp.Description("JSON array of file paths. action=save."),
 			),
 			mcp.WithString("affected_nodes",
-				mcp.Description("Documents scope — records which graph entities were involved, for fix-task linking and entity-tier memory creation on failure/pattern episodes. "+
-					"Does NOT create explicit staleness anchors (no entry in memory_anchors table). "+
-					"Use anchor_nodes instead to have this memory auto-invalidate when specific entities change in the graph."),
+				mcp.Description("JSON array of graph node IDs for scope. action=save."),
 			),
 			mcp.WithString("tags",
-				mcp.Description("JSON array of tags for filtering, e.g. '[\"auth\",\"breaking\"]'."),
+				mcp.Description("JSON array of tags (save) or comma-separated (search/list)."),
 			),
 			mcp.WithString("project_id",
-				mcp.Description("Repo context (leave empty to use current project)."),
+				mcp.Description("Repo context filter."),
 			),
 			mcp.WithString("anchor_nodes",
-				mcp.Description("Enables staleness tracking — when anchored entities change in the code graph, this memory is auto-flagged stale. "+
-					"JSON array of graph node IDs to anchor this memory to. "+
-					"Use for codebase-derived facts: architecture decisions, component status, API signatures. "+
-					"Example: '[\"repo::pkg/auth.go::AuthService\"]'. "+
-					"Omit for durable facts (user preferences, feedback) that have no codebase anchor."),
+				mcp.Description("JSON array of node IDs for staleness tracking. action=save."),
 			),
 			mcp.WithString("memory_importance",
-				mcp.Description("Importance level for the knowledge memory written alongside this episode. "+
-					"Use 'pinned' for critical long-lived knowledge that must never be demoted by decay scoring "+
-					"(security configs, compliance decisions, architectural invariants). "+
-					"Use a float string (e.g. '0.8', '1.5') for high-importance but non-critical knowledge — "+
-					"values multiply the recency decay score (higher = longer-lived in recall results). "+
-					"Minimum effective value is 0.05 (the decay visibility threshold); values below this are "+
-					"clamped up to 0.05 automatically. Default '1.0' — decays naturally by time-since-last-access. "+
-					"Pinned memories always appear in recall() regardless of age."),
+				mcp.Description("Importance level: 'pinned' or float string. action=save. Default '1.0'."),
 			),
-		),
-		s.handleRemember,
-	)
-
-	// recall (absorbs get_episodes: omit query for chronological browse)
-	s.addOrDefer(
-		mcp.NewTool(
-			"recall",
-			mcp.WithDescription(
-				"Searches or browses episodic memory. "+
-					"With query: FTS5 BM25 semantic search, results ordered by relevance — use before starting work on a component. "+
-					"Without query: chronological browse (newest first), equivalent to the deprecated get_episodes. "+
-					"Also surfaces dynamic_rules derived from similar past failures. "+
-					"Response may include stale_embedding_ids: memory IDs whose anchored code entity changed since the memory was written — verify these before trusting.",
-			),
+			// action=search params
 			mcp.WithString("query",
-				mcp.Description("Natural language search query, e.g. 'auth handler redirect loop'. Omit for chronological browse."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Filter to episodes for this project (empty = all projects)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Filter to episodes recorded by this agent (empty = all agents)."),
-			),
-			mcp.WithString("episode_type",
-				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
+				mcp.Description("Search query. Omit for chronological browse. action=search."),
 			),
 			mcp.WithString("outcome_filter",
-				mcp.Description("Filter by outcome: success, failure, partial, unknown (empty = all). Search mode only."),
-			),
-			mcp.WithString("tags",
-				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'. Browse mode only."),
+				mcp.Description("Filter by outcome. action=search only."),
 			),
 			mcp.WithNumber("limit",
-				mcp.Description("Max episodes to return. Default 5 (search) or 20 (browse)."),
+				mcp.Description("Max results. Default 5 (search), 20 (list/browse)."),
 			),
 			mcp.WithBoolean("include_stale",
-				mcp.Description("When true, include stale (invalidated) memories in results. Default false. Use for audit queries to review full history including beliefs that were invalidated by graph changes."),
+				mcp.Description("Include invalidated memories. Default false. action=search."),
 			),
 			mcp.WithString("projects",
-				mcp.Description("Comma-separated list of federation aliases to also search. When provided, searches sibling projects' memories too, labeling results with [alias]. Without this parameter, only local memories are searched."),
+				mcp.Description("Comma-separated federation aliases for cross-project search."),
 			),
 			mcp.WithString("as_of",
-				mcp.Description("Return memory content as it existed at this point in time. "+
-					"Accepts RFC3339 (e.g. '2026-03-15T12:00:00Z') or date-only (e.g. '2026-03-15'). "+
-					"Memories created after this time are excluded. "+
-					"For memories with version history (updated via dedup), returns the content that was active at that time. "+
-					"Search mode only."),
+				mcp.Description("Point-in-time query (RFC3339). action=search."),
 			),
 			mcp.WithString("since",
-				mcp.Description("Lower bound for memory creation time — only memories created at or after this time are returned. "+
-					"Accepts RFC3339 (e.g. '2026-03-01T00:00:00Z') or date-only (e.g. '2026-03-01'). "+
-					"Combine with until= for a time-window query, e.g. recall(query='auth', since='2026-03-01', until='2026-03-15'). "+
-					"Applied to local memories, local episodes, and cross-project results. Also auto-sets the temporal channel lookback window."),
+				mcp.Description("Lower time bound (RFC3339). action=search."),
 			),
 			mcp.WithString("until",
-				mcp.Description("Upper bound for memory creation time — only memories created at or before this time are returned. "+
-					"Accepts RFC3339 (e.g. '2026-03-15T23:59:59Z') or date-only (e.g. '2026-03-15', treated as end-of-day). "+
-					"Use with since= to scope recall to a specific window. "+
-					"Applied to local memories, local episodes, and cross-project results."),
+				mcp.Description("Upper time bound (RFC3339). action=search."),
 			),
 			mcp.WithNumber("depth",
-				mcp.Description("Graph traversal depth for multi-hop knowledge discovery (default 2, max 4). " +
-					"depth=2: surfaces memories about entities 2 hops from query-matching anchors " +
-					"(e.g. querying auth finds TokenValidator memories because AuthService -[CALLS]- TokenValidator). " +
-					"depth=3: extends one more hop (AuthService -[CALLS]- TokenValidator -[CALLS]- EncryptionService). " +
-					"Response includes graph_traversal.paths showing each structural connection found. " +
-					"Increasing beyond 2 may surface more distant but less relevant context."),
+				mcp.Description("Graph traversal depth (default 2, max 4). action=search."),
 			),
-		),
-		s.handleRecall,
-	)
-
-	// get_episodes — chronological episode browser (distinct from recall search)
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_episodes",
-			mcp.WithDescription(
-				"Lists episodic memories in chronological order (newest first) with optional filters. "+
-					"Use this for auditing, reviewing recent decisions, or browsing by type/tags. "+
-					"For semantic search use recall(query=...) instead.",
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Max episodes to return. Default 20."),
-			),
+			// action=list params
 			mcp.WithNumber("since_days",
-				mcp.Description("Only return episodes from the last N days. 0 = no time filter."),
-			),
-			mcp.WithString("episode_type",
-				mcp.Description("Filter by type: decision, failure, pattern, rule_proposal (empty = all)."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Filter to episodes recorded by this agent (empty = all agents)."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Filter to episodes for this project (empty = all projects)."),
-			),
-			mcp.WithString("tags",
-				mcp.Description("Comma-separated tags to filter by, e.g. 'auth,breaking'."),
+				mcp.Description("Only episodes from last N days. action=list."),
 			),
 		),
-		s.handleGetEpisodes,
+		s.handleMemoryDispatch,
 	)
 
-	// check_plan_safety
-	s.addOrDefer(
-		mcp.NewTool(
-			"check_plan_safety",
-			mcp.WithDescription(
-				"Searches failure episodes for the closest match to the proposed plan (Reactive Interjection). "+
-					"Returns a Recovery Packet if a similar past failure is found — the agent decides relevance. "+
-					"Non-blocking: returns 'clear' if no failures recorded yet or on timeout. "+
-					"Prefer validate_plan(check_safety=true) instead — it runs this check inline.",
-			),
-			mcp.WithString("plan_description",
-				mcp.Required(),
-				mcp.Description("Natural language description of what you plan to do, e.g. 'modify auth_provider.dart login flow without fallback'."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Self-declared agent identifier (used to record the interjection event)."),
-			),
-			mcp.WithString("project_id",
-				mcp.Description("Repo context for scoping the failure search (empty = all projects)."),
-			),
-		),
-		s.handleCheckPlanSafety,
-	)
+	// Sprint 25: check_plan_safety absorbed into validate(phase="safety").
 
-	// get_rule_candidates
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_rule_candidates",
-			mcp.WithDescription(
-				"Returns failure episodes that have appeared ≥N times and have not yet been promoted to a dynamic_rule. "+
-					"Use this to close the feedback loop: review candidates, call upsert_rule() to enforce the pattern, "+
-					"then call mark_episode_promoted() to mark the episode as promoted.",
-			),
-		),
-		s.handleGetRuleCandidates,
-	)
+	// Sprint 25: get_rule_candidates absorbed into rules(action="candidates").
+	// Sprint 25: get_adrs absorbed into rules(action="list_adrs").
 
-	// get_adrs
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_adrs",
-			mcp.WithDescription(
-				"Returns Architectural Decision Records (ADRs) from the brain. "+
-					"ADRs are persistent cold-memory entries for significant design choices. "+
-					"When a file param is provided, returns only accepted ADRs whose linked_files patterns match. "+
-					"Requires brain.url to be configured in synapses.json.",
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to filter ADRs by linked_files patterns. Returns only accepted ADRs that match."),
-			),
-		),
-		s.handleGetADRs,
-	)
+	// Sprint 24: get_decision_log moved to MCP Resource synapses://decision-log
 
-	// get_decision_log
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_decision_log",
-			mcp.WithDescription(
-				"Returns the agent decision audit trail from the brain. "+
-					"Each entry records what action was taken, by which agent, in which SDLC phase, "+
-					"for which entity, and what the outcome was. "+
-					"Use to understand past agent behavior or audit decisions. "+
-					"Requires brain.url to be configured in synapses.json.",
-			),
-			mcp.WithString("entity",
-				mcp.Description("Optional entity name to filter decisions (empty = all recent)."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Maximum number of entries to return (default 20, max 100)."),
-			),
-		),
-		s.handleGetDecisionLog,
-	)
+	// Sprint 24: set_sdlc_phase, set_quality_mode absorbed into session_init params.
 
-	// set_sdlc_phase — D2: phase-aware context packets
-	s.addOrDefer(
-		mcp.NewTool(
-			"set_sdlc_phase",
-			mcp.WithDescription(
-				"Sets the active SDLC phase for this project. Phase-aware Context Packets adapt "+
-					"their sections to the current phase (e.g. testing gets test-focused sections, "+
-					"review gets quality gates). Requires brain.url to be configured in synapses.json. "+
-					"Valid phases: planning, implementation, testing, review, maintenance.",
-			),
-			mcp.WithString("phase",
-				mcp.Required(),
-				mcp.Description("SDLC phase to activate: planning | implementation | testing | review | maintenance"),
-			),
-		),
-		s.handleSetSDLCPhase,
-	)
-
-	// set_quality_mode — D2: quality gate control
-	s.addOrDefer(
-		mcp.NewTool(
-			"set_quality_mode",
-			mcp.WithDescription(
-				"Sets the active quality mode for this project. Controls how strict quality gates are: "+
-					"quick = prototype (just make it work), standard = unit tests required, "+
-					"enterprise = tests + docs + PR checklist. Requires brain.url to be configured in synapses.json.",
-			),
-			mcp.WithString("mode",
-				mcp.Required(),
-				mcp.Description("Quality mode: quick | standard | enterprise"),
-			),
-		),
-		s.handleSetQualityMode,
-	)
-
-	// plan_context — single-call pre-implementation gate (replaces the 3-step ritual:
-	// check_plan_safety → validate_plan → prepare_context(intent=plan)).
-	s.addOrDefer(
-		mcp.NewTool(
-			"plan_context",
-			mcp.WithDescription(
-				"Advanced compound tool — single-call pre-implementation gate. Runs three checks in one round-trip: "+
-					"(1) safety check — searches failure episodes for past matches (500ms cap); "+
-					"(2) validate_plan — checks proposed changes against architectural rules; "+
-					"(3) prepare_context(intent=plan) — scope assessment: files, interfaces, risk level. "+
-					"Returns a verdict: 'clear' | 'warnings' | 'violations' | 'blocked'. "+
-					"Most agents should use validate_plan(check_safety=true) + prepare_context(intent='plan') individually instead.",
-			),
-			mcp.WithString("target",
-				mcp.Required(),
-				mcp.Description("Entity name, file path, or concept to assess scope for (e.g. 'AuthService', 'internal/auth')."),
-			),
-			mcp.WithString("changes",
-				mcp.Description("JSON array of proposed changes for structural validation. Same format as validate_plan. Omit to skip rule checking."),
-			),
-			mcp.WithString("plan_description",
-				mcp.Description("Natural language description for the safety check (e.g. 'refactor auth to remove direct DB access'). Defaults to target if omitted."),
-			),
-			mcp.WithString("file",
-				mcp.Description("Optional file path suffix to disambiguate entity names."),
-			),
-			mcp.WithString("task_id",
-				mcp.Description("Optional task ID for relevance boosting in scope assessment."),
-			),
-		),
-		s.handlePlanContext,
-	)
+	// Sprint 25: plan_context absorbed into validate(phase="full").
 
 	// ── Graph Query ─────────────────────────────────────────────────────────
 
-	// query_graph — Sprint 16 #7: constrained DSL for direct graph node filtering.
-	s.addOrDefer(
-		mcp.NewTool(
-			"query_graph",
-			mcp.WithDescription(
-				"Constrained DSL for direct graph node filtering. Power user tool for "+
-					"cross-domain exploration when BFS traversal (get_context/get_impact) is too broad. "+
-					"Returns nodes matching ALL conditions (AND-only). Read-only, 1000-node cap, 500ms timeout. "+
-					"Syntax: NODES WHERE <field> <op> <value> [AND <field> <op> <value> ...]\n"+
-					"Fields: package, type, domain, file, name, exported, fanin, fanout\n"+
-					"Operators: = != > >= < <= (fanin/fanout support all; string fields support = and !=)\n"+
-					"Note: 'file' and 'package' use substring matching — NODES WHERE file=\"login.go\" matches \"internal/auth/login.go\"; NODES WHERE package=\"auth\" matches \"com.example.auth\" (Java).\n"+
-					"Examples:\n"+
-					"  NODES WHERE package=\"auth\" AND fanin > 5\n"+
-					"  NODES WHERE type=\"function\" AND exported=true AND fanout >= 3\n"+
-					"  NODES WHERE domain=\"infra\"\n"+
-					"  NODES WHERE fanout >= 10 AND fanin = 0\n"+
-					"  NODES WHERE file=\"login.go\"\n"+
-					"  NODES WHERE name=\"PaymentService\"",
-			),
-			mcp.WithString("query",
-				mcp.Required(),
-				mcp.Description(
-					"DSL query string. Must start with NODES WHERE. "+
-						"Example: NODES WHERE package=\"auth\" AND fanin > 5",
-				),
-			),
-		),
-		s.handleQueryGraph,
-	)
+	// Sprint 24: query_graph moved to MCP Resource synapses://query/{q}
 
 	// ── Knowledge Export ─────────────────────────────────────────────────────
 
-	s.addOrDefer(
-		mcp.NewTool(
-			"export_knowledge",
-			mcp.WithDescription(
-				"Exports all durable knowledge for this project to a portable JSON snapshot: "+
-					"memories (with version history, node anchors, and embedding vectors as base64), "+
-					"episodes, dynamic architectural rules, node annotations, and quality gaps. "+
-					"The export runs in a single read transaction — it is a consistent atomic snapshot "+
-					"even if concurrent writes occur. "+
-					"Use for backup, migration, or auditing accumulated agent knowledge. "+
-					"Graph nodes/edges are excluded (regenerable from source code). "+
-					"Transient data (tool_calls, sessions, web_cache) is also excluded.\n\n"+
-					"IMPORTANT: Projects with embedding vectors produce large exports (10K memories "+
-					"with embeddings ≈ 20 MiB). Always provide output_path for any real project — "+
-					"inline responses above 512 KiB are rejected to protect the agent context window.",
-			),
-			mcp.WithString("output_path",
-				mcp.Description(
-					"Absolute path to write the JSON export file. "+
-						"Recommended for any project with memories or embeddings. "+
-						"The file is written atomically (temp-file + rename) so it is never partially written. "+
-						"Parent directories are created automatically. "+
-						"Example: \"/home/user/backups/synapses-export-2026-03-25.json\"",
-				),
-			),
-			mcp.WithString("format",
-				mcp.Description("Output format. Only \"json\" is supported (default)."),
-			),
-		),
-		s.handleExportKnowledge,
-	)
-
-	// ── Benchmark / Evaluation ───────────────────────────────────────────────
-
-	s.addOrDefer(
-		mcp.NewTool(
-			"rank_candidates",
-			mcp.WithDescription(
-				"Embed a query and a list of candidate code snippets using the daemon's "+
-					"built-in embedder (nomic-embed), then return candidates ranked by cosine "+
-					"similarity. Used by the external benchmark binary for RepoBench-R evaluation. "+
-					"Returns a JSON array [{\"index\": N, \"score\": 0.92}, ...] sorted highest-first.",
-			),
-			mcp.WithString("query",
-				mcp.Description("Query text to embed (code context, last ~500 chars of current file)."),
-				mcp.Required(),
-			),
-			mcp.WithArray("candidates",
-				mcp.Description("Array of candidate code snippet strings to rank (max 50)."),
-				mcp.Required(),
-			),
-		),
-		s.handleRankCandidates,
-	)
-
-	s.addOrDefer(
-		mcp.NewTool(
-			"benchmark",
-			mcp.WithDescription(
-				"Run self-validating benchmarks against the current graph and store. "+
-					"Each scenario derives ground truth from the graph's own topology — "+
-					"no hardcoded IDs, portable across any indexed codebase. "+
-					"Measures precision, recall, F1, and latency for key operations: "+
-					"context completeness, search accuracy, impact coverage, graph reachability, "+
-					"FTS ranking quality, and memory recall. "+
-					"Use scenario=\"all\" (default) to run all 6 built-in scenarios, or "+
-					"pass a specific name: context-completeness, search-accuracy, impact-coverage, "+
-					"graph-reachability, fts-ranking, memory-recall.",
-			),
-			mcp.WithString("scenario",
-				mcp.Description("Scenario to run: 'all' (default), 'context-completeness', 'search-accuracy', "+
-					"'impact-coverage', 'graph-reachability', 'fts-ranking', 'memory-recall'. "+
-					"Names use hyphens, not underscores (underscore variants are auto-normalized)."),
-			),
-		),
-		s.handleBenchmark,
-	)
-
+	// Sprint 24: export_knowledge, rank_candidates, benchmark removed from MCP tools.
+	// export_knowledge → CLI command; rank_candidates/benchmark → internal only.
 }

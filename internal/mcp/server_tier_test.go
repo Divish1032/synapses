@@ -9,13 +9,9 @@ import (
 func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 	s := &Server{}
 	tools := []string{
-		"session_init", "prepare_context", "search", "validate_plan",
-		"verify_implementation", "remember", "recall", "create_plan",
-		"update_task", "end_session", "discover_tools", "annotate_node",
-		"get_context", "find_entity", "get_pending_tasks", "get_file_context",
-		"get_impact", "get_call_chain",
-		"get_working_state", "get_violations",
-		"get_events", "upsert_rule", "send_message",
+		"session_init", "search", "get_context", "get_file_context",
+		"get_impact", "validate", "memory", "end_session",
+		"tasks", "rules", "annotate", "lookup_docs",
 	}
 	for _, name := range tools {
 		if !s.toolInTier(name) {
@@ -25,12 +21,12 @@ func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 }
 
 // TestCoreTierTools_DesignDocSet verifies core categorization matches
-// the design doc's 12-tool set (used for discover_tools status labels).
+// the final 12-tool set after Sprint 24 consolidation.
 func TestCoreTierTools_DesignDocSet(t *testing.T) {
 	expected := []string{
-		"session_init", "prepare_context", "search", "validate_plan",
-		"verify_implementation", "remember", "recall", "create_plan",
-		"update_task", "end_session", "discover_tools", "annotate_node",
+		"session_init", "search", "get_context", "get_file_context",
+		"get_impact", "validate", "memory", "end_session",
+		"tasks", "rules", "annotate", "lookup_docs",
 	}
 	for _, name := range expected {
 		if !coreTierTools[name] {
