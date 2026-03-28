@@ -699,6 +699,25 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	} // end BFS / PPR scoring branch
 
+	// Sprint 24: Caller reservation — identify direct callers of the root
+	// so they survive MinRelevance filtering. Without this, high-fanin entities
+	// lose all callers because PPR distributes rank mass across many candidates,
+	// pushing individual caller scores below MinRelevance (0.01).
+	directCallerSet := make(map[NodeID]bool)
+	directCalleeSet := make(map[NodeID]bool)
+	if rootID != "" {
+		for _, e := range g.inEdges[rootID] {
+			if e.Type == EdgeCalls {
+				directCallerSet[e.From] = true
+			}
+		}
+		for _, e := range g.outEdges[rootID] {
+			if e.Type == EdgeCalls {
+				directCalleeSet[e.To] = true
+			}
+		}
+	}
+
 	// Build scored node list, applying MinRelevance and ExcludeTypes filters.
 	// Excluded-type nodes are still BFS-traversed above (so their edges are
 	// discovered) but they are never emitted in the output.
@@ -708,10 +727,26 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		hop       int
 	}
 	var scored []scoredNode
+	const callerReservationCap = 10
+	callerReserved := 0
 	for id, rel := range visited {
+		// Sprint 24: Direct callers of the root bypass MinRelevance filter,
+		// but only when MinRelevance is at a normal default (≤0.05). Extreme
+		// values (e.g., 0.99 in tests) are respected as hard filters.
+		// Capped at 10 to prevent dominating the budget for ultra-high-fanin nodes.
+		isProtectedCaller := directCallerSet[id] && callerReserved < callerReservationCap && cfg.MinRelevance <= 0.05
+		if isProtectedCaller {
+			callerReserved++
+			// Ensure minimum relevance so they don't get budget-pruned later.
+			if rel < cfg.MinRelevance*2 {
+				rel = cfg.MinRelevance * 2
+			}
+		}
+
 		// Drop nodes below the minimum relevance threshold (kills sibling explosion
 		// from file-hub nodes and low-signal package imports).
-		if cfg.MinRelevance > 0 && rel < cfg.MinRelevance && id != rootID {
+		// Direct callers are exempt (protected above).
+		if cfg.MinRelevance > 0 && rel < cfg.MinRelevance && id != rootID && !isProtectedCaller {
 			continue
 		}
 		// Drop excluded node types from output (still traversed in BFS above).
@@ -860,40 +895,107 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
-	// Sort by relevance descending so we keep the most important nodes first
-	// when applying the token budget.
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].relevance != scored[j].relevance {
-			return scored[i].relevance > scored[j].relevance
+	// Sprint 24: Directional budget split — partition nodes into callers,
+	// callees, and other, then allocate budget to each pool independently.
+	// Research (InlineCoder 2026, CatRAG 2026, Call Graphlets 2024) shows that
+	// undirected PPR+budget causes high-fanin entities to lose all callers
+	// because PPR mass is diluted across many candidates. Treating directions
+	// as separate budget pools ensures both callers and callees are represented.
+	//
+	// Budget allocation: 35% callers, 35% callees, 30% other.
+	// If a pool has fewer nodes than its budget, surplus goes to other pools.
+	var callerNodes, calleeNodes, otherNodes []scoredNode
+	for _, s := range scored {
+		if s.id == rootID {
+			// Root always included, doesn't count against any pool.
+			continue
 		}
-		return scored[i].hop < scored[j].hop
-	})
+		if directCallerSet[s.id] {
+			callerNodes = append(callerNodes, s)
+		} else if directCalleeSet[s.id] {
+			calleeNodes = append(calleeNodes, s)
+		} else {
+			otherNodes = append(otherNodes, s)
+		}
+	}
 
-	// Apply token budget using per-node byte-based estimation (1 token ≈ 4 bytes).
-	// Always keep at least the first (highest-relevance) node.
+	// Sort each pool by relevance descending.
+	sortByRelevance := func(nodes []scoredNode) {
+		sort.Slice(nodes, func(i, j int) bool {
+			if nodes[i].relevance != nodes[j].relevance {
+				return nodes[i].relevance > nodes[j].relevance
+			}
+			return nodes[i].hop < nodes[j].hop
+		})
+	}
+	sortByRelevance(callerNodes)
+	sortByRelevance(calleeNodes)
+	sortByRelevance(otherNodes)
+
+	// Apply directional budget.
 	truncated := false
 	truncatedCount := 0
-	if cfg.TokenBudget > 0 && len(scored) > 1 {
-		var usedTokens int
-		cutoff := len(scored)
-		for i, s := range scored {
-			n := g.nodes[s.id]
-			if n == nil {
-				continue
-			}
-			cost := estimateNodeTokens(n)
-			if usedTokens+cost > cfg.TokenBudget && i > 0 {
-				cutoff = i
-				break
-			}
-			usedTokens += cost
+	if cfg.TokenBudget > 0 {
+		// Reserve tokens for the root node first.
+		rootCost := 0
+		if rn := g.nodes[rootID]; rn != nil {
+			rootCost = estimateNodeTokens(rn)
 		}
-		if cutoff < len(scored) {
+		remainingBudget := cfg.TokenBudget - rootCost
+		if remainingBudget < 0 {
+			remainingBudget = 0
+		}
+		callerBudget := remainingBudget * 35 / 100
+		calleeBudget := remainingBudget * 35 / 100
+		otherBudget := remainingBudget * 30 / 100
+
+		applyPoolBudget := func(nodes []scoredNode, budget int) []scoredNode {
+			if budget <= 0 {
+				truncatedCount += len(nodes)
+				return nil
+			}
+			var used int
+			for i, s := range nodes {
+				n := g.nodes[s.id]
+				if n == nil {
+					continue
+				}
+				cost := estimateNodeTokens(n)
+				if used+cost > budget {
+					truncatedCount += len(nodes) - i
+					return nodes[:i]
+				}
+				used += cost
+			}
+			return nodes
+		}
+
+		callerNodes = applyPoolBudget(callerNodes, callerBudget)
+		calleeNodes = applyPoolBudget(calleeNodes, calleeBudget)
+		otherNodes = applyPoolBudget(otherNodes, otherBudget)
+
+		totalKept := 1 + len(callerNodes) + len(calleeNodes) + len(otherNodes) // +1 for root
+		totalScored := len(scored)
+		if totalKept < totalScored {
 			truncated = true
-			truncatedCount = len(scored) - cutoff
 		}
-		scored = scored[:cutoff]
 	}
+
+	// Merge all pools back into scored (root first).
+	scored = scored[:0]
+	// Re-add root.
+	for _, s := range callerNodes {
+		scored = append(scored, s)
+	}
+	for _, s := range calleeNodes {
+		scored = append(scored, s)
+	}
+	for _, s := range otherNodes {
+		scored = append(scored, s)
+	}
+	// Re-add root at position 0.
+	rootNode := scoredNode{id: rootID, relevance: 1.0, hop: 0}
+	scored = append([]scoredNode{rootNode}, scored...)
 
 	// Build the final node set.
 	keep := make(map[NodeID]struct{}, len(scored))

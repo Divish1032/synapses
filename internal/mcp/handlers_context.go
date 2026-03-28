@@ -340,8 +340,8 @@ func (s *Server) handleGetContext(
 	// the caller passes intent=. This mirrors prepare_context behaviour — same
 	// applyIntentCarveConfig path — so get_context and prepare_context produce
 	// identically-shaped traversals for the same intent.
-	// When intent is absent, DirectionBoost stays at the default (0.2, slight
-	// callee preference) set by DefaultCarveConfig.
+	// When intent is absent, DirectionBoost stays at 0.0 (neutral — callers
+	// and callees treated equally). Intent overrides set specific values.
 	if intent, ok := req.GetArguments()["intent"].(string); ok && intent != "" {
 		applyIntentCarveConfig(&cfg, intent)
 	}
