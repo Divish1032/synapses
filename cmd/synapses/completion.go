@@ -11,32 +11,18 @@ var completionCommands = []struct {
 	Name string
 	Desc string
 }{
-	{"init", "Initialize a project (index + daemon + agent wiring)"},
+	{"init", "Set up a project (index + daemon + agents)"},
 	{"start", "Start MCP server for a project"},
-	{"stop", "Stop the daemon gracefully"},
-	{"projects", "List registered projects"},
-	{"logs", "Show daemon logs"},
-	{"index", "Rebuild the code graph index"},
-	{"status", "Show project and daemon status"},
-	{"list", "List graph entities"},
-	{"reset", "Reset project index and cache"},
+	{"stop", "Stop the daemon"},
+	{"status", "Health check and project status"},
+	{"index", "Build or reset the code graph"},
+	{"config", "Read/write configuration"},
+	{"connect", "Connect an AI agent"},
+	{"update", "Self-update or rollback"},
+	{"uninstall", "Remove Synapses"},
+	{"dev", "Developer binary management"},
+	{"daemon", "Low-level daemon control"},
 	{"version", "Print version"},
-	{"brain", "Manage the AI enrichment sidecar"},
-	{"query", "Run a graph query"},
-	{"export", "Export the graph (JSON/DOT)"},
-	{"doctor", "Run a full health check"},
-	{"daemon", "Manage the background daemon"},
-	{"brief", "Generate a project brief"},
-	{"connect", "Connect to a running daemon"},
-	{"memory", "Manage episodic memory"},
-	{"allow-plugin", "Approve a plugin for use"},
-	{"approve", "Approve a pending action"},
-	{"benchmark", "Run benchmarks"},
-	{"config", "Read/write global or project configuration"},
-	{"dev", "Developer tools (link/unlink/status)"},
-	{"uninstall", "Remove synapses from a project"},
-	{"update", "Self-update the synapses binary"},
-	{"rollback", "Restore the previous binary version"},
 	{"completion", "Generate shell completion script"},
 	{"help", "Show help"},
 }
@@ -95,18 +81,23 @@ func bashCompletion() string {
 	for _, c := range daemonSubcommands {
 		daemonCmds = append(daemonCmds, c.Name)
 	}
+	var devCmds []string
+	for _, c := range devSubcommands {
+		devCmds = append(devCmds, c.Name)
+	}
 
 	return `# bash completion for synapses
 # Add to ~/.bashrc:  eval "$(synapses completion bash)"
 
 _synapses() {
-    local cur prev commands daemon_commands
+    local cur prev commands daemon_commands dev_commands
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     commands="` + strings.Join(cmds, " ") + `"
     daemon_commands="` + strings.Join(daemonCmds, " ") + `"
+    dev_commands="` + strings.Join(devCmds, " ") + `"
 
     case "${prev}" in
         synapses)
@@ -115,6 +106,10 @@ _synapses() {
             ;;
         daemon)
             COMPREPLY=( $(compgen -W "${daemon_commands}" -- "${cur}") )
+            return 0
+            ;;
+        dev)
+            COMPREPLY=( $(compgen -W "${dev_commands}" -- "${cur}") )
             return 0
             ;;
         --path|-path)
@@ -140,7 +135,7 @@ func zshCompletion() string {
 # Add to ~/.zshrc:  eval "$(synapses completion zsh)"
 
 _synapses() {
-    local -a commands daemon_commands
+    local -a commands daemon_commands dev_commands
 
     commands=(
 `)
@@ -152,6 +147,13 @@ _synapses() {
     daemon_commands=(
 `)
 	for _, c := range daemonSubcommands {
+		fmt.Fprintf(&b, "        '%s:%s'\n", c.Name, c.Desc)
+	}
+	b.WriteString(`    )
+
+    dev_commands=(
+`)
+	for _, c := range devSubcommands {
 		fmt.Fprintf(&b, "        '%s:%s'\n", c.Name, c.Desc)
 	}
 	b.WriteString(`    )
@@ -169,7 +171,10 @@ _synapses() {
                 daemon)
                     _describe -t daemon_commands 'daemon subcommand' daemon_commands
                     ;;
-                init|start|index|status|export|query)
+                dev)
+                    _describe -t dev_commands 'dev subcommand' dev_commands
+                    ;;
+                init|start|index|status|connect|uninstall)
                     _arguments '--path[Project path]:directory:_directories'
                     ;;
                 completion)

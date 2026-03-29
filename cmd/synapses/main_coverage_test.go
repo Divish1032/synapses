@@ -182,12 +182,12 @@ func TestCmdStatus_WithIndexCov(t *testing.T) {
 	}
 }
 
-// ── cmdDoctor ─────────────────────────────────────────────────────────────────
+// ── cmdStatus ─────────────────────────────────────────────────────────────────
 
 func TestCmdDoctor_WithIndexCov(t *testing.T) {
 	dir := indexedRepoDir2(t)
-	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor with index returned error: %v", err)
+	if err := cmdStatus([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdStatus with index returned error: %v", err)
 	}
 }
 
@@ -198,8 +198,8 @@ func TestCmdDoctor_WithBrainURLCov(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor with brain URL returned error: %v", err)
+	if err := cmdStatus([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdStatus with brain URL returned error: %v", err)
 	}
 }
 
@@ -209,8 +209,8 @@ func TestCmdDoctor_WithScoutURL(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor with scout URL returned error: %v", err)
+	if err := cmdStatus([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdStatus with scout URL returned error: %v", err)
 	}
 }
 
@@ -220,8 +220,8 @@ func TestCmdDoctor_WithPulseURL(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor with pulse URL returned error: %v", err)
+	if err := cmdStatus([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdStatus with pulse URL returned error: %v", err)
 	}
 }
 

@@ -70,7 +70,7 @@ func TestRun_List(t *testing.T) {
 
 func TestRun_Reset_NoIndex(t *testing.T) {
 	dir := t.TempDir()
-	err := run([]string{"reset", "--path", dir})
+	err := run([]string{"index", "--reset", "--path", dir})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRun_Reset_NoIndex(t *testing.T) {
 
 func TestRun_Reset_All(t *testing.T) {
 	// Should not fail even when cache dir is empty.
-	_ = run([]string{"reset", "--all"})
+	_ = run([]string{"index", "--reset", "--all"})
 }
 
 func TestRun_Daemon_NoArgs(t *testing.T) {
@@ -138,18 +138,18 @@ func TestRun_Export_BadFormat(t *testing.T) {
 }
 
 func TestRun_Setup_PrintsRedirect(t *testing.T) {
-	// setup now prints a redirect to "synapses init" and exits cleanly.
+	// setup has been removed — should return unknown command error.
 	err := run([]string{"setup"})
-	if err != nil {
-		t.Errorf("setup should not error: %v", err)
+	if err == nil {
+		t.Error("setup should return error (removed command)")
 	}
 }
 
 func TestRun_MCPSetup_PrintsRedirect(t *testing.T) {
-	// mcp-setup now prints a redirect to "synapses init" and exits cleanly.
+	// mcp-setup has been removed — should return unknown command error.
 	err := run([]string{"mcp-setup"})
-	if err != nil {
-		t.Errorf("mcp-setup should not error: %v", err)
+	if err == nil {
+		t.Error("mcp-setup should return error (removed command)")
 	}
 }
 
@@ -1022,8 +1022,8 @@ func TestApplyTSTypesIfEnabled_Disabled(t *testing.T) {
 func TestCmdBrief_NoIndex(t *testing.T) {
 	dir := t.TempDir()
 	err := run([]string{"brief", "--path", dir})
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+	if err == nil {
+		t.Error("brief should return error (removed command)")
 	}
 }
 
@@ -1165,7 +1165,7 @@ func TestCmdReset_WithIndex(t *testing.T) {
 	st, _ := store.Open(dbPath)
 	st.Close()
 
-	err := run([]string{"reset", "--path", dir})
+	err := run([]string{"index", "--reset", "--path", dir})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -1590,13 +1590,13 @@ func buildTestIndexedDir(t *testing.T) (string, *store.Store, *graph.Graph) {
 	return dir, st, g
 }
 
-// ── cmdDoctor with real index ─────────────────────────────────────────────────
+// ── cmdStatus with real index ─────────────────────────────────────────────────
 
 func TestCmdDoctor_WithStore(t *testing.T) {
 	dir, st, _ := buildTestIndexedDir(t)
 	st.Close()
-	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor: %v", err)
+	if err := cmdStatus([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdStatus: %v", err)
 	}
 }
 
@@ -1617,8 +1617,8 @@ func TestCmdDoctor_WithBrainURL(t *testing.T) {
 	data, _ := json.Marshal(cfg)
 	os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644)
 
-	if err := cmdDoctor([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdDoctor with brain/pulse: %v", err)
+	if err := cmdStatus([]string{"--path", dir}); err != nil {
+		t.Errorf("cmdStatus with brain/pulse: %v", err)
 	}
 }
 

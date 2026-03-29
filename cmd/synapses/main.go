@@ -83,79 +83,40 @@ func run(args []string) error {
 	}
 
 	switch args[0] {
+	// ── Core commands ────────────────────────────────────────────────────
 	case "init":
 		return cmdInit(args[1:])
 	case "start":
 		return cmdStartProxy(args[1:])
 	case "stop":
 		return cmdStop(args[1:])
-	case "projects":
-		return cmdProjects(args[1:])
-	case "logs":
-		return cmdLogs(args[1:])
-	case "index":
-		return cmdIndex(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
-	case "list":
-		return cmdList(args[1:])
-	case "reset":
-		return cmdReset(args[1:])
+	case "index":
+		return cmdIndex(args[1:])
+	case "config":
+		return cmdConfig(args[1:])
+	case "connect":
+		return cmdConnect(args[1:])
+	case "update":
+		return cmdUpdate(args[1:])
+	case "uninstall":
+		return cmdUninstall(args[1:])
 	case "version", "--version", "-v":
 		fmt.Printf("synapses %s\n", version)
 		return nil
-	case "brain":
-		return cmdBrain(args[1:])
-	case "setup":
-		// Replaced by "synapses init". Print redirect.
-		fmt.Println("'synapses setup' has been replaced by 'synapses init'.")
-		fmt.Println("Run: synapses init --path <dir>")
-		return nil
-	case "mcp-setup":
-		// Replaced by "synapses init". Print redirect.
-		fmt.Println("'synapses mcp-setup' has been replaced by 'synapses init'.")
-		fmt.Println("Run: synapses init --path <dir>")
-		return nil
-	case "query":
-		return cmdQuery(args[1:])
-	case "export":
-		return cmdExport(args[1:])
-	case "doctor":
-		return cmdDoctor(args[1:])
-	case "daemon":
-		return cmdDaemon(args[1:])
-	case "brief":
-		return cmdBrief(args[1:])
-	case "onboard":
-		// Replaced by "synapses init". Print redirect.
-		fmt.Println("'synapses onboard' has been replaced by 'synapses init'.")
-		fmt.Println("Run: synapses init --path <dir>")
-		return nil
-	case "connect":
-		return cmdConnect(args[1:])
-	case "memory":
-		return cmdMemory(args[1:])
-	case "allow-plugin":
-		return cmdAllowPlugin(args[1:])
-	case "approve":
-		return cmdApprove(args[1:])
-	case "benchmark":
-		return cmdBenchmark(args[1:])
-	case "config":
-		return cmdConfig(args[1:])
-	case "dev":
-		return cmdDev(args[1:])
-	case "uninstall":
-		return cmdUninstall(args[1:])
-	case "update":
-		return cmdUpdate(args[1:])
-	case "rollback":
-		return cmdRollback(args[1:])
 	case "completion":
 		return cmdCompletion(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
+
+	// ── Subcommand groups ────────────────────────────────────────────────
+	case "dev":
+		return cmdDev(args[1:])
+	case "daemon":
+		return cmdDaemon(args[1:])
+
 	default:
 		return fmt.Errorf("unknown command %q — run 'synapses help'", args[0])
 	}
@@ -608,8 +569,15 @@ func cmdIndex(args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
 	forceReindex := fs.Bool("reindex", false, "Force a full re-index even if cache is fresh")
+	reset := fs.Bool("reset", false, "Remove cached index for this project")
+	resetAll := fs.Bool("all", false, "Remove ALL project indexes (use with --reset)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Handle --reset
+	if *reset || *resetAll {
+		return indexReset(*repoPath, *resetAll)
 	}
 
 	absPath, err := filepath.Abs(*repoPath)
@@ -697,6 +665,51 @@ func cmdIndex(args []string) error {
 		daemonStart(allSidecars, true) //nolint:errcheck
 	}
 
+	return nil
+}
+
+// indexReset removes cached index for a project or all projects.
+func indexReset(repoPath string, all bool) error {
+	if all {
+		stats, _ := store.ScanAll()
+		synapsesCache, err := store.CacheDir()
+		if err != nil {
+			return fmt.Errorf("locate cache dir: %w", err)
+		}
+		if err := os.RemoveAll(synapsesCache); err != nil {
+			return fmt.Errorf("remove cache dir: %w", err)
+		}
+		if len(stats) == 0 {
+			fmt.Println("No indexes to remove.")
+		} else {
+			for _, s := range stats {
+				root := s.RepoRoot
+				if root == "" {
+					root = s.RepoID
+				}
+				fmt.Printf("  removed  %s\n", root)
+			}
+			fmt.Printf("\n%d index(es) removed from %s\n", len(stats), synapsesCache)
+		}
+		return nil
+	}
+
+	absPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve path: %w", err)
+	}
+	dbPath, err := store.DefaultPath(absPath)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("No index found for %s\n", absPath)
+			return nil
+		}
+		return fmt.Errorf("remove index: %w", err)
+	}
+	fmt.Printf("Index removed: %s\n", dbPath)
 	return nil
 }
 
@@ -816,119 +829,18 @@ func cmdLogs(args []string) error {
 	return nil
 }
 
-// cmdStatus loads the cached graph (without re-parsing) and prints statistics.
-// If the singleton daemon is running, it first queries /api/admin/health to
-// surface live indexing progress before falling back to the SQLite snapshot.
+// cmdStatus is the unified health check. Default: full system + project health.
+// With --all: list all indexed projects.
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
+	all := fs.Bool("all", false, "List all indexed projects")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	absPath, err := filepath.Abs(*repoPath)
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
-	}
-
-	// If the daemon is running and a reindex is active, show live progress
-	// before the cached stats. We do NOT return early — the caller also sees
-	// the last-known index snapshot so they have full context (e.g. when
-	// re-indexing a previously indexed repo).
-	if IsSingletonDaemonRunning() {
-		client := &http.Client{Timeout: 2 * time.Second}
-		resp, httpErr := client.Get("http://" + DaemonHTTPAddr + "/api/admin/health")
-		if httpErr == nil {
-			var health struct {
-				IndexingProgress IndexingSnapshot `json:"indexing_progress"`
-			}
-			if jsonErr := json.NewDecoder(resp.Body).Decode(&health); jsonErr == nil {
-				p := health.IndexingProgress
-				if p.State == "indexing" {
-					fmt.Printf("indexing: %d/%d files (%d%%)\n\n", p.Done, p.Total, p.Pct)
-					// Fall through to show last-known cached stats below.
-				}
-			}
-			resp.Body.Close()
-		}
-	}
-
-	dbPath, err := store.DefaultPath(absPath)
-	if err != nil {
-		return err
-	}
-
-	st, err := store.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("open store: %w", err)
-	}
-	defer st.Close()
-
-	savedAt, err := st.SavedAt()
-	if err != nil {
-		return err
-	}
-	if savedAt.IsZero() {
-		fmt.Println("No index found. Run: synapses index --path", absPath)
-		return nil
-	}
-
-	g, err := st.LoadGraph()
-	if err != nil {
-		return fmt.Errorf("load graph: %w", err)
-	}
-	if g == nil {
-		fmt.Println("No index found. Run: synapses index --path", absPath)
-		return nil
-	}
-
-	identity := g.ProjectIdentity()
-	edgeCounts := g.EdgeCountsByType()
-
-	fileCount, _ := st.CountIndexedFiles()
-
-	// Load static + dynamic rules and run a quick violation check.
-	cfg, _ := config.Load(absPath)
-	staticRuleCount := 0
-	dynamicRuleCount := 0
-	violationCount := 0
-	if cfg != nil {
-		staticRuleCount = len(cfg.Rules)
-		dynamicRules, _ := st.LoadDynamicRules()
-		dynamicRuleCount = len(dynamicRules)
-		cfg.Rules = append(cfg.Rules, dynamicRules...)
-		violationCount = len(cfg.CheckViolations(g))
-	}
-
-	fmt.Printf("Index last updated: %s\n\n", savedAt.Local().Format("2006-01-02 15:04:05"))
-	printSummaryTable(identity, 0, edgeCounts, fileCount, staticRuleCount, dynamicRuleCount, violationCount)
-
-	// Tool usage: last 7 days, top 10.
-	if stats, err := st.ToolUsageStats(7, 10); err == nil && len(stats) > 0 {
-		fmt.Printf("\n── Top tools (last 7 days) ──────\n")
-		for _, s := range stats {
-			bar := ""
-			for i := 0; i < int(s.CallCount/5)+1 && i < 20; i++ {
-				bar += "▪"
-			}
-			errSuffix := ""
-			if s.ErrorRate > 0 {
-				errSuffix = fmt.Sprintf("  err=%.0f%%", s.ErrorRate*100)
-			}
-			fmt.Printf("  %-30s %4d calls  %5.0fms avg  %s%s\n",
-				s.ToolName, s.CallCount, s.AvgMs, bar, errSuffix)
-		}
-	}
-	return nil
-}
-
-// cmdDoctor runs a quick health check of all Synapses components and prints a
-// formatted status table: graph index freshness, daemon status, and brain/doc-cache state.
-func cmdDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Path to the repository root")
-	if err := fs.Parse(args); err != nil {
-		return err
+	if *all {
+		return statusListAll()
 	}
 
 	absPath, err := filepath.Abs(*repoPath)
@@ -942,15 +854,15 @@ func cmdDoctor(args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	fmt.Println("synapses doctor — Health Check")
+	fmt.Printf("Synapses %s — Status\n", version)
 	fmt.Println()
 	fmt.Printf("%-16s%-16s%s\n", "Component", "Status", "Details")
-	fmt.Printf("%-16s%-16s%s\n", "---------", "------", "-------")
+	fmt.Printf("%-16s%-16s%s\n", "─────────", "──────", "───────")
 
 	// ── App ─────────────────────────────────────────────────────────────────
 	appPath := appBundledBinaryPath()
 	if appPath != "" {
-		appDir := filepath.Dir(filepath.Dir(filepath.Dir(appPath))) // up from Resources
+		appDir := filepath.Dir(filepath.Dir(filepath.Dir(appPath)))
 		fmt.Printf("%-16s%-16s%s\n", "App", "installed", appDir)
 	} else {
 		fmt.Printf("%-16s%-16s%s\n", "App", "not found", "(desktop app not installed)")
@@ -970,7 +882,6 @@ func cmdDoctor(args []string) error {
 
 	// ── CLI in PATH ─────────────────────────────────────────────────────────
 	if whichPath, err := exec.LookPath("synapses"); err == nil {
-		// Check if it's our binary (symlink to ~/.synapses/bin/)
 		resolved, _ := filepath.EvalSymlinks(whichPath)
 		if resolved == cliBin || whichPath == cliBin {
 			fmt.Printf("%-16s%-16s%s\n", "CLI in PATH", "ok", fmt.Sprintf("%s → %s", whichPath, cliBin))
@@ -1026,11 +937,11 @@ func cmdDoctor(args []string) error {
 				fmt.Printf("%-16s%-16s%s\n", "Graph Index", "empty", "index exists but contains no data")
 			} else {
 				ago := time.Since(stat.SavedAt).Truncate(time.Second)
-				status := "fresh"
+				indexStatus := "fresh"
 				if ago > 24*time.Hour {
-					status = "stale"
+					indexStatus = "stale"
 				}
-				fmt.Printf("%-16s%-16s%s\n", "Graph Index", status,
+				fmt.Printf("%-16s%-16s%s\n", "Graph Index", indexStatus,
 					fmt.Sprintf("%s nodes, %s edges (indexed %s ago)",
 						formatCount(stat.NodeCount), formatCount(stat.EdgeCount), formatDuration(ago)))
 			}
@@ -1049,20 +960,56 @@ func cmdDoctor(args []string) error {
 	if cfg.Brain.Enabled {
 		fmt.Printf("%-16s%-16s%s\n", "Brain", "enabled", fmt.Sprintf("in-process (ollama: %s)", cfg.Brain.OllamaURL))
 	} else {
-		fmt.Printf("%-16s%-16s%s\n", "Brain", "disabled", "(set brain.enabled:true in synapses.json to activate)")
+		fmt.Printf("%-16s%-16s%s\n", "Brain", "disabled", "(set brain.enabled:true in config to activate)")
 	}
 
 	// ── Doc Cache ────────────────────────────────────────────────────────────
-	fmt.Printf("%-16s%-16s%s\n", "Doc Cache", "built-in", "version-pinned Go package docs via webcache (no sidecar needed)")
+	fmt.Printf("%-16s%-16s%s\n", "Doc Cache", "built-in", "version-pinned Go package docs via webcache")
 
 	// ── Pulse ────────────────────────────────────────────────────────────────
 	if cfg.Pulse.URL != "" {
-		status, detail := pingHealth(cfg.Pulse.URL + "/v1/health")
-		fmt.Printf("%-16s%-16s%s\n", "Pulse", status, detail)
+		pulseStatus, detail := pingHealth(cfg.Pulse.URL + "/v1/health")
+		fmt.Printf("%-16s%-16s%s\n", "Pulse", pulseStatus, detail)
 	} else {
-		fmt.Printf("%-16s%-16s%s\n", "Pulse", "not configured", "(no pulse.url in synapses.json)")
+		fmt.Printf("%-16s%-16s%s\n", "Pulse", "not configured", "(set pulse.url in config to activate)")
 	}
 
+	return nil
+}
+
+// statusListAll lists all indexed projects (replaces the old `list` command).
+func statusListAll() error {
+	stats, err := store.ScanAll()
+	if err != nil {
+		return fmt.Errorf("scan projects: %w", err)
+	}
+
+	if len(stats) == 0 {
+		fmt.Println("No indexed projects found. Run: synapses init")
+		return nil
+	}
+
+	fmt.Printf("%-30s  %6s  %6s  %6s  %s\n", "PROJECT", "FILES", "NODES", "EDGES", "INDEXED AT")
+	fmt.Printf("%-30s  %6s  %6s  %6s  %s\n",
+		"──────────────────────────────",
+		"──────", "──────", "──────",
+		"───────────────────────")
+	for _, s := range stats {
+		ts := "never"
+		if !s.SavedAt.IsZero() {
+			ts = s.SavedAt.Local().Format("2006-01-02 15:04:05")
+		}
+		name := s.RepoID
+		if len(name) > 30 {
+			name = name[:27] + "..."
+		}
+		fmt.Printf("%-30s  %6d  %6d  %6d  %s\n",
+			name, s.FileCount, s.NodeCount, s.EdgeCount, ts)
+		if s.RepoRoot != "" {
+			fmt.Printf("  %s\n", s.RepoRoot)
+		}
+	}
+	fmt.Printf("\n%d project(s) indexed\n", len(stats))
 	return nil
 }
 
@@ -2971,55 +2918,28 @@ func cmdBrief(args []string) error {
 }
 
 func printUsage() {
-	fmt.Printf(`Synapses %s — graph-based context manager for AI coding agents
+	fmt.Printf(`Synapses %s — code intelligence for AI agents
 
 USAGE:
   synapses <command> [flags]
 
-GETTING STARTED:
-  synapses init                     Set up everything: index, daemon, agents
-  synapses init --path /project     Target a specific directory
-  synapses init --yes               Non-interactive (CI/scripting)
+COMMANDS:
+  init      [--path <dir>] [--yes]           Set up a project (index + daemon + agents)
+  start     [--path <dir>]                   Start MCP server for a project
+  stop                                       Stop the daemon
+  status    [--path <dir>] [--all]            Health check and project status
+  index     [--path <dir>] [--reset] [--all]  Build or reset the code graph
+  config    [--show] [--global] [key] [val]   Read/write configuration
+  connect   [--agent <name>] [--path <dir>]   Connect an AI agent
+  update    [--check] [--rollback]            Self-update or rollback
+  uninstall [--path <dir>] [--global]         Remove Synapses
 
-DAEMON:
-  start     -path <dir>   Start daemon and register project (MCP proxy)
-  stop                    Stop the daemon
-  projects                List registered projects
-  logs      [-n N]        Tail daemon log
-  status    -path <dir>   Index stats and daemon health
-  doctor    -path <dir>   Full health check
-
-INDEX:
-  index     -path <dir>   Index/reindex a project
-  list                    List all indexed projects
-  reset     -path <dir>   Remove cached index
-  reset     -all          Remove ALL cached indexes
-
-AGENTS:
-  connect   --agent <name> --path <dir>   Write per-agent MCP config
-
-UPDATE:
-  update               Check for updates and install
-  update    --check    Check only, don't download
-
-CLEANUP:
-  uninstall -path <dir>       Remove Synapses from a project (agent configs, index)
-  uninstall --global          Full system removal (daemon, data, binary)
-  uninstall --keep-data       Keep indexes, remove everything else
-  uninstall --keep-binary     Keep the binary, remove everything else
-
-CONFIG:
-  config    --show          Show merged config with sources
-  config    --global <k> <v>  Set a global default
-  config    <key> <value>   Set a project-level config value
-
-DEVELOPER:
-  dev link   <path>         Use a custom binary (from source build)
-  dev unlink                Restore the app-bundled binary
-  dev status                Show which binary is active
+SUBCOMMANDS:
+  dev       link|unlink|status               Developer binary management
+  daemon    serve|install|uninstall|logs      Low-level daemon control
 
 OTHER:
-  query, brief, export, benchmark, memory, version, help
+  version, completion <bash|zsh|fish>, help
 `, version)
 }
 

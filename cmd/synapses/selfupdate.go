@@ -225,8 +225,13 @@ func checkForUpdate() *UpdateState {
 func cmdUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	checkOnly := fs.Bool("check", false, "Only check for updates, don't download")
+	rollback := fs.Bool("rollback", false, "Restore the previous binary version")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *rollback {
+		return cmdRollback(nil)
 	}
 
 	if version == "dev" {
