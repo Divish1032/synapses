@@ -945,6 +945,70 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("%-16s%-16s%s\n", "Component", "Status", "Details")
 	fmt.Printf("%-16s%-16s%s\n", "---------", "------", "-------")
 
+	// ── App ─────────────────────────────────────────────────────────────────
+	appPath := appBundledBinaryPath()
+	if appPath != "" {
+		appDir := filepath.Dir(filepath.Dir(filepath.Dir(appPath))) // up from Resources
+		fmt.Printf("%-16s%-16s%s\n", "App", "installed", appDir)
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "App", "not found", "(desktop app not installed)")
+	}
+
+	// ── CLI Binary ──────────────────────────────────────────────────────────
+	cliBin := filepath.Join(synapsesDataDir("bin"), "synapses")
+	if _, statErr := os.Stat(cliBin); statErr == nil {
+		if out, err := exec.Command(cliBin, "version").Output(); err == nil {
+			fmt.Printf("%-16s%-16s%s\n", "CLI Binary", "ok", fmt.Sprintf("%s %s", cliBin, strings.TrimSpace(string(out))))
+		} else {
+			fmt.Printf("%-16s%-16s%s\n", "CLI Binary", "error", fmt.Sprintf("%s (cannot get version)", cliBin))
+		}
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "CLI Binary", "missing", fmt.Sprintf("%s not found", cliBin))
+	}
+
+	// ── CLI in PATH ─────────────────────────────────────────────────────────
+	if whichPath, err := exec.LookPath("synapses"); err == nil {
+		// Check if it's our binary (symlink to ~/.synapses/bin/)
+		resolved, _ := filepath.EvalSymlinks(whichPath)
+		if resolved == cliBin || whichPath == cliBin {
+			fmt.Printf("%-16s%-16s%s\n", "CLI in PATH", "ok", fmt.Sprintf("%s → %s", whichPath, cliBin))
+		} else {
+			fmt.Printf("%-16s%-16s%s\n", "CLI in PATH", "ok", whichPath)
+		}
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "CLI in PATH", "not in PATH", "add ~/.synapses/bin to PATH or create /usr/local/bin/synapses symlink")
+	}
+
+	// ── Global Config ───────────────────────────────────────────────────────
+	gc, gcErr := config.LoadGlobalConfig()
+	if gcErr != nil {
+		fmt.Printf("%-16s%-16s%s\n", "Global Config", "parse error", gcErr.Error())
+	} else if gc != nil {
+		details := []string{}
+		if gc.Brain.Enabled {
+			details = append(details, "brain: enabled")
+		}
+		if gc.Pulse.URL != "" {
+			details = append(details, "pulse: on")
+		}
+		if gc.Embeddings != "" {
+			details = append(details, fmt.Sprintf("embeddings: %s", gc.Embeddings))
+		}
+		globalPath, _ := config.GlobalConfigPath()
+		detail := globalPath
+		if len(details) > 0 {
+			detail += fmt.Sprintf(" (%s)", strings.Join(details, ", "))
+		}
+		fmt.Printf("%-16s%-16s%s\n", "Global Config", "loaded", detail)
+	} else {
+		fmt.Printf("%-16s%-16s%s\n", "Global Config", "not found", "(optional — create with 'synapses config --global')")
+	}
+
+	// ── Dev Link ────────────────────────────────────────────────────────────
+	if devState, err := readDevLinkState(); err == nil && devState.Linked {
+		fmt.Printf("%-16s%-16s%s\n", "Dev Link", "active", fmt.Sprintf("custom binary from %s", devState.Source))
+	}
+
 	// ── Graph Index ──────────────────────────────────────────────────────────
 	dbPath, dbErr := store.DefaultPath(absPath)
 	if dbErr != nil {
