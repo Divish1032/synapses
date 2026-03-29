@@ -199,54 +199,23 @@ Synapses registers **12 MCP tools** (consolidated) and **8 MCP resources**. Each
 
 All commands use the syntax `synapses <command> [flags]`.
 
-### Daemon Commands
+### Commands
 | Command | Flags | Description |
 |---------|-------|-------------|
-| `start` | `-path` | Ensure daemon is running and register project (proxy mode). Indexes the codebase and serves MCP. |
-| `stop` | — | Stop the singleton daemon. |
-| `daemon install` | — | Register daemon as system service (launchd/systemd) with socket activation. Auto-restarts on crash, port stays open during restart. **Run automatically by `init`.** |
-| `daemon uninstall` | — | Remove system service registration. |
-| `daemon wait` | `--timeout` | Block until daemon is healthy (default 30s). |
-| `projects` | — | List projects registered with the running daemon. |
-| `logs` | `-n` | Tail the daemon log (`~/.synapses/daemon.log`). |
-| `status` | `-path` | Show index statistics and daemon health. |
-| `doctor` | `-path` | Full health check (index, brain, scout). |
+| `init` | `--path`, `--yes`, `--agents`, `--no-agents` | Set up a project: index, daemon, agents |
+| `start` | `--path` | Start MCP server for a project (used by agents) |
+| `stop` | — | Stop the daemon |
+| `status` | `--path`, `--all` | Health check and project status |
+| `index` | `--path`, `--reindex`, `--reset`, `--all` | Build or reset the code graph |
+| `config` | `--show`, `--global`, `--path` | Read/write configuration |
+| `connect` | `--agent`, `--path` | Connect an AI agent |
+| `update` | `--check`, `--rollback` | Self-update or rollback |
+| `remove` | `--path`, `--yes`, `--keep-data` | Remove Synapses from a project |
+| `uninstall` | `--yes`, `--keep-data`, `--keep-binary` | Remove Synapses from the system |
+| `dev` | `link\|unlink\|status` | Developer binary management |
+| `daemon` | `serve\|install\|uninstall\|logs` | Low-level daemon control |
 
-### Index Commands
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `index` | `-path`, `-reindex` | Parse and cache graph, then exit (no server). |
-| `list` | — | Scan cache dir, print summary of all indexed projects. |
-| `reset` | `-path`, `-all` | Remove SQLite cache for one project or all projects. |
-
-### Setup Commands
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `init` | `-path`, `--yes`/`-y`, `--agents`, `--no-agents` | Interactive 4-step wizard: project setup, indexing, daemon start, agent connection. The single golden-path command for new users. |
-| `connect` | `--agent` (claude/cursor/windsurf/zed/antigravity), `-path` | Write per-agent IDE configs (MCP config + agent rules file). Use to connect additional agents after `init`. |
-| `uninstall` | `-path`, `--yes`/`-y`, `--global`, `--keep-data`, `--keep-binary` | Complete removal wizard — the inverse of `init`. Stops daemon, removes indexes, cleans agent configs. Use `--global` for full system cleanup including `~/.synapses` and the binary. |
-
-### Security Commands
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `approve` | `--all` / `-a` | Review and approve pending cross-project write requests. Agents that attempt a broadcast `send_message` or cross-project `remember` are gated until a human runs this command. `--all` approves all non-interactively. |
-
-### Update Commands
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `update` | `--check` | Check for a new release and print a diff. Without `--check`, downloads and installs the latest binary. |
-
-### Other Commands
-| Command | Flags | Description |
-|---------|-------|-------------|
-| `query` | `-path`, `-entity` | JSON lookup of entity (read-only). |
-| `brief` | `-path` | Concise session brief. |
-| `export` | `-path`, `-entity`, `-format` (dot/mermaid/graphml), `-depth` | Export graph to stdout. |
-| `memory` | — | Session memory subcommands (`list`, `get`, `delete`). |
-| `allow-plugin` | — | Add a plugin to the allowlist. |
-| `benchmark` | — | Run performance benchmarks (graph BFS, FTS, embeddings). |
-| `version` | — | Print version. Shows update hint if a newer release is cached. |
-| `help` | — | Print usage. |
+See [CLI Reference](https://synapsesos.com/docs/v1/reference/cli) for detailed documentation of all commands and flags.
 
 ---
 
