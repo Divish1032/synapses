@@ -18,9 +18,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/charmbracelet/huh"
 
@@ -157,13 +159,14 @@ func uninstallGlobal(interactive, keepData, keepBinary bool) error {
 		fmt.Println()
 	}
 
-	// 1. Stop daemon.
+	// 1. Stop daemon and kill all synapses processes.
 	fmt.Println("  \033[1m[1/5] Stopping daemon\033[0m")
 	if err := cmdStop(nil); err != nil {
 		fmt.Printf("  \033[33m!\033[0m %v\n", err)
 	} else {
 		fmt.Printf("  \033[32m✓\033[0m Daemon stopped\n")
 	}
+	killAllSynapsesProcesses()
 	fmt.Println()
 
 	// 2. Remove system services (launchd / systemd).
@@ -175,8 +178,17 @@ func uninstallGlobal(interactive, keepData, keepBinary bool) error {
 	}
 	fmt.Println()
 
-	// 3. Remove all cached indexes.
-	fmt.Println("  \033[1m[3/5] Removing cached indexes\033[0m")
+	// 3. Remove binary (before ~/.synapses so install.sh binaries are removed cleanly).
+	fmt.Println("  \033[1m[3/5] Removing binary\033[0m")
+	if keepBinary {
+		fmt.Println("  Skipped (--keep-binary)")
+	} else {
+		removeBinary()
+	}
+	fmt.Println()
+
+	// 4. Remove all cached indexes.
+	fmt.Println("  \033[1m[4/5] Removing cached indexes\033[0m")
 	if keepData {
 		fmt.Println("  Skipped (--keep-data)")
 	} else {
@@ -202,8 +214,8 @@ func uninstallGlobal(interactive, keepData, keepBinary bool) error {
 	}
 	fmt.Println()
 
-	// 4. Remove ~/.synapses (logs, models, pids, context, prompts, skills, projects.json).
-	fmt.Println("  \033[1m[4/5] Removing ~/.synapses\033[0m")
+	// 5. Remove ~/.synapses (logs, models, pids, context, prompts, skills, projects.json).
+	fmt.Println("  \033[1m[5/5] Removing ~/.synapses\033[0m")
 	if _, err := os.Stat(synHome); err == nil {
 		// List what's being removed for transparency.
 		entries, _ := os.ReadDir(synHome)
@@ -232,15 +244,6 @@ func uninstallGlobal(interactive, keepData, keepBinary bool) error {
 		}
 	} else {
 		fmt.Println("  ~/.synapses does not exist — nothing to remove")
-	}
-	fmt.Println()
-
-	// 5. Remove binary.
-	fmt.Println("  \033[1m[5/5] Removing binary\033[0m")
-	if keepBinary {
-		fmt.Println("  Skipped (--keep-binary)")
-	} else {
-		removeBinary()
 	}
 	fmt.Println()
 
@@ -660,7 +663,7 @@ func removeBinary() {
 		fmt.Printf("  \033[33m!\033[0m Cannot determine binary path: %v\n", err)
 		return
 	}
-	// Resolve symlinks to find the actual binary.
+	// Resolve symlinks to find the actual binary (e.g. Homebrew Cellar path).
 	resolved, err := filepath.EvalSymlinks(self)
 	if err == nil {
 		self = resolved
@@ -673,11 +676,115 @@ func removeBinary() {
 		removeAppBundle()
 	}
 
-	if err := os.Remove(self); err != nil {
-		fmt.Printf("  \033[33m!\033[0m Cannot remove binary: %v\n", err)
-		fmt.Printf("  You may need to remove it manually: sudo rm %s\n", self)
+	// Detect Homebrew install and use brew uninstall for clean removal.
+	if isHomebrewInstall(self) {
+		fmt.Println("  Detected Homebrew installation")
+		if out, err := exec.Command("brew", "uninstall", "--force", "synapses").CombinedOutput(); err != nil {
+			fmt.Printf("  \033[33m!\033[0m brew uninstall failed: %s\n", strings.TrimSpace(string(out)))
+		} else {
+			fmt.Printf("  \033[32m✓\033[0m brew uninstall synapses\n")
+		}
+		// Also untap if present.
+		if out, err := exec.Command("brew", "untap", "synapsesos/tap").CombinedOutput(); err == nil {
+			fmt.Printf("  \033[32m✓\033[0m brew untap synapsesos/tap\n")
+		} else {
+			_ = out // tap may not exist, that's fine
+		}
 	} else {
-		fmt.Printf("  \033[32m✓\033[0m Binary removed\n")
+		// Direct removal for non-Homebrew installs.
+		if err := os.Remove(self); err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Printf("  \033[33m!\033[0m Cannot remove binary: %v\n", err)
+				fmt.Printf("  You may need to remove it manually: sudo rm %s\n", self)
+			}
+		} else {
+			fmt.Printf("  \033[32m✓\033[0m Binary removed\n")
+		}
+	}
+
+	// Sweep all known locations for stale copies.
+	removeStaleBindaries(self)
+}
+
+// isHomebrewInstall checks if the binary path is inside a Homebrew Cellar.
+func isHomebrewInstall(binPath string) bool {
+	return strings.Contains(binPath, "/Cellar/synapses/") ||
+		strings.Contains(binPath, "/homebrew/")
+}
+
+// removeStaleBindaries scans well-known paths for leftover synapses binaries
+// and removes them. This catches cases where users installed via multiple
+// methods (e.g. brew + go install) or where a symlink points to a removed target.
+func removeStaleBindaries(alreadyRemoved string) {
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".synapses", "bin", "synapses"),
+		filepath.Join(home, "go", "bin", "synapses"),
+		"/usr/local/bin/synapses",
+	}
+	// Also check what `which` finds (may be different from os.Executable).
+	if out, err := exec.Command("which", "synapses").Output(); err == nil {
+		found := strings.TrimSpace(string(out))
+		if found != "" {
+			candidates = append(candidates, found)
+		}
+	}
+
+	seen := map[string]bool{alreadyRemoved: true}
+	for _, p := range candidates {
+		// Resolve to canonical path for dedup.
+		canonical := p
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			canonical = resolved
+		}
+		if seen[canonical] || seen[p] {
+			continue
+		}
+		seen[canonical] = true
+		seen[p] = true
+
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue // doesn't exist
+		}
+		// Remove dangling symlinks.
+		if fi.Mode()&os.ModeSymlink != 0 {
+			if _, err := os.Stat(p); err != nil {
+				// Dangling symlink.
+				os.Remove(p)
+				fmt.Printf("  \033[32m✓\033[0m Removed stale symlink: %s\n", p)
+				continue
+			}
+		}
+		// Remove actual binary.
+		if err := os.Remove(p); err == nil {
+			fmt.Printf("  \033[32m✓\033[0m Removed stale binary: %s\n", p)
+		}
+	}
+}
+
+// killAllSynapsesProcesses kills any remaining synapses processes (orphan
+// daemons, proxy processes) that weren't caught by the PID-based stop.
+// Skips the current process.
+func killAllSynapsesProcesses() {
+	myPID := os.Getpid()
+	// Use pkill to find synapses processes. Ignore errors (no matches = exit 1).
+	for _, pattern := range []string{"synapses daemon serve", "synapses start"} {
+		out, _ := exec.Command("pgrep", "-f", pattern).Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			pid := 0
+			if _, err := fmt.Sscanf(line, "%d", &pid); err != nil || pid == myPID || pid == 0 {
+				continue
+			}
+			if proc, err := os.FindProcess(pid); err == nil {
+				proc.Signal(syscall.SIGKILL)
+				fmt.Printf("  \033[32m✓\033[0m Killed orphan process %d (%s)\n", pid, pattern)
+			}
+		}
 	}
 }
 
