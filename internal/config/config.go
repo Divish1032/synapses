@@ -653,6 +653,12 @@ func Load(dir string) (*Config, error) {
 		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
 			cfg.UseGoTypes = true
 		}
+		// Auto-enable use_ts_types for TypeScript projects.
+		if _, statErr := os.Stat(filepath.Join(dir, "tsconfig.json")); statErr == nil {
+			cfg.UseTSTypes = true
+		} else if _, statErr := os.Stat(filepath.Join(dir, "package.json")); statErr == nil {
+			cfg.UseTSTypes = true
+		}
 		mergeGlobalConfig(cfg, nil) // no project config → all global values apply
 		return cfg, nil
 	}
@@ -691,6 +697,22 @@ func Load(dir string) (*Config, error) {
 			// Field absent from JSON — apply go.mod auto-default.
 			if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
 				cfg.UseGoTypes = true
+			}
+		}
+	}
+
+	// FIX-RESOLVER-2: auto-enable use_ts_types for TypeScript projects unless
+	// the user explicitly set it in synapses.json.
+	if !cfg.UseTSTypes {
+		var rawTSTypes struct {
+			UseTSTypes *bool `json:"use_ts_types"`
+		}
+		if json.Unmarshal(data, &rawTSTypes) == nil && rawTSTypes.UseTSTypes == nil {
+			// Field absent from JSON — apply tsconfig.json/package.json auto-default.
+			if _, statErr := os.Stat(filepath.Join(dir, "tsconfig.json")); statErr == nil {
+				cfg.UseTSTypes = true
+			} else if _, statErr := os.Stat(filepath.Join(dir, "package.json")); statErr == nil {
+				cfg.UseTSTypes = true
 			}
 		}
 	}

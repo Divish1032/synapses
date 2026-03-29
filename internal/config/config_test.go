@@ -246,6 +246,48 @@ func TestLoad_UseGoTypes_ExplicitFalseRespected(t *testing.T) {
 	}
 }
 
+func TestLoad_UseTSTypes_DefaultsTrueWhenTSConfigPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(`{"compilerOptions":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.UseTSTypes {
+		t.Error("expected UseTSTypes=true when tsconfig.json is present, got false")
+	}
+}
+
+func TestLoad_UseTSTypes_FalseWhenNoTSConfig(t *testing.T) {
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseTSTypes {
+		t.Error("expected UseTSTypes=false when no tsconfig.json or package.json, got true")
+	}
+}
+
+func TestLoad_UseTSTypes_ExplicitFalseRespected(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tsconfig.json"), []byte(`{"compilerOptions":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgJSON := []byte(`{"use_ts_types": false}`)
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), cfgJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UseTSTypes {
+		t.Error("explicit use_ts_types=false in synapses.json should not be overridden by tsconfig.json detection")
+	}
+}
+
 func TestCheckViolations_NoRules(t *testing.T) {
 	cfg, _ := config.Load(t.TempDir()) // empty dir → no rules
 	g := buildViolationGraph(t)

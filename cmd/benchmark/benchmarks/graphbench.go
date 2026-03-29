@@ -5,11 +5,13 @@
 // retrieval strategy), GraphBench isolates graph correctness.
 //
 // Query types:
-//   - find_callers(symbol)        — who calls this? via get_impact depth=1
+//   - find_callers(symbol)        — who calls this? via get_context format=json
 //   - find_callees(symbol)        — what does this call? via get_context format=json
 //   - find_imports(file)          — what does this file import? via get_context format=json
-//   - impact_analysis(symbol)     — what's affected? via get_impact depth=3
+//   - impact_analysis(symbol)     — what's affected? via get_impact depth=1
 //   - find_implementations(iface) — who implements this? via get_context format=json
+//   - find_cross_domain(entity)   — what config/deploy/doc files link to this? via get_context
+//   - expected_categories(entity) — cross-domain filtered by edge type (deploys, configured_by, etc.)
 //
 // All daemon responses are parsed as structured JSON (not regex on Markdown).
 // Metrics: per-test Precision, Recall, F1. Aggregated by query_type and language.
@@ -23,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,10 +52,15 @@ type GraphBenchSuite struct {
 
 // GraphBenchTest is a single query+expected pair.
 type GraphBenchTest struct {
-	QueryType     string   `json:"query_type"`
-	Query         string   `json:"query"`
-	ExpectedNames []string `json:"expected_names,omitempty"`
-	ExpectedFiles []string `json:"expected_files,omitempty"`
+	QueryType          string   `json:"query_type"`
+	Query              string   `json:"query"`
+	ExpectedNames      []string `json:"expected_names,omitempty"`
+	ExpectedFiles      []string `json:"expected_files,omitempty"`
+	ExpectedCategories []string `json:"expected_categories,omitempty"` // for expected_categories query type
+	Verified           bool     `json:"verified,omitempty"`            // true if expectations are compiler-verified
+	// Disambiguation test fields:
+	ExpectedDisambigCount int    `json:"expected_disambig_count,omitempty"` // expected number of candidates
+	DisambigFile          string `json:"disambig_file,omitempty"`           // file to pin entity with
 }
 
 // GraphBenchTestResult holds the outcome of one test.
@@ -68,8 +76,19 @@ type GraphBenchTestResult struct {
 	Precision     float64  `json:"precision"`
 	Recall        float64  `json:"recall"`
 	F1            float64  `json:"f1"`
+	LatencyMs     int64    `json:"latency_ms"`
 	Error         string   `json:"error,omitempty"`
-	RawResponse   string   `json:"raw_response,omitempty"` // for debugging failures
+	ErrorCategory string   `json:"error_category,omitempty"` // entity_not_found, empty_response, wrong_candidates, timeout
+	RawResponse   string   `json:"raw_response,omitempty"`   // for debugging failures
+}
+
+// repoStats holds per-repo indexing metadata captured after waitForIndex.
+type repoStats struct {
+	Repo        string `json:"repo"`
+	Language    string `json:"language"`
+	IndexTimeMs int64  `json:"index_time_ms"`
+	NodeCount   int    `json:"node_count"`
+	EdgeCount   int    `json:"edge_count"`
 }
 
 // ─── Daemon response JSON shapes ─────────────────────────────────────────────
@@ -179,6 +198,7 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 	log.Printf("graphbench: %d repo suites loaded", len(suites))
 
 	var allResults []GraphBenchTestResult
+	var allRepoStats []repoStats
 
 	for i, suite := range suites {
 		log.Printf("[%d/%d] %s @ %s (%s, %d tests)",
@@ -191,7 +211,8 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 				allResults = append(allResults, GraphBenchTestResult{
 					Repo: suite.Repo, Language: suite.Language,
 					QueryType: t.QueryType, Query: t.Query,
-					Error: fmt.Sprintf("repo setup: %v", err),
+					Error:         fmt.Sprintf("repo setup: %v", err),
+					ErrorCategory: "repo_setup",
 				})
 			}
 			continue
@@ -199,10 +220,28 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 
 		projClient := client.WithProject(repoDir)
 
-		// Trigger indexing and wait for it to complete.
+		// Trigger indexing and measure index time.
+		indexStart := time.Now()
 		if err := waitForIndex(projClient, repoDir); err != nil {
 			log.Printf("  warning: indexing may be incomplete: %v", err)
 		}
+		indexTimeMs := time.Since(indexStart).Milliseconds()
+
+		// Capture graph stats from health endpoint.
+		// NOTE: /v1/health returns aggregate stats across ALL registered projects,
+		// not just the current one. When running with the batch runner (which
+		// restarts the daemon between repos), this gives per-repo stats.
+		rs := repoStats{
+			Repo:        suite.Repo,
+			Language:    suite.Language,
+			IndexTimeMs: indexTimeMs,
+		}
+		if health, err := client.GetHealth(); err == nil {
+			rs.NodeCount = health.NodeCount
+			rs.EdgeCount = health.EdgeCount
+		}
+		allRepoStats = append(allRepoStats, rs)
+		log.Printf("  indexed in %dms (nodes=%d, edges=%d)", rs.IndexTimeMs, rs.NodeCount, rs.EdgeCount)
 
 		for j, test := range suite.Tests {
 			result := runGraphTest(projClient, suite, test)
@@ -211,13 +250,13 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 			if result.Error != "" {
 				status = "✗ " + truncate(result.Error, 80)
 			}
-			log.Printf("  [%d/%d] %s(%s): P=%.0f%% R=%.0f%% F1=%.0f%% %s",
+			log.Printf("  [%d/%d] %s(%s): P=%.0f%% R=%.0f%% F1=%.0f%% %dms %s",
 				j+1, len(suite.Tests), test.QueryType, test.Query,
-				result.Precision*100, result.Recall*100, result.F1*100, status)
+				result.Precision*100, result.Recall*100, result.F1*100, result.LatencyMs, status)
 		}
 	}
 
-	return aggregateGraphResults(allResults, suites), nil
+	return aggregateGraphResults(allResults, suites, allRepoStats), nil
 }
 
 // waitForIndex triggers indexing via a search probe and polls until the daemon
@@ -259,18 +298,16 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 	var files []string
 	var rawResp string
 
+	queryStart := time.Now()
+
 	switch test.QueryType {
 	case "find_callers":
-		// Use get_context (callers field) — much more precise than get_impact BFS.
 		names, files, rawResp = queryContextCallers(client, test.Query)
 
 	case "find_callees":
 		names, files, rawResp = queryContextCallees(client, test.Query)
 
 	case "find_imports":
-		// File-level entities don't resolve in the daemon (root: null).
-		// Strategy: search for symbols defined in the file, then aggregate
-		// their callees' source packages as proxy for imports.
 		names, files, rawResp = queryFileImports(client, test.Query)
 
 	case "impact_analysis":
@@ -279,23 +316,49 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 	case "find_implementations":
 		names, files, rawResp = queryContextRelated(client, test.Query)
 
+	case "find_cross_domain":
+		names, files, rawResp = queryContextCrossDomain(client, test.Query, nil)
+
+	case "expected_categories":
+		names, files, rawResp = queryContextCrossDomain(client, test.Query, test.ExpectedCategories)
+
+	case "coverage_probe":
+		names, files, rawResp = queryCoverageProbe(client, test.ExpectedNames)
+
+	case "disambiguation":
+		names, files, rawResp = queryDisambiguation(client, test)
+
 	default:
 		result.Error = fmt.Sprintf("unknown query_type %q", test.QueryType)
+		result.ErrorCategory = "unknown_type"
 		return result
 	}
 
+	result.LatencyMs = time.Since(queryStart).Milliseconds()
 	result.ActualNames = names
 	result.ActualFiles = files
 	if rawResp == "" {
 		rawResp = "(empty response)"
 	}
-	// Store truncated raw response for debugging.
 	result.RawResponse = truncate(rawResp, 500)
 
-	// Check for error responses.
+	// Classify error responses.
 	if strings.Contains(rawResp, "entity not found") {
 		result.Error = "entity not found"
+		result.ErrorCategory = "entity_not_found"
 		return result
+	}
+	if strings.Contains(rawResp, "error:") && strings.Contains(rawResp, "timeout") {
+		result.Error = "timeout"
+		result.ErrorCategory = "timeout"
+		return result
+	}
+	// Empty response: entity resolved but no edges returned.
+	if len(names) == 0 && len(files) == 0 && test.QueryType != "coverage_probe" && test.QueryType != "disambiguation" {
+		hasExpected := len(test.ExpectedNames) > 0 || len(test.ExpectedFiles) > 0
+		if hasExpected && !strings.Contains(rawResp, "error") {
+			result.ErrorCategory = "empty_response"
+		}
 	}
 
 	// Compute Recall: what fraction of expected items were found?
@@ -462,47 +525,6 @@ func queryFileImports(client *agent.SynapsesClient, filePath string) (names, fil
 		}
 	}
 
-	// Fallback: if no imports found, try callees of related symbols (old approach).
-	if len(names) == 0 && len(files) == 0 {
-		var symbols []string
-		for _, rel := range cr.Related {
-			if rel.Node.Name != "" {
-				symbols = append(symbols, rel.Node.Name)
-			}
-		}
-		if len(symbols) > 3 {
-			symbols = symbols[:3]
-		}
-		var allRaw strings.Builder
-		allRaw.WriteString(raw)
-		for _, sym := range symbols {
-			symRaw, err := client.GetContextJSON("graphbench", sym, "full")
-			if err != nil {
-				continue
-			}
-			allRaw.WriteString("\n---\n")
-			allRaw.WriteString(symRaw)
-			var symCR contextResponse
-			if err := json.Unmarshal([]byte(symRaw), &symCR); err != nil {
-				continue
-			}
-			for _, callee := range symCR.Callees {
-				if callee.Node.Name != "" {
-					pkg := extractPackageName(callee.Node.Name, filePath)
-					if pkg != "" && !seenNames[strings.ToLower(pkg)] {
-						seenNames[strings.ToLower(pkg)] = true
-						names = append(names, pkg)
-					}
-				}
-				if callee.Node.File != "" && !seenFiles[normalizeFile(callee.Node.File)] {
-					seenFiles[normalizeFile(callee.Node.File)] = true
-					files = append(files, callee.Node.File)
-				}
-			}
-		}
-		raw = truncate(allRaw.String(), 2000)
-	}
-
 	return names, files, truncate(raw, 2000)
 }
 
@@ -581,6 +603,114 @@ func queryContextRelated(client *agent.SynapsesClient, entity string) (names, fi
 			names = appendUniqueName(names, caller.Node.Name)
 		}
 	}
+
+	return names, files, raw
+}
+
+// queryCoverageProbe searches for each expected entity name and returns which
+// ones the daemon can find. Coverage = found / total expected.
+func queryCoverageProbe(client *agent.SynapsesClient, expectedNames []string) (names, files []string, raw string) {
+	var found []string
+	var rawParts []string
+	for _, name := range expectedNames {
+		resp, err := client.Search("graphbench-coverage", name)
+		if err != nil {
+			continue
+		}
+		rawParts = append(rawParts, truncate(resp.Text, 200))
+		// If the search returned something mentioning the name, count it as found.
+		if resp.Text != "" && len(resp.Text) > 20 {
+			found = append(found, name)
+		}
+	}
+	return found, nil, strings.Join(rawParts, "\n---\n")
+}
+
+// queryDisambiguation tests entity disambiguation: queries an ambiguous name,
+// checks for other_candidates, then re-queries with file= hint.
+func queryDisambiguation(client *agent.SynapsesClient, test GraphBenchTest) (names, files []string, raw string) {
+	// First call: query without file hint — expect disambiguation.
+	raw, err := client.GetContextJSON("graphbench", test.Query, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return nil, nil, raw
+	}
+
+	// Check if disambiguation was triggered.
+	candidateCount := len(cr.OtherCandidates)
+	if candidateCount > 0 {
+		names = append(names, fmt.Sprintf("disambig_count:%d", candidateCount))
+	}
+	if cr.DisambigHint != "" {
+		names = append(names, "has_disambig_hint")
+	}
+
+	// Second call: re-query with file= hint to pin entity.
+	if test.DisambigFile != "" {
+		raw2, err := client.GetContextJSONWithFile("graphbench", test.Query, "full", test.DisambigFile)
+		if err == nil {
+			var cr2 contextResponse
+			if json.Unmarshal([]byte(raw2), &cr2) == nil {
+				// After pinning, there should be no other_candidates.
+				if len(cr2.OtherCandidates) == 0 {
+					names = append(names, "pinned_ok")
+				}
+				if cr2.Root.File != "" {
+					files = append(files, cr2.Root.File)
+				}
+			}
+			raw = raw + "\n---pinned---\n" + raw2
+		}
+	}
+
+	return names, files, raw
+}
+
+// queryContextCrossDomain calls get_context (JSON) and extracts cross-domain
+// nodes (deploys, configured_by, documented_in, etc). If categories is non-nil,
+// only nodes from those categories are included.
+func queryContextCrossDomain(client *agent.SynapsesClient, entity string, categories []string) (names, files []string, raw string) {
+	raw, err := client.GetContextJSON("graphbench", entity, "full")
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	catSet := make(map[string]bool, len(categories))
+	for _, c := range categories {
+		catSet[strings.ToLower(c)] = true
+	}
+	filterByCategory := len(catSet) > 0
+
+	collect := func(nodes []crossDomainNode, category string) {
+		if filterByCategory && !catSet[strings.ToLower(category)] {
+			return
+		}
+		for _, n := range nodes {
+			if n.Name != "" {
+				names = appendUniqueName(names, n.Name)
+			}
+			if n.File != "" {
+				files = appendUniqueFile(files, n.File)
+			}
+		}
+	}
+
+	collect(cr.CrossDomain.DeploysTo, "deploys")
+	collect(cr.CrossDomain.Consumes, "consumes")
+	collect(cr.CrossDomain.ConfiguredBy, "configured_by")
+	collect(cr.CrossDomain.DocumentedIn, "documented_in")
+	collect(cr.CrossDomain.Mentions, "mentions")
+	collect(cr.CrossDomain.Manual, "manual")
+	collect(cr.CrossDomain.Related, "related")
 
 	return names, files, raw
 }
@@ -677,7 +807,12 @@ func looksLikeFile(s string) bool {
 	ext := filepath.Ext(s)
 	switch ext {
 	case ".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".java", ".rs", ".rb",
-		".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cs", ".swift", ".kt":
+		".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cs", ".swift", ".kt",
+		".scala", ".php", ".pl", ".pm", ".lua", ".ex", ".exs", ".hs",
+		".ml", ".mli", ".clj", ".cljs", ".dart", ".zig", ".nim",
+		".r", ".R", ".jl", ".m", ".sh", ".ps1", ".psm1", ".groovy",
+		".vhd", ".vhdl", ".v", ".sv", ".f90", ".f95", ".adb", ".ads",
+		".cob", ".cbl", ".erl", ".hrl", ".fs", ".fsi", ".fsx":
 		return true
 	}
 	return false
@@ -912,17 +1047,56 @@ func loadGraphBenchData(path string) ([]GraphBenchSuite, error) {
 
 // ─── Aggregation ─────────────────────────────────────────────────────────────
 
-func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSuite) *reporter.GraphBenchResult {
+func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSuite, stats []repoStats) *reporter.GraphBenchResult {
 	byType := make(map[string]*metricAccum)
 	byLang := make(map[string]*metricAccum)
 	overall := &metricAccum{}
 	errorCount := 0
+	correctCount := 0
+	completeCount := 0
+	nonErrorCount := 0
+	var failedQueries []reporter.FailedQuery
+	var allLatencies []int64
+	errorCategories := make(map[string]int)
 
 	for _, r := range results {
 		if r.Error != "" {
 			errorCount++
+			cat := r.ErrorCategory
+			if cat == "" {
+				cat = "unknown"
+			}
+			errorCategories[cat]++
+			failedQueries = append(failedQueries, reporter.FailedQuery{
+				Repo:      r.Repo,
+				Language:  r.Language,
+				QueryType: r.QueryType,
+				Query:     r.Query,
+				Error:     r.Error,
+			})
 			continue
 		}
+		nonErrorCount++
+		allLatencies = append(allLatencies, r.LatencyMs)
+		if r.Recall > 0 {
+			correctCount++
+		}
+		if r.Recall >= 1.0 {
+			completeCount++
+		}
+		if r.Recall == 0 && (len(r.ExpectedNames) > 0 || len(r.ExpectedFiles) > 0) {
+			failedQueries = append(failedQueries, reporter.FailedQuery{
+				Repo:      r.Repo,
+				Language:  r.Language,
+				QueryType: r.QueryType,
+				Query:     r.Query,
+				Error:     "zero recall",
+			})
+		}
+		if r.ErrorCategory == "empty_response" {
+			errorCategories["empty_response"]++
+		}
+
 		if byType[r.QueryType] == nil {
 			byType[r.QueryType] = &metricAccum{}
 		}
@@ -936,6 +1110,37 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 		overall.add(r.Precision, r.Recall, r.F1)
 	}
 
+	var correctness, completeness float64
+	if nonErrorCount > 0 {
+		correctness = float64(correctCount) / float64(nonErrorCount)
+		completeness = float64(completeCount) / float64(nonErrorCount)
+	}
+
+	// Compute latency percentiles.
+	sort.Slice(allLatencies, func(i, j int) bool { return allLatencies[i] < allLatencies[j] })
+	latencyP50, latencyP95, latencyP99 := int64(0), int64(0), int64(0)
+	if n := len(allLatencies); n > 0 {
+		latencyP50 = allLatencies[n*50/100]
+		latencyP95 = allLatencies[n*95/100]
+		idx99 := n * 99 / 100
+		if idx99 >= n {
+			idx99 = n - 1
+		}
+		latencyP99 = allLatencies[idx99]
+	}
+
+	// Convert repo stats.
+	var repoStatsOut []reporter.RepoStats
+	for _, rs := range stats {
+		repoStatsOut = append(repoStatsOut, reporter.RepoStats{
+			Repo:        rs.Repo,
+			Language:    rs.Language,
+			IndexTimeMs: rs.IndexTimeMs,
+			NodeCount:   rs.NodeCount,
+			EdgeCount:   rs.EdgeCount,
+		})
+	}
+
 	gbResult := &reporter.GraphBenchResult{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Summary: reporter.GraphBenchMetrics{
@@ -943,8 +1148,16 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 			Recall:    overall.avgR(),
 			F1:        overall.avgF1(),
 		},
-		TotalTests: len(results),
-		ErrorCount: errorCount,
+		TotalTests:      len(results),
+		ErrorCount:      errorCount,
+		Correctness:     correctness,
+		Completeness:    completeness,
+		LatencyP50Ms:    latencyP50,
+		LatencyP95Ms:    latencyP95,
+		LatencyP99Ms:    latencyP99,
+		ErrorCategories: errorCategories,
+		FailedQueries:   failedQueries,
+		RepoStatsData:   repoStatsOut,
 	}
 
 	for qt, acc := range byType {

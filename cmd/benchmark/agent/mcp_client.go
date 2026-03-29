@@ -69,6 +69,12 @@ type RecallResult struct {
 	Text string
 }
 
+// HealthResult is the subset of the /v1/health response we care about.
+type HealthResult struct {
+	NodeCount int `json:"nodes"`
+	EdgeCount int `json:"edges"`
+}
+
 // SynapsesClient calls a running Synapses daemon over HTTP.
 // Set disabled=true for a control run where all tools return empty results.
 type SynapsesClient struct {
@@ -273,6 +279,56 @@ func (c *SynapsesClient) DrainAccesses() []ContextAccess {
 	out := c.accesses
 	c.accesses = nil
 	return out
+}
+
+// GetContextJSONWithFile calls get_context with an optional file hint for disambiguation.
+func (c *SynapsesClient) GetContextJSONWithFile(taskID, entity, detailLevel, fileHint string) (string, error) {
+	if c.disabled {
+		return "{}", nil
+	}
+	args := map[string]interface{}{
+		"entity":       entity,
+		"format":       "json",
+		"detail_level": detailLevel,
+	}
+	if fileHint != "" {
+		args["file"] = fileHint
+	}
+	raw, err := c.callTool("get_context", args)
+	if err != nil {
+		return "", err
+	}
+	c.recordAccess(taskID, "get_context", raw)
+	return raw, nil
+}
+
+// GetHealth calls the daemon health endpoint and returns node/edge counts.
+func (c *SynapsesClient) GetHealth() (*HealthResult, error) {
+	if c.disabled {
+		return &HealthResult{}, nil
+	}
+	u := fmt.Sprintf("%s/v1/health", c.endpoint)
+	resp, err := c.httpClient.Get(u)
+	if err != nil {
+		return nil, fmt.Errorf("health: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read health: %w", err)
+	}
+	// The health endpoint returns total_nodes and total_edges at the top level.
+	var raw struct {
+		TotalNodes int `json:"total_nodes"`
+		TotalEdges int `json:"total_edges"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return &HealthResult{}, nil // non-fatal
+	}
+	return &HealthResult{
+		NodeCount: raw.TotalNodes,
+		EdgeCount: raw.TotalEdges,
+	}, nil
 }
 
 // ─── internals ───────────────────────────────────────────────────────────────

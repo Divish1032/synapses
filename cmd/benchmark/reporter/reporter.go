@@ -279,13 +279,39 @@ func asFloat(v interface{}) float64 {
 
 // GraphBenchResult holds the full results of a GraphBench run.
 type GraphBenchResult struct {
-	Timestamp   string            `json:"timestamp"`
-	TotalTests  int               `json:"total_tests"`
-	ErrorCount  int               `json:"error_count"`
-	Summary     GraphBenchMetrics `json:"summary"`
-	ByQueryType []GraphBenchSlice `json:"by_query_type"`
-	ByLanguage  []GraphBenchSlice `json:"by_language"`
-	TestResults []interface{}     `json:"tests"`
+	Timestamp       string            `json:"timestamp"`
+	TotalTests      int               `json:"total_tests"`
+	ErrorCount      int               `json:"error_count"`
+	Correctness     float64           `json:"correctness"`    // fraction of non-error tests with recall > 0
+	Completeness    float64           `json:"completeness"`   // fraction of non-error tests with recall == 1.0
+	LatencyP50Ms    int64             `json:"latency_p50_ms"` // query latency percentiles
+	LatencyP95Ms    int64             `json:"latency_p95_ms"`
+	LatencyP99Ms    int64             `json:"latency_p99_ms"`
+	ErrorCategories map[string]int    `json:"error_categories,omitempty"` // category → count
+	Summary         GraphBenchMetrics `json:"summary"`
+	ByQueryType     []GraphBenchSlice `json:"by_query_type"`
+	ByLanguage      []GraphBenchSlice `json:"by_language"`
+	FailedQueries   []FailedQuery     `json:"failed_queries,omitempty"`
+	RepoStatsData   []RepoStats       `json:"repo_stats,omitempty"`
+	TestResults     []interface{}     `json:"tests"`
+}
+
+// FailedQuery records a test that produced an error or zero recall.
+type FailedQuery struct {
+	Repo      string `json:"repo"`
+	Language  string `json:"language"`
+	QueryType string `json:"query_type"`
+	Query     string `json:"query"`
+	Error     string `json:"error"`
+}
+
+// RepoStats records per-repo indexing metadata.
+type RepoStats struct {
+	Repo        string `json:"repo"`
+	Language    string `json:"language"`
+	IndexTimeMs int64  `json:"index_time_ms"`
+	NodeCount   int    `json:"node_count"`
+	EdgeCount   int    `json:"edge_count"`
 }
 
 // GraphBenchMetrics holds P/R/F1 scores.
@@ -321,12 +347,25 @@ func (r *Reporter) WriteGraphBench(result *GraphBenchResult) error {
 // PrintGraphBenchSummary prints a compact summary to stdout.
 func (r *Reporter) PrintGraphBenchSummary(result *GraphBenchResult) {
 	fmt.Printf("\n=== GraphBench Summary ===\n")
-	fmt.Printf("Tests: %d | Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n",
-		result.TotalTests,
+	fmt.Printf("Tests: %d | Errors: %d | Correctness: %.1f%% | Completeness: %.1f%%\n",
+		result.TotalTests, result.ErrorCount,
+		result.Correctness*100,
+		result.Completeness*100,
+	)
+	fmt.Printf("Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n",
 		result.Summary.Precision*100,
 		result.Summary.Recall*100,
 		result.Summary.F1*100,
 	)
+	fmt.Printf("Latency: P50=%dms P95=%dms P99=%dms\n",
+		result.LatencyP50Ms, result.LatencyP95Ms, result.LatencyP99Ms)
+	if len(result.ErrorCategories) > 0 {
+		fmt.Printf("Error breakdown:")
+		for cat, count := range result.ErrorCategories {
+			fmt.Printf(" %s=%d", cat, count)
+		}
+		fmt.Println()
+	}
 	if len(result.ByQueryType) > 0 {
 		fmt.Printf("\n%-25s  %6s  %10s  %8s  %6s\n", "Query Type", "Tests", "Precision", "Recall", "F1")
 		fmt.Printf("%s\n", strings.Repeat("-", 60))
@@ -351,18 +390,65 @@ func (r *Reporter) PrintGraphBenchSummary(result *GraphBenchResult) {
 			)
 		}
 	}
+
+	// Print top failures by language.
+	if len(result.FailedQueries) > 0 {
+		fmt.Printf("\n=== Failed Queries (%d) ===\n", len(result.FailedQueries))
+		byLang := make(map[string]int)
+		for _, fq := range result.FailedQueries {
+			byLang[fq.Language]++
+		}
+		fmt.Printf("%-12s  %6s\n", "Language", "Fails")
+		fmt.Printf("%s\n", strings.Repeat("-", 20))
+		for lang, count := range byLang {
+			fmt.Printf("%-12s  %6d\n", lang, count)
+		}
+		// Show first 10 failures.
+		limit := 10
+		if len(result.FailedQueries) < limit {
+			limit = len(result.FailedQueries)
+		}
+		fmt.Printf("\nTop %d failures:\n", limit)
+		for i := 0; i < limit; i++ {
+			fq := result.FailedQueries[i]
+			fmt.Printf("  [%s] %s(%s) — %s (%s)\n", fq.Language, fq.QueryType, fq.Query, fq.Error, fq.Repo)
+		}
+	}
 }
 
 func graphBenchMarkdown(result *GraphBenchResult) string {
 	var sb strings.Builder
 	sb.WriteString("# GraphBench Results (Graph Accuracy Benchmark)\n\n")
 	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n", result.Timestamp)
-	fmt.Fprintf(&sb, "**Total tests:** %d  \n\n", result.TotalTests)
+	fmt.Fprintf(&sb, "**Total tests:** %d | **Errors:** %d  \n\n", result.TotalTests, result.ErrorCount)
 
 	sb.WriteString("## Overall Metrics\n\n")
+	fmt.Fprintf(&sb, "- **Correctness:** %.1f%% (queries returning at least one correct answer)\n", result.Correctness*100)
+	fmt.Fprintf(&sb, "- **Completeness:** %.1f%% (queries returning all correct answers)\n", result.Completeness*100)
 	fmt.Fprintf(&sb, "- **Precision:** %.1f%%\n", result.Summary.Precision*100)
 	fmt.Fprintf(&sb, "- **Recall:** %.1f%%\n", result.Summary.Recall*100)
-	fmt.Fprintf(&sb, "- **F1:** %.1f%%\n\n", result.Summary.F1*100)
+	fmt.Fprintf(&sb, "- **F1:** %.1f%%\n", result.Summary.F1*100)
+	fmt.Fprintf(&sb, "- **Latency:** P50=%dms, P95=%dms, P99=%dms\n\n", result.LatencyP50Ms, result.LatencyP95Ms, result.LatencyP99Ms)
+
+	if len(result.ErrorCategories) > 0 {
+		sb.WriteString("## Error Breakdown\n\n")
+		sb.WriteString("| Category | Count |\n|----------|-------|\n")
+		for cat, count := range result.ErrorCategories {
+			fmt.Fprintf(&sb, "| %s | %d |\n", cat, count)
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(result.RepoStatsData) > 0 {
+		sb.WriteString("## Repo Index Stats\n\n")
+		sb.WriteString("| Repo | Language | Index Time | Nodes | Edges |\n")
+		sb.WriteString("|------|----------|------------|-------|-------|\n")
+		for _, rs := range result.RepoStatsData {
+			fmt.Fprintf(&sb, "| %s | %s | %dms | %d | %d |\n",
+				rs.Repo, rs.Language, rs.IndexTimeMs, rs.NodeCount, rs.EdgeCount)
+		}
+		sb.WriteString("\n")
+	}
 
 	if len(result.ByQueryType) > 0 {
 		sb.WriteString("## By Query Type\n\n")
@@ -383,6 +469,16 @@ func graphBenchMarkdown(result *GraphBenchResult) string {
 			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% | %.1f%% |\n",
 				s.Label, s.Tests,
 				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100)
+		}
+	}
+
+	if len(result.FailedQueries) > 0 {
+		sb.WriteString("\n## Failed Queries\n\n")
+		sb.WriteString("| Language | Query Type | Query | Repo | Error |\n")
+		sb.WriteString("|----------|------------|-------|------|-------|\n")
+		for _, fq := range result.FailedQueries {
+			fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s |\n",
+				fq.Language, fq.QueryType, fq.Query, fq.Repo, fq.Error)
 		}
 	}
 

@@ -325,3 +325,79 @@ func TestExtractPackageName(t *testing.T) {
 		}
 	}
 }
+
+func TestCorrectnessAndCompleteness(t *testing.T) {
+	// Simulate aggregation with known recall values.
+	results := []GraphBenchTestResult{
+		{Repo: "a/b", Language: "go", QueryType: "find_callees", Query: "Foo", Recall: 0.5, Precision: 0.5, F1: 0.5},
+		{Repo: "a/b", Language: "go", QueryType: "find_callers", Query: "Bar", Recall: 1.0, Precision: 1.0, F1: 1.0},
+		{Repo: "a/b", Language: "go", QueryType: "find_imports", Query: "main.go", Recall: 0.0, Precision: 0.0, F1: 0.0,
+			ExpectedNames: []string{"fmt"}},
+		{Repo: "c/d", Language: "python", QueryType: "find_callees", Query: "Baz", Error: "entity not found"},
+	}
+	suites := []GraphBenchSuite{{Repo: "a/b", Language: "go"}, {Repo: "c/d", Language: "python"}}
+
+	gbr := aggregateGraphResults(results, suites, nil)
+
+	// 3 non-error results: recall>0 = 2 (0.5 and 1.0), recall==1.0 = 1
+	wantCorrectness := 2.0 / 3.0
+	wantCompleteness := 1.0 / 3.0
+
+	if diff := gbr.Correctness - wantCorrectness; diff > 0.01 || diff < -0.01 {
+		t.Errorf("correctness = %.3f, want %.3f", gbr.Correctness, wantCorrectness)
+	}
+	if diff := gbr.Completeness - wantCompleteness; diff > 0.01 || diff < -0.01 {
+		t.Errorf("completeness = %.3f, want %.3f", gbr.Completeness, wantCompleteness)
+	}
+	if gbr.ErrorCount != 1 {
+		t.Errorf("errorCount = %d, want 1", gbr.ErrorCount)
+	}
+	// Failed queries: 1 error + 1 zero-recall = 2
+	if len(gbr.FailedQueries) != 2 {
+		t.Errorf("failedQueries = %d, want 2", len(gbr.FailedQueries))
+	}
+}
+
+func TestLooksLikeFile_NewExtensions(t *testing.T) {
+	for _, ext := range []string{
+		"main.lua", "app.ex", "lib.hs", "parser.ml", "core.clj",
+		"widget.dart", "build.zig", "main.nim", "analysis.r",
+		"solve.jl", "view.m", "script.sh", "module.ps1",
+		"task.groovy", "design.vhd", "chip.v", "sim.f90",
+		"proc.adb", "prog.cob", "server.erl", "check.fs",
+		"app.scala", "route.php", "util.pl", "model.cs",
+	} {
+		if !looksLikeFile(ext) {
+			t.Errorf("looksLikeFile(%q) should be true", ext)
+		}
+	}
+}
+
+func TestCrossDomainParsing(t *testing.T) {
+	raw := `{
+		"root": {"name": "Server", "type": "struct", "file": "server.go", "line": 10},
+		"callees": [], "callers": [], "related": [], "imports": [],
+		"cross_domain": {
+			"deploys": [{"name": "Dockerfile", "type": "dockerfile", "file": "Dockerfile"}],
+			"consumes": [],
+			"configured_by": [{"name": "values.yaml", "type": "helm", "file": "deploy/values.yaml"}],
+			"documented_in": [{"name": "README.md", "type": "markdown", "file": "README.md"}],
+			"mentions": [],
+			"manual": [],
+			"related": []
+		}
+	}`
+	var cr contextResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.CrossDomain.DeploysTo) != 1 {
+		t.Errorf("deploys = %d, want 1", len(cr.CrossDomain.DeploysTo))
+	}
+	if len(cr.CrossDomain.ConfiguredBy) != 1 {
+		t.Errorf("configured_by = %d, want 1", len(cr.CrossDomain.ConfiguredBy))
+	}
+	if len(cr.CrossDomain.DocumentedIn) != 1 {
+		t.Errorf("documented_in = %d, want 1", len(cr.CrossDomain.DocumentedIn))
+	}
+}
