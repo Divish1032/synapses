@@ -149,6 +149,8 @@ func run(args []string) error {
 		return cmdUninstall(args[1:])
 	case "update":
 		return cmdUpdate(args[1:])
+	case "rollback":
+		return cmdRollback(args[1:])
 	case "completion":
 		return cmdCompletion(args[1:])
 	case "help", "-h", "--help":

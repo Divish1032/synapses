@@ -234,6 +234,17 @@ func cmdUpdate(args []string) error {
 		return nil
 	}
 
+	// If running from the app bundle, updates are handled by the Tauri auto-updater.
+	if isRunningFromAppBundle() {
+		fmt.Println("Synapses is installed via the desktop app.")
+		fmt.Println("Updates are handled automatically by the app.")
+		fmt.Println()
+		fmt.Println("To check for app updates, open Synapses.app.")
+		fmt.Println("To switch to CLI-managed updates, run:")
+		fmt.Printf("  curl -fsSL https://synapsesos.com/install.sh | SYNAPSES_CLI_ONLY=1 sh\n")
+		return nil
+	}
+
 	fmt.Printf("Current version: %s\n", version)
 	fmt.Println("Checking for updates...")
 
@@ -802,4 +813,60 @@ func saveUpdateState(state *UpdateState) {
 		return
 	}
 	_ = os.Rename(f.Name(), path)
+}
+
+// isRunningFromAppBundle returns true if the current binary is inside a
+// Synapses.app bundle (macOS) or /opt/synapsesos (Linux).
+func isRunningFromAppBundle() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+	return strings.Contains(exe, "Synapses.app") ||
+		strings.Contains(exe, "SynapsesOS.app") ||
+		strings.HasPrefix(exe, "/opt/synapsesos")
+}
+
+// cmdRollback restores the previous binary from ~/.synapses/bin/synapses.previous.
+func cmdRollback(args []string) error {
+	home, err := synapsesHome()
+	if err != nil {
+		return err
+	}
+	binDir := filepath.Join(home, "bin")
+	current := filepath.Join(binDir, "synapses")
+	previous := filepath.Join(binDir, "synapses.previous")
+
+	if _, err := os.Stat(previous); os.IsNotExist(err) {
+		return fmt.Errorf("no previous version found at %s — cannot rollback", previous)
+	}
+
+	// Get version info before rollback
+	currentVersion := "(unknown)"
+	if out, err := exec.Command(current, "version").Output(); err == nil {
+		currentVersion = strings.TrimSpace(string(out))
+	}
+	previousVersion := "(unknown)"
+	if out, err := exec.Command(previous, "version").Output(); err == nil {
+		previousVersion = strings.TrimSpace(string(out))
+	}
+
+	// Swap: current → backup, previous → current
+	backup := current + ".rollback-backup"
+	if err := os.Rename(current, backup); err != nil {
+		return fmt.Errorf("backup current binary: %w", err)
+	}
+	if err := os.Rename(previous, current); err != nil {
+		// Restore on failure
+		os.Rename(backup, current) //nolint:errcheck
+		return fmt.Errorf("restore previous binary: %w", err)
+	}
+	// The backup becomes the new "previous" for another rollback
+	os.Rename(backup, previous) //nolint:errcheck
+
+	fmt.Printf("Rolled back CLI: %s → %s\n", currentVersion, previousVersion)
+	fmt.Println("Note: If the desktop app is installed, it still shows the newer version.")
+	fmt.Println("To fully rollback the app, reinstall: brew reinstall synapses")
+	return nil
 }

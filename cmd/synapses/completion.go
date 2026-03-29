@@ -36,6 +36,7 @@ var completionCommands = []struct {
 	{"dev", "Developer tools (link/unlink/status)"},
 	{"uninstall", "Remove synapses from a project"},
 	{"update", "Self-update the synapses binary"},
+	{"rollback", "Restore the previous binary version"},
 	{"completion", "Generate shell completion script"},
 	{"help", "Show help"},
 }
