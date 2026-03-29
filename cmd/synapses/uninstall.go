@@ -671,10 +671,8 @@ func removeBinary() {
 
 	fmt.Printf("  Binary: %s\n", self)
 
-	// On macOS, also check for the app bundle.
-	if runtime.GOOS == "darwin" {
-		removeAppBundle()
-	}
+	// Remove the desktop app (Tauri) — kills process, removes bundle/package, cleans app data.
+	removeDesktopApp()
 
 	// Check if Homebrew has synapses installed (regardless of which binary
 	// we're running from — the user may run uninstall from a dev build or
@@ -803,20 +801,169 @@ func killAllSynapsesProcesses() {
 	}
 }
 
-// removeAppBundle checks for and removes the Synapses macOS app bundle
-// at /Applications/Synapses.app.
-func removeAppBundle() {
-	appPaths := []string{
-		"/Applications/Synapses.app",
-		filepath.Join(os.Getenv("HOME"), "Applications", "Synapses.app"),
-	}
-	for _, app := range appPaths {
-		if _, err := os.Stat(app); err == nil {
-			if err := os.RemoveAll(app); err != nil {
-				fmt.Printf("  \033[33m!\033[0m Cannot remove %s: %v\n", app, err)
-				fmt.Printf("  You may need to remove it manually: sudo rm -rf %q\n", app)
+// removeDesktopApp performs a complete removal of the Synapses desktop app
+// (Tauri-based). This follows industry practice (similar to VS Code, Slack,
+// Discord uninstallers):
+//
+//  1. Kill the running app process
+//  2. Remove the app bundle (macOS) or uninstall the package (Linux deb/rpm)
+//  3. Remove app data, caches, and preferences
+//
+// On macOS: removes .app bundles, ~/Library/Application Support/, ~/Library/Caches/,
+// ~/Library/Preferences/ plist, ~/Library/Logs/, ~/Library/WebKit/ data.
+// On Linux: uninstalls via dpkg/rpm if applicable, removes ~/.local/share/ and
+// ~/.config/ app data, removes AppImage from common locations.
+func removeDesktopApp() {
+	home, _ := os.UserHomeDir()
+	found := false
+
+	// ── Step 1: Kill the app process ──────────────────────────────────────
+	killAppProcess()
+
+	// ── Step 2: Remove app bundles / packages ─────────────────────────────
+	switch runtime.GOOS {
+	case "darwin":
+		for _, app := range []string{
+			"/Applications/Synapses.app",
+			filepath.Join(home, "Applications", "Synapses.app"),
+		} {
+			if _, err := os.Stat(app); err == nil {
+				found = true
+				if err := os.RemoveAll(app); err != nil {
+					fmt.Printf("  \033[33m!\033[0m Cannot remove %s: %v\n", app, err)
+					fmt.Printf("  You may need to remove it manually: sudo rm -rf %q\n", app)
+				} else {
+					fmt.Printf("  \033[32m✓\033[0m %s removed\n", app)
+				}
+			}
+		}
+
+	case "linux":
+		// Try dpkg (Debian/Ubuntu .deb).
+		if out, _ := exec.Command("dpkg", "-l", "synapses").CombinedOutput(); strings.Contains(string(out), "synapses") {
+			found = true
+			if out, err := exec.Command("sudo", "dpkg", "--purge", "synapses").CombinedOutput(); err != nil {
+				// Fallback without sudo.
+				if out2, err2 := exec.Command("dpkg", "--purge", "synapses").CombinedOutput(); err2 != nil {
+					fmt.Printf("  \033[33m!\033[0m dpkg --purge failed: %s\n", strings.TrimSpace(string(out)))
+					_ = out2
+				} else {
+					fmt.Printf("  \033[32m✓\033[0m dpkg --purge synapses\n")
+				}
 			} else {
-				fmt.Printf("  \033[32m✓\033[0m %s removed\n", app)
+				_ = out
+				fmt.Printf("  \033[32m✓\033[0m dpkg --purge synapses\n")
+			}
+		}
+		// Try rpm (Fedora/RHEL).
+		if err := exec.Command("rpm", "-q", "synapses").Run(); err == nil {
+			found = true
+			if out, err := exec.Command("sudo", "rpm", "-e", "synapses").CombinedOutput(); err != nil {
+				if out2, err2 := exec.Command("rpm", "-e", "synapses").CombinedOutput(); err2 != nil {
+					fmt.Printf("  \033[33m!\033[0m rpm -e failed: %s\n", strings.TrimSpace(string(out)))
+					_ = out2
+				} else {
+					fmt.Printf("  \033[32m✓\033[0m rpm -e synapses\n")
+				}
+			} else {
+				_ = out
+				fmt.Printf("  \033[32m✓\033[0m rpm -e synapses\n")
+			}
+		}
+		// Remove AppImage from common locations.
+		for _, p := range []string{
+			filepath.Join(home, "Applications", "Synapses.AppImage"),
+			filepath.Join(home, "Applications", "synapses.AppImage"),
+			filepath.Join(home, ".local", "bin", "Synapses.AppImage"),
+			filepath.Join(home, ".local", "bin", "synapses.AppImage"),
+		} {
+			if _, err := os.Stat(p); err == nil {
+				found = true
+				os.Remove(p)
+				fmt.Printf("  \033[32m✓\033[0m Removed AppImage: %s\n", p)
+			}
+		}
+		// Remove .desktop entry.
+		desktopFile := filepath.Join(home, ".local", "share", "applications", "synapses.desktop")
+		if _, err := os.Stat(desktopFile); err == nil {
+			os.Remove(desktopFile)
+			fmt.Printf("  \033[32m✓\033[0m Removed desktop entry\n")
+		}
+	}
+
+	// ── Step 3: Remove app data, caches, preferences ──────────────────────
+	// Tauri app identifier: com.synapsesos.app
+	var dataPaths []string
+	switch runtime.GOOS {
+	case "darwin":
+		lib := filepath.Join(home, "Library")
+		dataPaths = []string{
+			filepath.Join(lib, "Application Support", "com.synapsesos.app"),
+			filepath.Join(lib, "Caches", "com.synapsesos.app"),
+			filepath.Join(lib, "Preferences", "com.synapsesos.app.plist"),
+			filepath.Join(lib, "Logs", "com.synapsesos.app"),
+			filepath.Join(lib, "WebKit", "com.synapsesos.app"),
+			filepath.Join(lib, "Saved Application State", "com.synapsesos.app.savedState"),
+		}
+	case "linux":
+		dataPaths = []string{
+			filepath.Join(home, ".local", "share", "com.synapsesos.app"),
+			filepath.Join(home, ".config", "com.synapsesos.app"),
+			filepath.Join(home, ".cache", "com.synapsesos.app"),
+		}
+	}
+
+	for _, p := range dataPaths {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue
+		}
+		found = true
+		if fi.IsDir() {
+			os.RemoveAll(p)
+		} else {
+			os.Remove(p)
+		}
+		fmt.Printf("  \033[32m✓\033[0m Removed app data: %s\n", relDisplay(p))
+	}
+
+	if !found {
+		fmt.Println("  No desktop app found")
+	}
+}
+
+// killAppProcess kills any running Synapses desktop app process.
+func killAppProcess() {
+	var patterns []string
+	switch runtime.GOOS {
+	case "darwin":
+		patterns = []string{"Synapses.app"}
+	case "linux":
+		patterns = []string{"synapses", "Synapses"}
+	default:
+		return
+	}
+	myPID := os.Getpid()
+	for _, pattern := range patterns {
+		out, _ := exec.Command("pgrep", "-f", pattern).Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			pid := 0
+			if _, err := fmt.Sscanf(line, "%d", &pid); err != nil || pid == myPID || pid == 0 {
+				continue
+			}
+			// Don't kill daemon processes — those are handled separately.
+			// Only kill the Tauri app (GUI) process.
+			cmdline, _ := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "comm=").Output()
+			cmd := strings.TrimSpace(string(cmdline))
+			if strings.Contains(cmd, "synapses") && !strings.Contains(cmd, "daemon") {
+				if proc, err := os.FindProcess(pid); err == nil {
+					proc.Signal(syscall.SIGTERM)
+					fmt.Printf("  \033[32m✓\033[0m Stopped desktop app (pid %d)\n", pid)
+				}
 			}
 		}
 	}
