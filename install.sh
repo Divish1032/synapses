@@ -1,19 +1,24 @@
 #!/bin/sh
-# Synapses installer
+# Synapses installer — thin wrapper
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
 #
-# Installs synapses — a local-first, graph-based context manager for AI coding agents.
-# No Go required if a pre-built binary is available for your platform.
+# This script delegates to the canonical installer at synapsesos.com, which
+# handles all installation paths:
+#   - macOS/Linux GUI: downloads the desktop app (includes CLI)
+#   - Linux headless:  downloads the standalone CLI binary
 #
-# System Requirements:
-#   macOS (arm64/x86_64), Linux (amd64/arm64)
-#   From source: Go 1.22+
+# Environment variables:
+#   SYNAPSES_DOWNLOAD_URL  — override download base URL (for mirrors/corporate networks)
+#   GITHUB_TOKEN           — pass to GitHub API for higher rate limits in CI
+#   SYNAPSES_CLI_ONLY=1    — force CLI-only install (skip app, even with GUI)
+#
+# For more information: https://synapsesos.com/docs/install
 
 set -e
 
-SYNAPSES_PKG="github.com/SynapsesOS/synapses/cmd/synapses@latest"
+CANONICAL_INSTALLER="https://synapsesos.com/install.sh"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,7 +27,53 @@ info() { printf "  \033[1m→\033[0m %s\n" "$*"; }
 warn() { printf "  \033[33m!\033[0m %s\n" "$*"; }
 die()  { printf "\n  \033[31m✗\033[0m %s\n\n" "$*" >&2; exit 1; }
 
-# ── platform detection ────────────────────────────────────────────────────────
+# ── detect GUI ───────────────────────────────────────────────────────────────
+
+has_gui() {
+  # macOS always has GUI (unless explicitly overridden)
+  [ "$(uname -s)" = "Darwin" ] && return 0
+  # Linux: check for display server
+  [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+  return 1
+}
+
+is_headless() {
+  [ "${SYNAPSES_CLI_ONLY:-}" = "1" ] && return 0
+  ! has_gui
+}
+
+# ── download helper ──────────────────────────────────────────────────────────
+
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$1"
+  else
+    die "Neither curl nor wget found — install one and retry."
+  fi
+}
+
+# ── try canonical installer first ────────────────────────────────────────────
+
+info "Fetching installer from synapsesos.com..."
+
+INSTALLER_SCRIPT=$(fetch "$CANONICAL_INSTALLER" 2>/dev/null) || INSTALLER_SCRIPT=""
+
+if [ -n "$INSTALLER_SCRIPT" ]; then
+  # Run the canonical installer
+  echo "$INSTALLER_SCRIPT" | sh
+  exit $?
+fi
+
+# ── fallback: direct binary install ──────────────────────────────────────────
+# If synapsesos.com is unreachable, fall back to installing CLI from GitHub.
+
+warn "Could not reach synapsesos.com — falling back to CLI-only install from GitHub"
+echo ""
+
+GITHUB_REPO="SynapsesOS/synapses"
+INSTALL_DIR="$HOME/.synapses/bin"
 
 detect_platform() {
   OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -30,174 +81,90 @@ detect_platform() {
   case "$ARCH" in
     x86_64|amd64) ARCH="x86_64" ;;
     arm64|aarch64) ARCH="arm64" ;;
-    *) ARCH="$ARCH" ;;
   esac
-  case "$OS" in
-    darwin) PLATFORM="${OS}_${ARCH}" ;;
-    linux)  PLATFORM="${OS}_${ARCH}" ;;
-    *) PLATFORM="" ;;
-  esac
+  PLATFORM="${OS}_${ARCH}"
 }
 
-# ── try downloading pre-built binary ─────────────────────────────────────────
+detect_platform
 
-GITHUB_REPO="SynapsesOS/synapses"
-INSTALL_DIR="$HOME/.synapses/bin"
-
-try_download_binary() {
-  detect_platform
-  if [ -z "$PLATFORM" ]; then
-    return 1
-  fi
-
-  # Get latest release tag
-  LATEST_URL="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
-  if command -v curl >/dev/null 2>&1; then
-    RELEASE_JSON=$(curl -fsSL "$LATEST_URL" 2>/dev/null) || return 1
-  elif command -v wget >/dev/null 2>&1; then
-    RELEASE_JSON=$(wget -qO- "$LATEST_URL" 2>/dev/null) || return 1
-  else
-    return 1
-  fi
-
-  # Extract download URL for our platform (e.g., synapses_darwin_arm64.tar.gz)
-  ASSET_NAME="synapses_${PLATFORM}.tar.gz"
-  DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${ASSET_NAME}\"" | head -1 | grep -o 'https://[^"]*')
-
-  if [ -z "$DOWNLOAD_URL" ]; then
-    return 1
-  fi
-
-  info "Downloading pre-built binary ($PLATFORM)..."
-  mkdir -p "$INSTALL_DIR"
-  TMPDIR=$(mktemp -d)
-  trap "rm -rf $TMPDIR" EXIT
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$DOWNLOAD_URL" -o "$TMPDIR/$ASSET_NAME" || return 1
-  else
-    wget -q "$DOWNLOAD_URL" -O "$TMPDIR/$ASSET_NAME" || return 1
-  fi
-
-  tar -xzf "$TMPDIR/$ASSET_NAME" -C "$TMPDIR" 2>/dev/null || return 1
-
-  # Find the binary in extracted files
-  if [ -f "$TMPDIR/synapses" ]; then
-    mv "$TMPDIR/synapses" "$INSTALL_DIR/synapses"
-  else
-    return 1
-  fi
-
-  chmod +x "$INSTALL_DIR/synapses" 2>/dev/null
-  # Clear macOS quarantine and re-sign binary (cp strips ad-hoc signature)
-  xattr -d com.apple.quarantine "$INSTALL_DIR/synapses" 2>/dev/null || true
-  codesign --force --sign - "$INSTALL_DIR/synapses" 2>/dev/null || true
-  ok "synapses installed to $INSTALL_DIR/synapses"
-  BINARY_INSTALLED=true
-  return 0
-}
-
-BINARY_INSTALLED=false
-
-# ── preflight ────────────────────────────────────────────────────────────────
-
-# Try pre-built binary first (no Go required)
-if try_download_binary; then
-  info "Installed pre-built binary (no Go required)"
-elif command -v go >/dev/null 2>&1; then
-  GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
-  info "No pre-built binary available; using Go $GO_VERSION"
-else
-  die "Could not download pre-built binary and Go is not installed.\n  Install Go from https://go.dev/dl/ or download the desktop app from https://github.com/$GITHUB_REPO/releases"
+# Get latest release tag
+LATEST_URL="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+AUTH_HEADER=""
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  AUTH_HEADER="-H \"Authorization: token $GITHUB_TOKEN\""
 fi
 
-# ── header ────────────────────────────────────────────────────────────────────
+RELEASE_JSON=$(fetch "$LATEST_URL") || die "Could not fetch latest release from GitHub — check your network connection."
 
-echo ""
-printf "  \033[1mSynapses installer\033[0m (code graph + MCP server)\n"
-echo "  ──────────────────────────────────────"
-echo ""
+ASSET_NAME="synapses_${PLATFORM}.tar.gz"
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${ASSET_NAME}\"" | head -1 | grep -o 'https://[^"]*')
 
-# ── install core ──────────────────────────────────────────────────────────────
-
-if [ "$BINARY_INSTALLED" = true ]; then
-  info "Synapses already installed via download"
-  EFFECTIVE_BIN="$INSTALL_DIR"
-else
-  info "Installing synapses via go install..."
-  go install "$SYNAPSES_PKG"
-  GOBIN_DIR=$(go env GOBIN); GOPATH_DIR=$(go env GOPATH); EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
-  ok "synapses installed  ($(command -v synapses 2>/dev/null || echo "$EFFECTIVE_BIN/synapses"))"
+if [ -z "$DOWNLOAD_URL" ]; then
+  die "No pre-built binary found for $PLATFORM. Build from source: https://github.com/$GITHUB_REPO#from-source"
 fi
 
-# ── path verification ────────────────────────────────────────────────────────
+info "Downloading synapses ($PLATFORM)..."
+mkdir -p "$INSTALL_DIR"
+TMPDIR_INSTALL=$(mktemp -d)
+trap "rm -rf $TMPDIR_INSTALL" EXIT
 
-if command -v synapses >/dev/null 2>&1; then
-  ok "synapses is in PATH — ready to use"
-else
-  # If we downloaded to ~/.synapses/bin, that's our effective bin
-  if [ "$BINARY_INSTALLED" = true ]; then
-    EFFECTIVE_BIN="$INSTALL_DIR"
-  elif command -v go >/dev/null 2>&1; then
-    GOBIN_DIR=$(go env GOBIN)
-    GOPATH_DIR=$(go env GOPATH)
-    EFFECTIVE_BIN="${GOBIN_DIR:-${GOPATH_DIR}/bin}"
+fetch "$DOWNLOAD_URL" > "$TMPDIR_INSTALL/$ASSET_NAME" || die "Download failed"
+
+# Verify checksum if available
+CHECKSUM_URL=$(echo "$RELEASE_JSON" | grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*checksums.txt"' | head -1 | grep -o 'https://[^"]*')
+if [ -n "$CHECKSUM_URL" ]; then
+  fetch "$CHECKSUM_URL" > "$TMPDIR_INSTALL/checksums.txt" 2>/dev/null || true
+  if [ -f "$TMPDIR_INSTALL/checksums.txt" ]; then
+    EXPECTED_SHA=$(grep "$ASSET_NAME" "$TMPDIR_INSTALL/checksums.txt" | awk '{print $1}')
+    if [ -n "$EXPECTED_SHA" ]; then
+      if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA=$(sha256sum "$TMPDIR_INSTALL/$ASSET_NAME" | awk '{print $1}')
+      elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA=$(shasum -a 256 "$TMPDIR_INSTALL/$ASSET_NAME" | awk '{print $1}')
+      fi
+      if [ -n "${ACTUAL_SHA:-}" ] && [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+        die "Checksum verification failed! Expected: $EXPECTED_SHA, Got: $ACTUAL_SHA"
+      fi
+      ok "Checksum verified"
+    fi
   fi
+fi
 
-  echo ""
-  warn "$EFFECTIVE_BIN is not in your PATH."
-  echo ""
-  echo "       Activate now:"
-  echo "         export PATH=\"$EFFECTIVE_BIN:\$PATH\""
-  echo ""
-  echo "       Persist for future sessions:"
+tar -xzf "$TMPDIR_INSTALL/$ASSET_NAME" -C "$TMPDIR_INSTALL" 2>/dev/null || die "Failed to extract archive"
 
+if [ -f "$TMPDIR_INSTALL/synapses" ]; then
+  mv "$TMPDIR_INSTALL/synapses" "$INSTALL_DIR/synapses"
+else
+  die "Binary not found in archive"
+fi
+
+chmod +x "$INSTALL_DIR/synapses"
+# macOS: clear quarantine and re-sign
+xattr -d com.apple.quarantine "$INSTALL_DIR/synapses" 2>/dev/null || true
+codesign --force --sign - "$INSTALL_DIR/synapses" 2>/dev/null || true
+
+# Create /usr/local/bin symlink if writable
+if [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+  ln -sf "$INSTALL_DIR/synapses" /usr/local/bin/synapses 2>/dev/null || true
+  ok "CLI symlink created at /usr/local/bin/synapses"
+fi
+
+ok "Synapses CLI installed to $INSTALL_DIR/synapses"
+
+# Check PATH
+if ! command -v synapses >/dev/null 2>&1; then
+  echo ""
+  warn "$INSTALL_DIR is not in your PATH."
   SHELL_NAME=$(basename "$SHELL" 2>/dev/null)
   case "$SHELL_NAME" in
-    zsh)  echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.zshrc" ;;
-    bash)
-      if [ -f "$HOME/.bash_profile" ]; then
-        echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.bash_profile"
-      else
-        echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.bashrc"
-      fi ;;
-    fish) echo "         fish_add_path $EFFECTIVE_BIN" ;;
-    *)    echo "         echo 'export PATH=\"$EFFECTIVE_BIN:\$PATH\"' >> ~/.profile" ;;
+    zsh)  echo "    echo 'export PATH=\"\$HOME/.synapses/bin:\$PATH\"' >> ~/.zshrc" ;;
+    bash) echo "    echo 'export PATH=\"\$HOME/.synapses/bin:\$PATH\"' >> ~/.bashrc" ;;
+    fish) echo "    fish_add_path ~/.synapses/bin" ;;
+    *)    echo "    echo 'export PATH=\"\$HOME/.synapses/bin:\$PATH\"' >> ~/.profile" ;;
   esac
   echo ""
 fi
 
-# ── start daemon ─────────────────────────────────────────────────────────────
-
 echo ""
-echo "  ──────────────────────────────────────"
-
-# Resolve binary: prefer PATH, fall back to install location.
-SYNAPSES_BIN=$(command -v synapses 2>/dev/null || echo "${EFFECTIVE_BIN}/synapses")
-
-if [ -x "$SYNAPSES_BIN" ]; then
-  info "Starting daemon..."
-  "$SYNAPSES_BIN" daemon start || warn "Daemon start failed — run 'synapses daemon start' later."
-else
-  warn "Skipping daemon start — synapses not in PATH yet."
-  warn "After updating PATH (see above), run: synapses daemon start"
-fi
-
-# ── next steps ────────────────────────────────────────────────────────────────
-
-echo "  ──────────────────────────────────────"
-printf "  \033[1mDone! Next step:\033[0m\n"
-echo ""
-echo "    cd /your/project"
-echo "    synapses init"
-echo ""
-echo "  This indexes your project, starts the daemon, and"
-echo "  connects your AI agents — all in one command."
-echo ""
-echo "  Optional — start daemon at login:"
-echo "       synapses daemon install"
-echo ""
-echo "  Useful commands:"
-echo "    synapses daemon status        — see what's running"
-echo "    synapses doctor               — full health check"
+echo "  Next: cd /your/project && synapses init"
 echo ""
