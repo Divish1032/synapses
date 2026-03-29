@@ -548,24 +548,44 @@ func connectSingleAgent(absPath, agent string) connectResult {
 		}
 
 	case "windsurf":
-		mcpFile := filepath.Join(absPath, ".windsurf", "mcp_config.json")
-		rulesFile := filepath.Join(absPath, ".windsurfrules")
+		// Windsurf only reads MCP config from the global path — no project-level MCP support.
+		// The project path is encoded in the URL query string so one global entry works.
+		mcpFile := windsurfGlobalMCPPath()
+		// Rules: use current .windsurf/rules/ directory format (legacy .windsurfrules is deprecated).
+		rulesFile := filepath.Join(absPath, ".windsurf", "rules", "synapses.md")
 		ops = []writeOp{
-			{func() error { return writeHTTPMCPServerEntry(mcpFile, absPath) }, ".windsurf/mcp_config.json"},
-			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, ".windsurfrules"},
+			{func() error { return writeHTTPMCPServerEntry(mcpFile, absPath) }, "~/.codeium/windsurf/mcp_config.json (global)"},
+			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, ".windsurf/rules/synapses.md"},
+		}
+		// Clean up legacy .windsurfrules if it has a synapses section.
+		legacyRules := filepath.Join(absPath, ".windsurfrules")
+		if data, err := os.ReadFile(legacyRules); err == nil {
+			if strings.Contains(string(data), "synapses:start") {
+				cleaned := removeSynapsesSection(string(data))
+				if strings.TrimSpace(cleaned) == "" {
+					os.Remove(legacyRules)
+				} else {
+					os.WriteFile(legacyRules, []byte(cleaned), 0o644)
+				}
+			}
 		}
 
 	case "zed":
+		// Zed reads .rules at project root for AI agent instructions.
+		rulesFile := filepath.Join(absPath, ".rules")
 		ops = []writeOp{
 			{func() error { return writeZedMCPConfig(absPath) }, ".zed/settings.json"},
+			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, ".rules"},
 		}
 
 	case "antigravity":
-		mcpFile := filepath.Join(absPath, ".agent", "mcp.json")
-		rulesFile := filepath.Join(absPath, ".agent", "rules", "synapses.md")
+		// Antigravity only reads MCP config from the global path — no project-level MCP support.
+		mcpFile := antigravityGlobalMCPPath()
+		// Antigravity reads AGENTS.md (cross-tool standard) at project root for instructions.
+		rulesFile := filepath.Join(absPath, "AGENTS.md")
 		ops = []writeOp{
-			{func() error { return writeHTTPMCPServerEntry(mcpFile, absPath) }, ".agent/mcp.json"},
-			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, ".agent/rules/synapses.md"},
+			{func() error { return writeHTTPMCPServerEntry(mcpFile, absPath) }, "~/.gemini/antigravity/mcp_config.json (global)"},
+			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, "AGENTS.md"},
 		}
 
 	default:

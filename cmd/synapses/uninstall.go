@@ -279,15 +279,20 @@ func cleanAgentConfigs(absPath string) {
 	cleanMCPServerEntry(filepath.Join(absPath, ".cursor", "mcp.json"), "cursor")
 	cleanFile(filepath.Join(absPath, ".cursor", "rules", "synapses.mdc"), "cursor")
 
-	// Windsurf
-	cleanMCPServerEntry(filepath.Join(absPath, ".windsurf", "mcp_config.json"), "windsurf")
-	cleanSynapsesSection(filepath.Join(absPath, ".windsurfrules"), "windsurf")
+	// Windsurf — global MCP config + project-level rules (new and legacy paths)
+	cleanMCPServerEntry(windsurfGlobalMCPPath(), "windsurf")
+	cleanMCPServerEntry(filepath.Join(absPath, ".windsurf", "mcp_config.json"), "windsurf") // legacy project-level
+	cleanFile(filepath.Join(absPath, ".windsurf", "rules", "synapses.md"), "windsurf")       // current rules path
+	cleanSynapsesSection(filepath.Join(absPath, ".windsurfrules"), "windsurf")               // legacy rules path
 
-	// Zed
+	// Zed — project-level MCP + rules
 	cleanZedMCPConfig(filepath.Join(absPath, ".zed", "settings.json"))
+	cleanSynapsesSection(filepath.Join(absPath, ".rules"), "zed")
 
-	// Antigravity
-	cleanMCPServerEntry(filepath.Join(absPath, ".agent", "mcp.json"), "antigravity")
+	// Antigravity — global MCP config + project-level rules (new and legacy paths)
+	cleanMCPServerEntry(antigravityGlobalMCPPath(), "antigravity")
+	cleanMCPServerEntry(filepath.Join(absPath, ".agent", "mcp.json"), "antigravity") // legacy project-level
+	cleanSynapsesSection(filepath.Join(absPath, "AGENTS.md"), "antigravity")          // current rules path
 	cleanFile(filepath.Join(absPath, ".agent", "rules", "synapses.md"), "antigravity")
 }
 

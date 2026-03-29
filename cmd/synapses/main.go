@@ -2390,6 +2390,34 @@ func writeHTTPMCPServerEntry(file, projectRoot string) error {
 	return os.WriteFile(file, append(out, '\n'), 0o644)
 }
 
+// windsurfGlobalMCPPath returns the global MCP config path for Windsurf.
+// Windsurf only reads MCP servers from this global file — no project-level support.
+func windsurfGlobalMCPPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
+}
+
+// antigravityGlobalMCPPath returns the global MCP config path for Antigravity.
+// Antigravity only reads MCP servers from this global file — no project-level support.
+func antigravityGlobalMCPPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".gemini", "antigravity", "mcp_config.json")
+}
+
+// removeSynapsesSection strips the <!-- synapses:start --> ... <!-- synapses:end -->
+// section from content, returning the remaining text.
+func removeSynapsesSection(content string) string {
+	startIdx := strings.Index(content, synapsesSectionStart)
+	if startIdx == -1 {
+		return content
+	}
+	endIdx := strings.Index(content, synapsesSectionEnd)
+	if endIdx == -1 {
+		return content
+	}
+	return strings.TrimSpace(content[:startIdx]+content[endIdx+len(synapsesSectionEnd):]) + "\n"
+}
+
 // writeZedMCPConfig merges a synapses entry into .zed/settings.json using
 // Zed's context_servers format for HTTP MCP servers.
 func writeZedMCPConfig(repoRoot string) error {
@@ -2496,21 +2524,23 @@ func cmdConnect(args []string) error {
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, frontmatter))
 
 	case "windsurf":
-		mcpFile := filepath.Join(absPath, ".windsurf", "mcp_config.json")
+		// Windsurf only reads MCP from global path — no project-level MCP support.
+		mcpFile := windsurfGlobalMCPPath()
 		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
-		rulesFile := filepath.Join(absPath, ".windsurfrules")
+		rulesFile := filepath.Join(absPath, ".windsurf", "rules", "synapses.md")
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	case "zed":
 		settingsFile := filepath.Join(absPath, ".zed", "settings.json")
 		add(settingsFile, writeZedMCPConfig(absPath))
+		rulesFile := filepath.Join(absPath, ".rules")
+		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	case "antigravity":
-		// Antigravity (https://antigravity.google) stores workspace MCP config
-		// at .agent/mcp.json and agent rules at .agent/rules/
-		mcpFile := filepath.Join(absPath, ".agent", "mcp.json")
+		// Antigravity only reads MCP from global path — no project-level MCP support.
+		mcpFile := antigravityGlobalMCPPath()
 		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
-		rulesFile := filepath.Join(absPath, ".agent", "rules", "synapses.md")
+		rulesFile := filepath.Join(absPath, "AGENTS.md")
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	default:
