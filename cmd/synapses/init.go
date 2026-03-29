@@ -549,12 +549,12 @@ func connectSingleAgent(absPath, agent string) connectResult {
 
 	case "windsurf":
 		// Windsurf only reads MCP config from the global path — no project-level MCP support.
-		// The project path is encoded in the URL query string so one global entry works.
+		// Use stdio transport: IDE launches `synapses start` as subprocess, inherits cwd → works for any project.
 		mcpFile := windsurfGlobalMCPPath()
 		// Rules: use current .windsurf/rules/ directory format (legacy .windsurfrules is deprecated).
 		rulesFile := filepath.Join(absPath, ".windsurf", "rules", "synapses.md")
 		ops = []writeOp{
-			{func() error { return writeHTTPMCPServerEntry(mcpFile, absPath) }, "~/.codeium/windsurf/mcp_config.json (global)"},
+			{func() error { return writeStdioMCPServerEntry(mcpFile) }, "~/.codeium/windsurf/mcp_config.json (global)"},
 			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, ".windsurf/rules/synapses.md"},
 		}
 		// Clean up legacy .windsurfrules if it has a synapses section.
@@ -580,11 +580,12 @@ func connectSingleAgent(absPath, agent string) connectResult {
 
 	case "antigravity":
 		// Antigravity only reads MCP config from the global path — no project-level MCP support.
+		// Use stdio transport: IDE launches `synapses start` as subprocess, inherits cwd → works for any project.
 		mcpFile := antigravityGlobalMCPPath()
 		// Antigravity reads AGENTS.md (cross-tool standard) at project root for instructions.
 		rulesFile := filepath.Join(absPath, "AGENTS.md")
 		ops = []writeOp{
-			{func() error { return writeHTTPMCPServerEntry(mcpFile, absPath) }, "~/.gemini/antigravity/mcp_config.json (global)"},
+			{func() error { return writeStdioMCPServerEntry(mcpFile) }, "~/.gemini/antigravity/mcp_config.json (global)"},
 			{func() error { return writeGuidanceFile(absPath, rulesFile, "") }, "AGENTS.md"},
 		}
 

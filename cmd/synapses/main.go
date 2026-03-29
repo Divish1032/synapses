@@ -2390,6 +2390,47 @@ func writeHTTPMCPServerEntry(file, projectRoot string) error {
 	return os.WriteFile(file, append(out, '\n'), 0o644)
 }
 
+// writeStdioMCPServerEntry writes a stdio-based MCP server entry to a global
+// config file. Used for agents that only support global MCP (Windsurf, Antigravity).
+// Stdio transport lets the IDE launch `synapses start` as a subprocess — the
+// subprocess inherits the IDE's working directory, so it automatically connects
+// to the correct project without a hardcoded path. This means one global config
+// works for all projects.
+func writeStdioMCPServerEntry(file string) error {
+	raw := map[string]interface{}{"mcpServers": map[string]interface{}{}}
+	if data, err := os.ReadFile(file); err == nil {
+		parsed := map[string]interface{}{}
+		if json.Unmarshal(data, &parsed) == nil {
+			raw = parsed
+		}
+	}
+	if _, ok := raw["mcpServers"]; !ok {
+		raw["mcpServers"] = map[string]interface{}{}
+	}
+	servers, _ := raw["mcpServers"].(map[string]interface{})
+	if servers == nil {
+		servers = map[string]interface{}{}
+		raw["mcpServers"] = servers
+	}
+	// Find the synapses binary path. Prefer the one on PATH so it survives updates.
+	bin := "synapses"
+	if p, err := exec.LookPath("synapses"); err == nil {
+		bin = p
+	}
+	servers["synapses"] = map[string]interface{}{
+		"command": bin,
+		"args":    []string{"start"},
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, append(out, '\n'), 0o644)
+}
+
 // windsurfGlobalMCPPath returns the global MCP config path for Windsurf.
 // Windsurf only reads MCP servers from this global file — no project-level support.
 func windsurfGlobalMCPPath() string {
@@ -2524,9 +2565,9 @@ func cmdConnect(args []string) error {
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, frontmatter))
 
 	case "windsurf":
-		// Windsurf only reads MCP from global path — no project-level MCP support.
+		// Windsurf only reads MCP from global path. Use stdio so it works for any project.
 		mcpFile := windsurfGlobalMCPPath()
-		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		add(mcpFile, writeStdioMCPServerEntry(mcpFile))
 		rulesFile := filepath.Join(absPath, ".windsurf", "rules", "synapses.md")
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
@@ -2537,9 +2578,9 @@ func cmdConnect(args []string) error {
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
 	case "antigravity":
-		// Antigravity only reads MCP from global path — no project-level MCP support.
+		// Antigravity only reads MCP from global path. Use stdio so it works for any project.
 		mcpFile := antigravityGlobalMCPPath()
-		add(mcpFile, writeHTTPMCPServerEntry(mcpFile, absPath))
+		add(mcpFile, writeStdioMCPServerEntry(mcpFile))
 		rulesFile := filepath.Join(absPath, "AGENTS.md")
 		add(rulesFile, writeGuidanceFile(absPath, rulesFile, ""))
 
