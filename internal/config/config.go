@@ -653,12 +653,16 @@ func Load(dir string) (*Config, error) {
 		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
 			cfg.UseGoTypes = true
 		}
-		mergeGlobalEmbedConfig(cfg)
+		mergeGlobalConfig(cfg, nil) // no project config → all global values apply
 		return cfg, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+
+	// Extract raw keys before full parse so we know which keys the project
+	// explicitly set (needed for global config merge: project wins).
+	projectRawKeys := extractRawKeys(data)
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -704,7 +708,7 @@ func Load(dir string) (*Config, error) {
 			cfg.Federation[i].Path = filepath.Join(dir, f.Path)
 		}
 	}
-	mergeGlobalEmbedConfig(&cfg)
+	mergeGlobalConfig(&cfg, projectRawKeys)
 	return &cfg, nil
 }
 
@@ -1259,40 +1263,6 @@ func defaultConfig() *Config {
 	return c
 }
 
-// mergeGlobalEmbedConfig fills in EmbeddingEndpoint and Embeddings from
-// the global ~/.synapses/config.json when the project-local config doesn't
-// set them. This lets users configure embeddings once globally.
-func mergeGlobalEmbedConfig(cfg *Config) {
-	if cfg.EmbeddingEndpoint != "" && cfg.Embeddings != "" && cfg.EmbeddingModel != "" {
-		return // project config already has all
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	globalPath := filepath.Join(home, ".synapses", "config.json")
-	data, err := os.ReadFile(globalPath)
-	if err != nil {
-		return
-	}
-	var global struct {
-		EmbeddingEndpoint string `json:"embedding_endpoint"`
-		Embeddings        string `json:"embeddings"`
-		EmbeddingModel    string `json:"embedding_model"`
-	}
-	if json.Unmarshal(data, &global) != nil {
-		return
-	}
-	if cfg.EmbeddingEndpoint == "" && global.EmbeddingEndpoint != "" {
-		cfg.EmbeddingEndpoint = global.EmbeddingEndpoint
-	}
-	if cfg.Embeddings == "" && global.Embeddings != "" {
-		cfg.Embeddings = global.Embeddings
-	}
-	if cfg.EmbeddingModel == "" && global.EmbeddingModel != "" {
-		cfg.EmbeddingModel = global.EmbeddingModel
-	}
-}
 
 // globContains is a permissive match: checks if pattern is a substring of name.
 // For the MVP this is sufficient; full glob matching can be added later.
