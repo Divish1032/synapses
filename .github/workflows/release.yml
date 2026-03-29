@@ -257,3 +257,23 @@ jobs:
           git add Formula/synapses.rb Casks/synapses.rb
           git commit -m "synapses ${VERSION}" || echo "No changes to commit"
           git push
+
+  trigger-app-release:
+    name: Trigger App Release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to synapses-app
+        env:
+          APP_REPO_TOKEN: ${{ secrets.APP_REPO_TOKEN }}
+        run: |
+          if [ -z "$APP_REPO_TOKEN" ]; then
+            echo "APP_REPO_TOKEN not set — skipping app release trigger"
+            exit 0
+          fi
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token $APP_REPO_TOKEN" \
+            "https://api.github.com/repos/SynapsesOS/synapses-app/dispatches" \
+            -d "{\"event_type\": \"daemon-release\", \"client_payload\": {\"version\": \"${{ github.ref_name }}\"}}"
+          echo "Dispatched daemon-release event to synapses-app"
