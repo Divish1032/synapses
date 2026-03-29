@@ -203,13 +203,57 @@ jobs:
           end
           FORMULA
 
+          # Generate cask formula (points to synapses-app DMG releases)
+          cat > /tmp/synapses-cask.rb << CASK
+          cask "synapses" do
+            version "${VERSION}"
+
+            on_arm do
+              url "https://github.com/SynapsesOS/synapses-app/releases/download/v#{version}/Synapses-#{version}-arm64.dmg"
+              sha256 :no_check
+            end
+
+            on_intel do
+              url "https://github.com/SynapsesOS/synapses-app/releases/download/v#{version}/Synapses-#{version}-x64.dmg"
+              sha256 :no_check
+            end
+
+            name "Synapses"
+            desc "Code intelligence for AI agents"
+            homepage "https://synapsesos.com"
+
+            app "Synapses.app"
+
+            postflight do
+              # Copy binary from app bundle to ~/.synapses/bin for CLI access
+              bin_dir = "#{ENV['HOME']}/.synapses/bin"
+              FileUtils.mkdir_p(bin_dir)
+              ["synapses", "synapses-aarch64-apple-darwin", "synapses-x86_64-apple-darwin"].each do |name|
+                binary = "#{appdir}/Synapses.app/Contents/Resources/#{name}"
+                if File.exist?(binary)
+                  FileUtils.cp(binary, "#{bin_dir}/synapses")
+                  FileUtils.chmod(0755, "#{bin_dir}/synapses")
+                  break
+                end
+              end
+            end
+
+            zap trash: [
+              "~/.synapses",
+              "~/Library/LaunchAgents/com.synapsesos.daemon.plist",
+            ]
+          end
+          CASK
+
           # Push to homebrew-tap
           cd /tmp
           git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/SynapsesOS/homebrew-tap.git"
+          mkdir -p homebrew-tap/Casks
           cp synapses.rb homebrew-tap/Formula/synapses.rb
+          cp synapses-cask.rb homebrew-tap/Casks/synapses.rb
           cd homebrew-tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/synapses.rb
+          git add Formula/synapses.rb Casks/synapses.rb
           git commit -m "synapses ${VERSION}" || echo "No changes to commit"
           git push
