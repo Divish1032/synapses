@@ -676,22 +676,13 @@ func removeBinary() {
 		removeAppBundle()
 	}
 
-	// Detect Homebrew install and use brew uninstall for clean removal.
-	if isHomebrewInstall(self) {
-		fmt.Println("  Detected Homebrew installation")
-		if out, err := exec.Command("brew", "uninstall", "--force", "synapses").CombinedOutput(); err != nil {
-			fmt.Printf("  \033[33m!\033[0m brew uninstall failed: %s\n", strings.TrimSpace(string(out)))
-		} else {
-			fmt.Printf("  \033[32m✓\033[0m brew uninstall synapses\n")
-		}
-		// Also untap if present.
-		if out, err := exec.Command("brew", "untap", "synapsesos/tap").CombinedOutput(); err == nil {
-			fmt.Printf("  \033[32m✓\033[0m brew untap synapsesos/tap\n")
-		} else {
-			_ = out // tap may not exist, that's fine
-		}
-	} else {
-		// Direct removal for non-Homebrew installs.
+	// Check if Homebrew has synapses installed (regardless of which binary
+	// we're running from — the user may run uninstall from a dev build or
+	// different install path). Query brew directly.
+	brewCleaned := tryBrewUninstall()
+
+	// Direct removal for the current binary (if not already handled by brew).
+	if !brewCleaned || !isHomebrewPath(self) {
 		if err := os.Remove(self); err != nil {
 			if !os.IsNotExist(err) {
 				fmt.Printf("  \033[33m!\033[0m Cannot remove binary: %v\n", err)
@@ -706,8 +697,32 @@ func removeBinary() {
 	removeStaleBindaries(self)
 }
 
-// isHomebrewInstall checks if the binary path is inside a Homebrew Cellar.
-func isHomebrewInstall(binPath string) bool {
+// tryBrewUninstall checks if Homebrew has synapses installed and removes it.
+// Returns true if brew uninstall was performed.
+func tryBrewUninstall() bool {
+	// Check if brew is available.
+	if _, err := exec.LookPath("brew"); err != nil {
+		return false
+	}
+	// Check if synapses is installed via brew.
+	if err := exec.Command("brew", "list", "synapses").Run(); err != nil {
+		return false // not installed via brew
+	}
+	fmt.Println("  Detected Homebrew installation")
+	if out, err := exec.Command("brew", "uninstall", "--force", "synapses").CombinedOutput(); err != nil {
+		fmt.Printf("  \033[33m!\033[0m brew uninstall failed: %s\n", strings.TrimSpace(string(out)))
+		return false
+	}
+	fmt.Printf("  \033[32m✓\033[0m brew uninstall synapses\n")
+	// Also untap if present.
+	if _, err := exec.Command("brew", "untap", "synapsesos/tap").CombinedOutput(); err == nil {
+		fmt.Printf("  \033[32m✓\033[0m brew untap synapsesos/tap\n")
+	}
+	return true
+}
+
+// isHomebrewPath checks if a path is inside a Homebrew Cellar.
+func isHomebrewPath(binPath string) bool {
 	return strings.Contains(binPath, "/Cellar/synapses/") ||
 		strings.Contains(binPath, "/homebrew/")
 }
