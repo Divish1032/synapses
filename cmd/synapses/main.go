@@ -143,6 +143,8 @@ func run(args []string) error {
 		return cmdBenchmark(args[1:])
 	case "config":
 		return cmdConfig(args[1:])
+	case "dev":
+		return cmdDev(args[1:])
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "update":
@@ -2944,6 +2946,11 @@ CONFIG:
   config    --show          Show merged config with sources
   config    --global <k> <v>  Set a global default
   config    <key> <value>   Set a project-level config value
+
+DEVELOPER:
+  dev link   <path>         Use a custom binary (from source build)
+  dev unlink                Restore the app-bundled binary
+  dev status                Show which binary is active
 
 OTHER:
   query, brief, export, benchmark, memory, version, help

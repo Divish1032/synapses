@@ -33,10 +33,21 @@ var completionCommands = []struct {
 	{"approve", "Approve a pending action"},
 	{"benchmark", "Run benchmarks"},
 	{"config", "Read/write global or project configuration"},
+	{"dev", "Developer tools (link/unlink/status)"},
 	{"uninstall", "Remove synapses from a project"},
 	{"update", "Self-update the synapses binary"},
 	{"completion", "Generate shell completion script"},
 	{"help", "Show help"},
+}
+
+// Dev subcommands for nested completion.
+var devSubcommands = []struct {
+	Name string
+	Desc string
+}{
+	{"link", "Use a custom binary from source build"},
+	{"unlink", "Restore the app-bundled binary"},
+	{"status", "Show which binary is active"},
 }
 
 // Daemon subcommands for nested completion.
