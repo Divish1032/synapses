@@ -9,59 +9,64 @@ permissions:
   contents: write
 
 jobs:
-  release-linux:
-    name: Release (Linux)
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test ./... -race -timeout 600s
+
+  build-linux:
+    name: Build (Linux)
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # GoReleaser needs full git history for changelog
-
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Run tests
-        run: go test ./... -race -timeout 600s
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  release-darwin:
-    name: Release (macOS)
-    needs: release-linux
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
       - name: Generate completions
         run: make completions
-
-      - name: Build darwin/amd64
+      - name: Build linux/amd64
         env:
-          GOOS: darwin
+          GOOS: linux
           GOARCH: amd64
           CGO_ENABLED: "1"
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
-          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE synapses.example.json completions/
-          rm synapses
+          tar czf synapses_linux_x86_64.tar.gz synapses README.md LICENSE synapses.example.json completions/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-archives
+          path: synapses_linux_x86_64.tar.gz
 
+  build-darwin:
+    name: Build (macOS)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Generate completions
+        run: make completions
       - name: Build darwin/arm64
         env:
           GOOS: darwin
@@ -72,11 +77,125 @@ jobs:
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
           tar czf synapses_darwin_arm64.tar.gz synapses README.md LICENSE synapses.example.json completions/
           rm synapses
+      - name: Build darwin/amd64
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
+          tar czf synapses_darwin_x86_64.tar.gz synapses README.md LICENSE synapses.example.json completions/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-archives
+          path: |
+            synapses_darwin_arm64.tar.gz
+            synapses_darwin_x86_64.tar.gz
 
-      - name: Upload to release
+  release:
+    name: Create Release
+    needs: [build-linux, build-darwin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          find . -name '*.tar.gz' -exec mv {} . \;
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.ref_name }} \
-            synapses_darwin_x86_64.tar.gz \
-            synapses_darwin_arm64.tar.gz
+          cd dist
+          gh release create ${{ github.ref_name }} \
+            --title "synapses ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            *.tar.gz checksums.txt
+
+  homebrew:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_GITHUB_TOKEN" ]; then
+            echo "HOMEBREW_TAP_GITHUB_TOKEN not set — skipping Homebrew update"
+            exit 0
+          fi
+          VERSION=${GITHUB_REF_NAME#v}
+          DARWIN_ARM64_URL="https://github.com/SynapsesOS/synapses/releases/download/${GITHUB_REF_NAME}/synapses_darwin_arm64.tar.gz"
+          DARWIN_AMD64_URL="https://github.com/SynapsesOS/synapses/releases/download/${GITHUB_REF_NAME}/synapses_darwin_x86_64.tar.gz"
+          LINUX_AMD64_URL="https://github.com/SynapsesOS/synapses/releases/download/${GITHUB_REF_NAME}/synapses_linux_x86_64.tar.gz"
+
+          # Download archives for SHA256
+          curl -sL "$DARWIN_ARM64_URL" -o /tmp/darwin_arm64.tar.gz
+          curl -sL "$DARWIN_AMD64_URL" -o /tmp/darwin_amd64.tar.gz
+          curl -sL "$LINUX_AMD64_URL" -o /tmp/linux_amd64.tar.gz
+
+          DARWIN_ARM64_SHA=$(sha256sum /tmp/darwin_arm64.tar.gz | awk '{print $1}')
+          DARWIN_AMD64_SHA=$(sha256sum /tmp/darwin_amd64.tar.gz | awk '{print $1}')
+          LINUX_AMD64_SHA=$(sha256sum /tmp/linux_amd64.tar.gz | awk '{print $1}')
+
+          cat > /tmp/synapses.rb << FORMULA
+          class Synapses < Formula
+            desc "Graph-based code intelligence MCP server for AI coding agents"
+            homepage "https://github.com/SynapsesOS/synapses"
+            license "MIT"
+            version "${VERSION}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${DARWIN_ARM64_URL}"
+                sha256 "${DARWIN_ARM64_SHA}"
+              else
+                url "${DARWIN_AMD64_URL}"
+                sha256 "${DARWIN_AMD64_SHA}"
+              end
+            end
+
+            on_linux do
+              url "${LINUX_AMD64_URL}"
+              sha256 "${LINUX_AMD64_SHA}"
+            end
+
+            def install
+              bin.install "synapses"
+              bash_completion.install "completions/synapses.bash" => "synapses"
+              zsh_completion.install "completions/synapses.zsh" => "_synapses"
+              fish_completion.install "completions/synapses.fish"
+            end
+
+            test do
+              system "#{bin}/synapses", "version"
+            end
+          end
+          FORMULA
+
+          # Push to homebrew-tap
+          cd /tmp
+          git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/SynapsesOS/homebrew-tap.git"
+          cp synapses.rb homebrew-tap/Formula/synapses.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/synapses.rb
+          git commit -m "synapses ${VERSION}" || echo "No changes to commit"
+          git push
