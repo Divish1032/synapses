@@ -46,11 +46,25 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
           tar czf synapses_linux_x86_64.tar.gz synapses README.md LICENSE synapses.example.json completions/
+          rm synapses
+      - name: Build linux/arm64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          CC: aarch64-linux-gnu-gcc
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          VERSION=${GITHUB_REF_NAME#v}
+          go build -o synapses -ldflags "-s -w -X main.version=${VERSION}" ./cmd/synapses
+          tar czf synapses_linux_arm64.tar.gz synapses README.md LICENSE synapses.example.json completions/
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-archives
-          path: synapses_linux_x86_64.tar.gz
+          path: |
+            synapses_linux_x86_64.tar.gz
+            synapses_linux_arm64.tar.gz
 
   build-darwin:
     name: Build (macOS)

@@ -8,7 +8,7 @@ before:
     - make completions
 
 builds:
-  - id: synapses
+  - id: synapses-linux
     main: ./cmd/synapses
     binary: synapses
     env:
@@ -17,8 +17,28 @@ builds:
       - linux
     goarch:
       - amd64
+      - arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+
+  # macOS builds require native CGO (SQLite). These run on macOS CI runners
+  # via a separate GitHub Actions job that calls `go build` directly, then
+  # uploads the artifacts to the same release. GoReleaser handles Linux only.
+  # See .github/workflows/release.yml for the macOS build job.
+  #
+  # If running GoReleaser on a macOS runner, uncomment the block below:
+  # - id: synapses-darwin
+  #   main: ./cmd/synapses
+  #   binary: synapses
+  #   env:
+  #     - CGO_ENABLED=1
+  #   goos:
+  #     - darwin
+  #   goarch:
+  #     - amd64
+  #     - arm64
+  #   ldflags:
+  #     - -s -w -X main.version={{.Version}}
 
 archives:
   - id: synapses
