@@ -15,30 +15,40 @@ IDE → MCP Tools → Synapses (Graph+SQLite)
 
 ### 1. Install
 
-**macOS / Linux (Homebrew — recommended):**
+#### Recommended: Desktop App (includes CLI)
+
+Download from [synapsesos.com](https://synapsesos.com) or install via terminal:
+
 ```bash
-brew tap SynapsesOS/tap
+curl -fsSL https://synapsesos.com/install.sh | sh
+```
+
+This installs the Synapses desktop app with the CLI included.
+
+#### Homebrew
+
+```bash
 brew install synapses
 ```
 
-**macOS / Linux / Windows (direct binary):**
+#### Server / CI (CLI only, no GUI)
 
-Download the latest release from [GitHub Releases](https://github.com/SynapsesOS/synapses/releases/latest):
-
-| Platform | File |
-|----------|------|
-| macOS (Apple Silicon) | `synapses_darwin_arm64.tar.gz` |
-| macOS (Intel) | `synapses_darwin_x86_64.tar.gz` |
-| Linux (x86_64) | `synapses_linux_x86_64.tar.gz` |
-| Linux (ARM64) | `synapses_linux_arm64.tar.gz` |
-| Windows | `synapses_windows_x86_64.zip` |
-
-Extract and place the `synapses` binary on your `PATH` (e.g. `/usr/local/bin/synapses`).
-
-**From source (requires Go 1.26+):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
+curl -fsSL https://synapsesos.com/install.sh | sh
 ```
+
+On headless systems, this installs the CLI binary without the desktop app.
+
+#### From source (contributors)
+
+```bash
+git clone https://github.com/SynapsesOS/synapses
+cd synapses
+go build -o ./build/synapses ./cmd/synapses
+./build/synapses init
+```
+
+See [Developer Setup](https://synapsesos.com/docs/v1/guides/developer-setup) for connecting a source-built binary to the desktop app.
 
 ### 2. Initialize Your Project
 
