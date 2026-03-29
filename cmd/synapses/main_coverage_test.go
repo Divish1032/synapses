@@ -225,57 +225,6 @@ func TestCmdDoctor_WithPulseURL(t *testing.T) {
 	}
 }
 
-// ── cmdQuery ──────────────────────────────────────────────────────────────────
-
-func TestCmdQuery_EntityFoundCov(t *testing.T) {
-	dir := indexedRepoDir2(t)
-	if err := cmdQuery([]string{"--path", dir, "--entity", "main"}); err != nil {
-		t.Errorf("cmdQuery for 'main' returned error: %v", err)
-	}
-}
-
-func TestCmdQuery_EntityNotFoundCov(t *testing.T) {
-	dir := indexedRepoDir2(t)
-	err := cmdQuery([]string{"--path", dir, "--entity", "nonexistentXYZ123"})
-	if err == nil {
-		t.Error("expected error for missing entity")
-	}
-}
-
-func TestCmdQuery_NoIndexCov(t *testing.T) {
-	dir := t.TempDir()
-	err := cmdQuery([]string{"--path", dir, "--entity", "main"})
-	if err == nil {
-		t.Error("expected error when no index exists")
-	}
-}
-
-func TestCmdQuery_SuffixMatchCov(t *testing.T) {
-	// Write a file with a method so suffix matching is exercised.
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module testmod\n\ngo 1.21\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	src := `package main
-
-type MyStruct struct{}
-
-func (m MyStruct) DoThing() {}
-
-func main() {}
-`
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmdIndex([]string{"--path", dir}); err != nil {
-		t.Fatal(err)
-	}
-	// Query by suffix — "DoThing" should match "MyStruct.DoThing".
-	if err := cmdQuery([]string{"--path", dir, "--entity", "DoThing"}); err != nil {
-		t.Errorf("suffix match query returned error: %v", err)
-	}
-}
-
 // ── analyzeDataFlowIfEnabled ──────────────────────────────────────────────────
 
 func TestAnalyzeDataFlowIfEnabled_EmptyConfigCov(t *testing.T) {
@@ -648,11 +597,3 @@ func TestLoadOrBuildGraphWithStore_ForceReindexWithCacheCov(t *testing.T) {
 	}
 }
 
-// ── cmdReset additional coverage ──────────────────────────────────────────────
-
-func TestCmdReset_SpecificPathWithIndexCov(t *testing.T) {
-	dir := indexedRepoDir2(t)
-	if err := cmdReset([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdReset returned error: %v", err)
-	}
-}

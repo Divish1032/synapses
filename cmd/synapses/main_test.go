@@ -1624,106 +1624,6 @@ func TestCmdDoctor_WithBrainURL(t *testing.T) {
 	}
 }
 
-// ── cmdQuery with real index ──────────────────────────────────────────────────
-
-func TestCmdQuery_EntityFound(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdQuery([]string{"--path", dir, "--entity", "HelloFunc"}); err != nil {
-		t.Errorf("cmdQuery entity found: %v", err)
-	}
-}
-
-func TestCmdQuery_EntityNotFound(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	err := cmdQuery([]string{"--path", dir, "--entity", "NonExistentXYZ_ZZZ"})
-	if err == nil {
-		t.Error("expected error for non-existent entity")
-	}
-}
-
-func TestCmdQuery_SuffixMatch(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	// GoodbyeFunc exists in the graph — query by name.
-	_ = cmdQuery([]string{"--path", dir, "--entity", "GoodbyeFunc"})
-}
-
-// ── cmdBrief with real index ──────────────────────────────────────────────────
-
-func TestCmdBrief_WithStore(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdBrief([]string{"--path", dir}); err != nil {
-		t.Errorf("cmdBrief: %v", err)
-	}
-}
-
-// ── cmdExport with real index ─────────────────────────────────────────────────
-
-func TestCmdExport_WithGraph_Dot(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdExport([]string{"--path", dir, "--format", "dot"}); err != nil {
-		t.Errorf("cmdExport dot: %v", err)
-	}
-}
-
-func TestCmdExport_WithGraph_Mermaid(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdExport([]string{"--path", dir, "--format", "mermaid"}); err != nil {
-		t.Errorf("cmdExport mermaid: %v", err)
-	}
-}
-
-func TestCmdExport_WithGraph_GraphML(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdExport([]string{"--path", dir, "--format", "graphml"}); err != nil {
-		t.Errorf("cmdExport graphml: %v", err)
-	}
-}
-
-func TestCmdExport_WithGraph_Entity(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdExport([]string{"--path", dir, "--entity", "HelloFunc", "--format", "dot"}); err != nil {
-		t.Errorf("cmdExport entity: %v", err)
-	}
-}
-
-func TestCmdExport_WithGraph_EntityNotFound(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	err := cmdExport([]string{"--path", dir, "--entity", "NoSuchEntity_XYZ", "--format", "dot"})
-	if err == nil {
-		t.Error("expected error for non-existent entity")
-	}
-}
-
-func TestCmdExport_WithGraph_Meta(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	if err := cmdExport([]string{"--path", dir, "--format", "dot", "--meta"}); err != nil {
-		t.Errorf("cmdExport meta: %v", err)
-	}
-}
-
-// ── cmdList with existing projects ───────────────────────────────────────────
-
-func TestCmdList_WithProjects(t *testing.T) {
-	// Index a project first, then list.
-	dir, st, _ := buildTestIndexedDir(t)
-	st.Close()
-	_ = dir
-	// cmdList scans the global synapses home — should succeed.
-	if err := cmdList(nil); err != nil {
-		t.Errorf("cmdList: %v", err)
-	}
-}
-
 // cmdSetup tests removed — replaced by cmdInit (init.go).
 
 // ── smartReindex with real data ───────────────────────────────────────────────
@@ -1838,7 +1738,7 @@ func TestBulkIngestToBrain_WithGraph(t *testing.T) {
 	bulkIngestToBrain(context.Background(), bc, g, "test-project")
 }
 
-// ── cmdStartProxy and cmdStartDirect flag errors ──────────────────────────────
+// ── cmdStartProxy flag errors ────────────────────────────────────────────────
 
 func TestCmdStartProxy_FlagError(t *testing.T) {
 	err := cmdStartProxy([]string{"-unknown-flag-xyz"})
@@ -1848,18 +1748,9 @@ func TestCmdStartProxy_FlagError(t *testing.T) {
 }
 
 func TestCmdStartProxy_DirectMode_FlagError(t *testing.T) {
-	// --direct forwards to cmdStartDirect which will also see --direct as unknown.
+	// --direct with a path — may succeed or fail depending on flag parsing.
 	err := cmdStartProxy([]string{"--direct", "--path", t.TempDir()})
-	// cmdStartDirect will try to parse "--direct" which is unknown → error.
-	// OR it may run (if --direct is just treated as a flag value). Either is ok.
 	_ = err
-}
-
-func TestCmdStartDirect_FlagError(t *testing.T) {
-	err := cmdStartDirect([]string{"-unknown-flag-xyz"})
-	if err == nil {
-		t.Error("expected flag parse error")
-	}
 }
 
 // ── mergeLinkedProject success path ──────────────────────────────────────────
@@ -1967,51 +1858,7 @@ func TestCleanStaleSingletonPID_StalePID(t *testing.T) {
 	}
 }
 
-// ── cmdBrief with agents and tasks in store ───────────────────────────────────
-
-func TestCmdBrief_WithAgentsAndTasks(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	defer st.Close()
-
-	// Register an agent.
-	_ = st.UpsertAgent("test-agent", nil)
-
-	// Create a plan with one task.
-	_, _, _ = st.CreatePlan("Test Plan", "description", "test-agent", []store.TaskInput{
-		{Title: "Fix login bug", Priority: "p0"},
-		{Title: "Refactor auth", Priority: "p1"},
-		{Title: "Add tests", Priority: "p2"},
-		{Title: "Update docs", Priority: "p2"},
-	})
-
-	if err := cmdBrief([]string{"--path", dir}); err != nil {
-		t.Fatalf("cmdBrief: %v", err)
-	}
-}
-
-func TestCmdBrief_WithMessages(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	defer st.Close()
-
-	// Insert a cross-project message.
-	_, _ = st.SendMessage("sender", "receiver", "cross_project_impact", "dep changed", "")
-
-	if err := cmdBrief([]string{"--path", dir}); err != nil {
-		t.Fatalf("cmdBrief with messages: %v", err)
-	}
-}
-
 // cmdSetup/cmdOnboard backwards compat tests removed — replaced by cmdInit.
-
-// ── cmdReset --all path ───────────────────────────────────────────────────────
-
-func TestCmdReset_All(t *testing.T) {
-	// --all removes the entire cache dir. Safe to call even if empty.
-	err := cmdReset([]string{"--all"})
-	if err != nil {
-		t.Logf("cmdReset --all: %v (non-fatal if cache dir already gone)", err)
-	}
-}
 
 // ── daemonSocketPath / singletonPIDPath ──────────────────────────────────────
 
@@ -2033,80 +1880,6 @@ func TestDaemonPathHelpers(t *testing.T) {
 	}
 	if pid == "" {
 		t.Error("expected non-empty singleton pid path")
-	}
-}
-
-// ── cmdStartDirect with empty stdin (ServeStdio returns on EOF) ───────────────
-
-// stdioCloseStdin redirects os.Stdin to a closed pipe (immediate EOF).
-// Returns a cleanup function that restores the original stdin.
-func stdioCloseStdin(t *testing.T) func() {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Skip("cannot create stdin pipe:", err)
-	}
-	w.Close() // write end closed → read end returns EOF immediately
-	old := os.Stdin
-	os.Stdin = r
-	return func() {
-		os.Stdin = old
-		r.Close()
-	}
-}
-
-// stdioDiscardStdout redirects os.Stdout to /dev/null so MCP messages don't clutter test output.
-func stdioDiscardStdout(t *testing.T) func() {
-	t.Helper()
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		return func() {}
-	}
-	old := os.Stdout
-	os.Stdout = devNull
-	return func() {
-		os.Stdout = old
-		devNull.Close()
-	}
-}
-
-func TestCmdStartDirect_EmptyStdin(t *testing.T) {
-	// Create a temp dir with a Go source file so the indexer has something to parse.
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc Foo() {}\nfunc Bar() string { return \"hello\" }\n"), 0o644) //nolint:errcheck
-	os.MkdirAll(filepath.Join(dir, ".git"), 0o755)                                                                                          //nolint:errcheck
-	// Disable builtin embedder to prevent background model download race on CI.
-	os.WriteFile(filepath.Join(dir, "synapses.json"), []byte(`{"embeddings":"off"}`), 0o644) //nolint:errcheck
-
-	restore := stdioCloseStdin(t)
-	defer restore()
-	restoreOut := stdioDiscardStdout(t)
-	defer restoreOut()
-
-	// --no-watch skips the file watcher to speed up the test.
-	err := cmdStartDirect([]string{"--path", dir, "--no-watch"})
-	// ServeStdio returns nil on EOF, so expect nil.
-	if err != nil {
-		t.Logf("cmdStartDirect returned: %v (non-fatal)", err)
-	}
-}
-
-func TestCmdStartDirect_WithReindex(t *testing.T) {
-	dir, st, _ := buildTestIndexedDir(t)
-	defer st.Close()
-
-	// Disable embedder to prevent background model download race on CI.
-	cfgPath := filepath.Join(dir, "synapses.json")
-	os.WriteFile(cfgPath, []byte(`{"embeddings":"off"}`), 0o644) //nolint:errcheck
-
-	restore := stdioCloseStdin(t)
-	defer restore()
-	restoreOut := stdioDiscardStdout(t)
-	defer restoreOut()
-
-	err := cmdStartDirect([]string{"--path", dir, "--no-watch", "--reindex"})
-	if err != nil {
-		t.Logf("cmdStartDirect --reindex: %v (non-fatal)", err)
 	}
 }
 
