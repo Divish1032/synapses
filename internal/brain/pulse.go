@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
@@ -103,10 +104,12 @@ type SystemPulse struct {
 	platformCPUState //nolint:unused // used on Windows for CPU delta state
 
 	// wg tracks the single background goroutine launched by Start().
-	// Stop() calls wg.Wait(), which returns immediately if Start() was never
-	// called (counter stays at 0). This avoids any channel reassignment and
-	// the data race that would entail.
 	wg sync.WaitGroup
+
+	// started is set atomically to 1 after wg.Add(1) inside startOnce.Do.
+	// Stop() only calls wg.Wait() when started==1, avoiding the race where
+	// wg.Wait() runs concurrently with wg.Add(1).
+	started atomic.Int32
 
 	// startOnce ensures Start() launches at most one background goroutine.
 	startOnce sync.Once
@@ -147,6 +150,7 @@ func (p *SystemPulse) Start() {
 		p.pollOllama()
 
 		p.wg.Add(1)
+		p.started.Store(1)
 		go func() {
 			defer p.wg.Done()
 			p.loop()
@@ -161,7 +165,11 @@ func (p *SystemPulse) Stop() {
 	p.stopOnce.Do(func() {
 		close(p.done)
 	})
-	p.wg.Wait() // no-op (counter=0) if Start() was never called
+	// Only wait if Start() completed wg.Add(1). Without this guard,
+	// wg.Wait() races with wg.Add(1) when Start() and Stop() run concurrently.
+	if p.started.Load() == 1 {
+		p.wg.Wait()
+	}
 }
 
 // Current returns a copy of the most recent SystemState snapshot.
