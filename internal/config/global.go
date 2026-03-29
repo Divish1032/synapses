@@ -163,8 +163,8 @@ func mergeGlobalConfig(cfg *Config, projectRawKeys map[string]bool) {
 	}
 }
 
-// extractRawKeys parses raw JSON and returns the set of top-level keys present.
-func extractRawKeys(data []byte) map[string]bool {
+// ExtractRawKeys parses raw JSON and returns the set of top-level keys present.
+func ExtractRawKeys(data []byte) map[string]bool {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(data, &raw) != nil {
 		return nil

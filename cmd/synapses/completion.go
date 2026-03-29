@@ -32,6 +32,7 @@ var completionCommands = []struct {
 	{"allow-plugin", "Approve a plugin for use"},
 	{"approve", "Approve a pending action"},
 	{"benchmark", "Run benchmarks"},
+	{"config", "Read/write global or project configuration"},
 	{"uninstall", "Remove synapses from a project"},
 	{"update", "Self-update the synapses binary"},
 	{"completion", "Generate shell completion script"},

@@ -141,6 +141,8 @@ func run(args []string) error {
 		return cmdApprove(args[1:])
 	case "benchmark":
 		return cmdBenchmark(args[1:])
+	case "config":
+		return cmdConfig(args[1:])
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "update":
@@ -2937,6 +2939,11 @@ CLEANUP:
   uninstall --global          Full system removal (daemon, data, binary)
   uninstall --keep-data       Keep indexes, remove everything else
   uninstall --keep-binary     Keep the binary, remove everything else
+
+CONFIG:
+  config    --show          Show merged config with sources
+  config    --global <k> <v>  Set a global default
+  config    <key> <value>   Set a project-level config value
 
 OTHER:
   query, brief, export, benchmark, memory, version, help

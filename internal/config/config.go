@@ -662,7 +662,7 @@ func Load(dir string) (*Config, error) {
 
 	// Extract raw keys before full parse so we know which keys the project
 	// explicitly set (needed for global config merge: project wins).
-	projectRawKeys := extractRawKeys(data)
+	projectRawKeys := ExtractRawKeys(data)
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {

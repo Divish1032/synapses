@@ -195,7 +195,7 @@ func TestMergeGlobalConfig_NoGlobalFile(t *testing.T) {
 
 func TestExtractRawKeys(t *testing.T) {
 	data := []byte(`{"brain": {}, "pulse": {"url": "x"}, "version": "1"}`)
-	keys := extractRawKeys(data)
+	keys := ExtractRawKeys(data)
 	if len(keys) != 3 {
 		t.Fatalf("expected 3 keys, got %d", len(keys))
 	}
@@ -207,7 +207,7 @@ func TestExtractRawKeys(t *testing.T) {
 }
 
 func TestExtractRawKeys_Invalid(t *testing.T) {
-	keys := extractRawKeys([]byte("not json"))
+	keys := ExtractRawKeys([]byte("not json"))
 	if keys != nil {
 		t.Errorf("expected nil for invalid JSON, got %v", keys)
 	}
