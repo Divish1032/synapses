@@ -19,7 +19,8 @@ var completionCommands = []struct {
 	{"config", "Read/write configuration"},
 	{"connect", "Connect an AI agent"},
 	{"update", "Self-update or rollback"},
-	{"uninstall", "Remove Synapses"},
+	{"remove", "Remove Synapses from a project"},
+	{"uninstall", "Remove Synapses from the system"},
 	{"dev", "Developer binary management"},
 	{"daemon", "Low-level daemon control"},
 	{"version", "Print version"},
@@ -42,15 +43,10 @@ var daemonSubcommands = []struct {
 	Name string
 	Desc string
 }{
-	{"start", "Start the daemon"},
-	{"stop", "Stop the daemon"},
-	{"restart", "Restart the daemon"},
-	{"status", "Show daemon status"},
-	{"logs", "Show daemon logs"},
-	{"wait", "Wait for daemon to be ready"},
-	{"install", "Install as system service"},
-	{"uninstall", "Remove system service"},
 	{"serve", "Run daemon in foreground"},
+	{"install", "Register as login service"},
+	{"uninstall", "Remove login service"},
+	{"logs", "Tail daemon log"},
 }
 
 func cmdCompletion(args []string) error {
@@ -174,7 +170,7 @@ _synapses() {
                 dev)
                     _describe -t dev_commands 'dev subcommand' dev_commands
                     ;;
-                init|start|index|status|connect|uninstall)
+                init|start|index|status|connect|remove)
                     _arguments '--path[Project path]:directory:_directories'
                     ;;
                 completion)

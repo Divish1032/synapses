@@ -1,14 +1,18 @@
-// uninstall.go — "synapses uninstall" complete removal wizard.
+// uninstall.go — "synapses remove" and "synapses uninstall" commands.
 //
-// The inverse of "synapses init". Stops the daemon, removes agent configs,
-// cleans indexes, and optionally removes ~/.synapses and the binary itself.
+// remove:    Inverse of "synapses init" — removes Synapses from a project
+//            (agent configs, synapses.json, index). Source code is never touched.
+//
+// uninstall: Full system removal — stops daemon, removes services, deletes
+//            ~/.synapses, removes the binary. The nuclear option.
 //
 // Usage:
 //
-//	synapses uninstall                       Interactive project cleanup
-//	synapses uninstall --path /my/project    Target a specific project
-//	synapses uninstall --yes                 Non-interactive (skip prompts)
-//	synapses uninstall --global              Full system removal (all data + binary)
+//	synapses remove                          Remove from current project
+//	synapses remove --path /my/project       Target a specific project
+//	synapses remove --yes                    Non-interactive
+//	synapses uninstall                       Full system removal
+//	synapses uninstall --yes                 Non-interactive
 //	synapses uninstall --keep-data           Preserve index cache
 //	synapses uninstall --keep-binary         Preserve the synapses binary
 package main
@@ -29,16 +33,14 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-// cmdUninstall is the complete removal wizard — the inverse of init.
-func cmdUninstall(args []string) error {
-	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	repoPath := fs.String("path", ".", "Project root to clean (default: current directory)")
+// cmdRemove removes Synapses from a project — the inverse of init.
+func cmdRemove(args []string) error {
+	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
+	repoPath := fs.String("path", ".", "Project root (default: current directory)")
 	var yes bool
 	fs.BoolVar(&yes, "yes", false, "Non-interactive mode — skip all prompts")
 	fs.BoolVar(&yes, "y", false, "Non-interactive mode (shorthand)")
-	global := fs.Bool("global", false, "Full system cleanup: all indexes, ~/.synapses, services, and binary")
 	keepData := fs.Bool("keep-data", false, "Preserve index cache (only remove agent configs)")
-	keepBinary := fs.Bool("keep-binary", false, "Preserve the synapses binary")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -50,15 +52,32 @@ func cmdUninstall(args []string) error {
 
 	interactive := isInteractive() && !yes
 
-	// ── Header ───────────────────────────────────────────────────────────
+	fmt.Println()
+	fmt.Printf("  \033[1mSynapses %s\033[0m — Remove from project\n", version)
+	fmt.Println()
+
+	return uninstallProject(absPath, interactive, *keepData)
+}
+
+// cmdUninstall removes Synapses from the entire system.
+func cmdUninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	var yes bool
+	fs.BoolVar(&yes, "yes", false, "Non-interactive mode — skip all prompts")
+	fs.BoolVar(&yes, "y", false, "Non-interactive mode (shorthand)")
+	keepData := fs.Bool("keep-data", false, "Preserve index cache")
+	keepBinary := fs.Bool("keep-binary", false, "Preserve the synapses binary")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	interactive := isInteractive() && !yes
+
 	fmt.Println()
 	fmt.Printf("  \033[1mSynapses %s\033[0m — Uninstall\n", version)
 	fmt.Println()
 
-	if *global {
-		return uninstallGlobal(interactive, *keepData, *keepBinary)
-	}
-	return uninstallProject(absPath, interactive, *keepData)
+	return uninstallGlobal(interactive, *keepData, *keepBinary)
 }
 
 // ── Project-level uninstall ──────────────────────────────────────────────────

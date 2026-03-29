@@ -277,51 +277,16 @@ func TestCmdDaemon_NoArgs(t *testing.T) {
 	}
 }
 
-func TestCmdDaemon_Status(t *testing.T) {
+func TestCmdDaemon_RemovedSubcommands(t *testing.T) {
 	_, cleanup := tempSynapsesHome(t)
 	defer cleanup()
 
-	// Save and restore allSidecars
-	origSidecars := allSidecars
-	defer func() { allSidecars = origSidecars }()
-
-	allSidecars = []Sidecar{}
-
-	err := cmdDaemon([]string{"status"})
-	if err != nil {
-		t.Fatalf("cmdDaemon status failed: %v", err)
-	}
-}
-
-func TestCmdDaemon_Start(t *testing.T) {
-	_, cleanup := tempSynapsesHome(t)
-	defer cleanup()
-
-	// Save and restore allSidecars
-	origSidecars := allSidecars
-	defer func() { allSidecars = origSidecars }()
-
-	allSidecars = []Sidecar{}
-
-	err := cmdDaemon([]string{"start"})
-	if err != nil {
-		t.Fatalf("cmdDaemon start failed: %v", err)
-	}
-}
-
-func TestCmdDaemon_Stop(t *testing.T) {
-	_, cleanup := tempSynapsesHome(t)
-	defer cleanup()
-
-	// Save and restore allSidecars
-	origSidecars := allSidecars
-	defer func() { allSidecars = origSidecars }()
-
-	allSidecars = []Sidecar{}
-
-	err := cmdDaemon([]string{"stop"})
-	if err != nil {
-		t.Fatalf("cmdDaemon stop failed: %v", err)
+	// status, start, stop were removed — they should return unknown subcommand errors.
+	for _, sub := range []string{"status", "start", "stop", "restart", "wait"} {
+		err := cmdDaemon([]string{sub})
+		if err == nil {
+			t.Errorf("cmdDaemon %s should return error (removed subcommand)", sub)
+		}
 	}
 }
 
@@ -341,36 +306,10 @@ func TestCmdDaemon_InvalidCommand(t *testing.T) {
 	}
 }
 
-func TestCmdDaemon_WithServiceFlag(t *testing.T) {
+func TestCmdDaemon_LogsWithServiceFlag(t *testing.T) {
 	_, cleanup := tempSynapsesHome(t)
 	defer cleanup()
 
-	// Save and restore allSidecars
-	origSidecars := allSidecars
-	defer func() { allSidecars = origSidecars }()
-
-	allSidecars = []Sidecar{
-		{Name: "brain", Binary: "test", Args: []string{}, Port: "11435"},
-	}
-
-	err := cmdDaemon([]string{"status", "--service", "brain"})
-	if err != nil {
-		t.Fatalf("cmdDaemon with service flag failed: %v", err)
-	}
-}
-
-func TestCmdDaemon_WithQuietFlag(t *testing.T) {
-	_, cleanup := tempSynapsesHome(t)
-	defer cleanup()
-
-	// Save and restore allSidecars
-	origSidecars := allSidecars
-	defer func() { allSidecars = origSidecars }()
-
-	allSidecars = []Sidecar{}
-
-	err := cmdDaemon([]string{"start", "--quiet"})
-	if err != nil {
-		t.Fatalf("cmdDaemon with quiet flag failed: %v", err)
-	}
+	// logs with --service flag should not panic (may error if no log file).
+	_ = cmdDaemon([]string{"logs", "--service", "brain"})
 }

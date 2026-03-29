@@ -35,17 +35,8 @@ import (
 func cmdStartProxy(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	repoPath := fs.String("path", ".", "Path to the repository root")
-	direct := fs.Bool("direct", false, "Run MCP server directly on stdio (legacy mode, no daemon)")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-
-	// Legacy mode: run the old direct-stdio server for debugging/testing.
-	if *direct {
-		// Pass remaining args (after flag parsing) — not the original args
-		// which still contain --direct that cmdStartDirect doesn't recognize.
-		remaining := []string{"--path", *repoPath}
-		return cmdStartDirect(remaining)
 	}
 
 	absPath, err := canonicalPath(*repoPath)

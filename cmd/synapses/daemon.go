@@ -243,18 +243,12 @@ func cmdDaemon(args []string) error {
 	sub := args[0]
 	rest := args[1:]
 
-	// Parse --service NAME and --quiet flags from rest.
+	// Parse --service NAME flag for logs subcommand.
 	target := ""
-	quiet := false
 	for i := 0; i < len(rest); i++ {
-		switch rest[i] {
-		case "--service":
-			if i+1 < len(rest) {
-				target = rest[i+1]
-				i++
-			}
-		case "--quiet", "-q":
-			quiet = true
+		if rest[i] == "--service" && i+1 < len(rest) {
+			target = rest[i+1]
+			i++
 		}
 	}
 
@@ -262,34 +256,15 @@ func cmdDaemon(args []string) error {
 		return fmt.Errorf("ensure dirs: %w", err)
 	}
 
-	targets, err := resolveSidecars(target)
-	if err != nil {
-		return err
-	}
-
 	switch sub {
 	case "serve":
-		// "synapses daemon serve" — run the singleton MCP daemon that
-		// serves all projects via HTTP (:11435) and per-project Unix sockets.
 		return cmdDaemonServe(rest)
-	case "start":
-		return daemonStart(targets, quiet)
-	case "stop":
-		return daemonStop(targets, quiet)
-	case "restart":
-		_ = daemonStop(targets, true)
-		time.Sleep(500 * time.Millisecond)
-		return daemonStart(targets, quiet)
-	case "status":
-		return daemonStatus()
-	case "logs":
-		return daemonLogs(target)
-	case "wait":
-		return daemonWait(rest)
 	case "install":
 		return daemonInstall(os.Stdout)
 	case "uninstall":
 		return daemonUninstall()
+	case "logs":
+		return daemonLogs(target)
 	default:
 		return fmt.Errorf("unknown daemon subcommand %q — run 'synapses daemon' for usage", sub)
 	}
@@ -793,25 +768,12 @@ func uninstallSystemd() error {
 
 func printDaemonUsage() {
 	fmt.Print(`
-  synapses daemon — manage background services
+  synapses daemon — low-level daemon control
 
   Usage:
-    synapses daemon serve                Run singleton MCP daemon (HTTP :11435)
-    synapses daemon wait                 Block until daemon is healthy (default 30s)
-    synapses daemon wait --timeout 60s   Block up to 60 seconds
-    synapses daemon start                Start all external sidecars (none currently)
-    synapses daemon start --service X    Start a named external sidecar
-    synapses daemon stop                 Stop all sidecars
-    synapses daemon stop  --service X    Stop a single sidecar
-    synapses daemon restart              Restart all
-    synapses daemon status               Show running / stopped state
-    synapses daemon logs --service X     Tail last 200 lines of a sidecar log
-    synapses daemon install              Register as login service (launchd/systemd)
-    synapses daemon uninstall            Remove login service registration
-
-  The 'serve' command starts the singleton daemon that serves all projects.
-  It is automatically invoked by 'synapses start' (the proxy).
-
-  Services:  brain + pulse + web-cache run in-process (no external sidecars)
+    synapses daemon serve       Run the MCP daemon in foreground (used by launchd/systemd)
+    synapses daemon install     Register as login service (auto-start on boot)
+    synapses daemon uninstall   Remove login service registration
+    synapses daemon logs        Tail daemon log
 `)
 }

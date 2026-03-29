@@ -100,6 +100,8 @@ func run(args []string) error {
 		return cmdConnect(args[1:])
 	case "update":
 		return cmdUpdate(args[1:])
+	case "remove":
+		return cmdRemove(args[1:])
 	case "uninstall":
 		return cmdUninstall(args[1:])
 	case "version", "--version", "-v":
@@ -2932,7 +2934,8 @@ COMMANDS:
   config    [--show] [--global] [key] [val]   Read/write configuration
   connect   [--agent <name>] [--path <dir>]   Connect an AI agent
   update    [--check] [--rollback]            Self-update or rollback
-  uninstall [--path <dir>] [--global]         Remove Synapses
+  remove    [--path <dir>]                    Remove Synapses from a project
+  uninstall                                   Remove Synapses from the system
 
 SUBCOMMANDS:
   dev       link|unlink|status               Developer binary management

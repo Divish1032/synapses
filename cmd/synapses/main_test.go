@@ -1228,12 +1228,14 @@ func TestSystemdUserDir(t *testing.T) {
 
 // ── cmdDaemon subcommands ─────────────────────────────────────────────────────
 
-func TestCmdDaemon_Start_Quiet(t *testing.T) {
-	_ = run([]string{"daemon", "start", "--quiet"})
-}
-
-func TestCmdDaemon_Stop_Quiet(t *testing.T) {
-	_ = run([]string{"daemon", "stop", "--quiet"})
+func TestCmdDaemon_RemovedViaRun(t *testing.T) {
+	// start/stop subcommands were removed — should error.
+	if err := run([]string{"daemon", "start"}); err == nil {
+		t.Error("daemon start should error (removed)")
+	}
+	if err := run([]string{"daemon", "stop"}); err == nil {
+		t.Error("daemon stop should error (removed)")
+	}
 }
 
 func TestCmdDaemon_Restart(t *testing.T) {
