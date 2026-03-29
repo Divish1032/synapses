@@ -42,7 +42,10 @@ func cmdStartProxy(args []string) error {
 
 	// Legacy mode: run the old direct-stdio server for debugging/testing.
 	if *direct {
-		return cmdStartDirect(args)
+		// Pass remaining args (after flag parsing) — not the original args
+		// which still contain --direct that cmdStartDirect doesn't recognize.
+		remaining := []string{"--path", *repoPath}
+		return cmdStartDirect(remaining)
 	}
 
 	absPath, err := canonicalPath(*repoPath)
