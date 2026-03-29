@@ -3,8 +3,6 @@
 [![Release](https://img.shields.io/github/v/release/SynapsesOS/synapses?style=for-the-badge&color=00ADD8)](https://github.com/SynapsesOS/synapses/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 [![CI](https://github.com/SynapsesOS/synapses/actions/workflows/ci.yml/badge.svg)](https://github.com/SynapsesOS/synapses/actions)
-[![VS Code](https://img.shields.io/visual-studio-marketplace/v/SynapsesOS.synapses?style=for-the-badge&label=VS%20Code&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=SynapsesOS.synapses)
-
 **Synapses** is a graph-based code intelligence server that gives AI coding agents structured understanding of large codebases. Replace ad-hoc grep with typed graph queries. Supports 49 languages. Works with Claude Code, Cursor, Zed, Windsurf, and any editor via [MCP](https://modelcontextprotocol.io).
 
 ```
@@ -41,12 +39,6 @@ Extract and place the `synapses` binary on your `PATH` (e.g. `/usr/local/bin/syn
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SynapsesOS/synapses/main/install.sh | sh
 ```
-
-**VS Code Extension:**
-```
-ext install SynapsesOS.synapses
-```
-Or search "Synapses" in the VS Code Extensions panel.
 
 ### 2. Initialize Your Project
 
