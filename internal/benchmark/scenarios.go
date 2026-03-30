@@ -3,6 +3,7 @@ package benchmark
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -49,9 +50,12 @@ func runContextCompleteness(g *graph.Graph, _ *store.Store) ([]QueryResult, erro
 		return nil, fmt.Errorf("no functions with 5–50 callers found — graph too small for this scenario")
 	}
 
-	// Sort by fanin descending, take top 5.
+	// Sort by fanin descending, break ties by ID for deterministic selection.
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].fanin > candidates[j].fanin
+		if candidates[i].fanin != candidates[j].fanin {
+			return candidates[i].fanin > candidates[j].fanin
+		}
+		return candidates[i].id < candidates[j].id
 	})
 	if len(candidates) > 5 {
 		candidates = candidates[:5]
@@ -130,14 +134,24 @@ func runSearchAccuracy(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 		if n.Name == "" || n.Name == "main" || n.Name == "init" || len(n.Name) < 8 {
 			continue
 		}
+		// Skip non-code entities: Makefile targets, shell scripts, etc.
+		if strings.HasSuffix(n.File, "Makefile") || strings.HasSuffix(n.File, ".mk") ||
+			strings.HasSuffix(n.File, ".sh") || strings.HasSuffix(n.File, ".yml") ||
+			strings.HasSuffix(n.File, ".yaml") || strings.Contains(n.Name, "/") {
+			continue
+		}
 		if seen[n.Name] {
 			continue // skip duplicate names (ambiguous matches)
 		}
 		seen[n.Name] = true
 		targets = append(targets, n)
-		if len(targets) >= 10 {
-			break
-		}
+	}
+	// Deterministic selection: sort by name to avoid map-order randomness.
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].Name < targets[j].Name
+	})
+	if len(targets) > 10 {
+		targets = targets[:10]
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no named functions found — graph too small")
@@ -208,7 +222,10 @@ func runImpactCoverage(g *graph.Graph, _ *store.Store) ([]QueryResult, error) {
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].fanin > candidates[j].fanin
+		if candidates[i].fanin != candidates[j].fanin {
+			return candidates[i].fanin > candidates[j].fanin
+		}
+		return candidates[i].id < candidates[j].id
 	})
 	if len(candidates) > 5 {
 		candidates = candidates[:5]
@@ -280,14 +297,18 @@ func runCallChainConnectivity(g *graph.Graph, _ *store.Store) ([]QueryResult, er
 		for _, e := range g.OutEdges(n.ID) {
 			if e.Type == graph.EdgeCalls {
 				pairs = append(pairs, pair{e.From, e.To})
-				if len(pairs) >= 10 {
-					break
-				}
 			}
 		}
-		if len(pairs) >= 10 {
-			break
+	}
+	// Deterministic selection: sort by (from, to) to avoid map-order randomness.
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].from != pairs[j].from {
+			return pairs[i].from < pairs[j].from
 		}
+		return pairs[i].to < pairs[j].to
+	})
+	if len(pairs) > 10 {
+		pairs = pairs[:10]
 	}
 	if len(pairs) == 0 {
 		return nil, fmt.Errorf("no CALLS edges found — graph too small")
@@ -373,16 +394,20 @@ func runFTSRanking(g *graph.Graph, st *store.Store) ([]QueryResult, error) {
 			continue
 		}
 		if n.Name == "" || len(n.Name) < 8 {
-			continue // skip short names (<8 chars) — generic CLI names like "build"/"clean" match many nodes
+			continue
 		}
 		if seen[n.Name] {
 			continue
 		}
 		seen[n.Name] = true
 		targets = append(targets, n)
-		if len(targets) >= 10 {
-			break
-		}
+	}
+	// Deterministic selection: sort by name to avoid map-order randomness.
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].Name < targets[j].Name
+	})
+	if len(targets) > 10 {
+		targets = targets[:10]
 	}
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no named functions found")

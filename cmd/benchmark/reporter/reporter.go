@@ -22,125 +22,57 @@ func New(dir string) *Reporter {
 	return &Reporter{dir: dir}
 }
 
-// ─── RepoBench-R ─────────────────────────────────────────────────────────────
-
-// RepoBenchResult holds the full results of a RepoBench-R run.
-type RepoBenchResult struct {
-	Timestamp     string            `json:"timestamp"`
-	RetrievalMode string            `json:"retrieval_mode"`
-	Configs       []RepoBenchConfig `json:"configs"`
-	Summary       RepoBenchSummary  `json:"summary"`
-}
-
-// RepoBenchConfig holds results for one config×difficulty combination.
-type RepoBenchConfig struct {
-	Config     string          `json:"config"`     // e.g. "python_cff"
-	Difficulty string          `json:"difficulty"` // "easy" | "hard"
-	Samples    int             `json:"samples"`
-	AccAtK     map[int]float64 `json:"acc_at_k"` // k → accuracy
-	AvgRank    float64         `json:"avg_gold_rank"`
-}
-
-// RepoBenchSummary aggregates across all configs.
-type RepoBenchSummary struct {
-	TotalSamples int             `json:"total_samples"`
-	AccAtK       map[int]float64 `json:"acc_at_k"` // macro-average across configs
-}
-
-// WriteRepoBench writes JSON + Markdown results for a RepoBench-R run.
-func (r *Reporter) WriteRepoBench(result *RepoBenchResult) error {
-	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
-
-	jsonPath := filepath.Join(r.dir, fmt.Sprintf("repobench_%s_%s.json", result.RetrievalMode, ts))
-	mdPath := filepath.Join(r.dir, fmt.Sprintf("repobench_%s_%s.md", result.RetrievalMode, ts))
-
-	if err := writeJSON(jsonPath, result); err != nil {
-		return fmt.Errorf("write json: %w", err)
-	}
-	if err := os.WriteFile(mdPath, []byte(repoBenchMarkdown(result)), 0o644); err != nil {
-		return fmt.Errorf("write markdown: %w", err)
-	}
-
-	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
-	return nil
-}
-
-// PrintRepoBenchSummary prints a compact summary to stdout.
-func (r *Reporter) PrintRepoBenchSummary(result *RepoBenchResult) {
-	fmt.Printf("\n=== RepoBench-R Summary [%s] ===\n", result.RetrievalMode)
-	fmt.Printf("%-20s  %-10s  %6s  %6s  %6s  %6s\n",
-		"Config", "Difficulty", "Acc@1", "Acc@3", "Acc@5", "Acc@10")
-	fmt.Printf("%s\n", strings.Repeat("-", 64))
-	for _, cfg := range result.Configs {
-		fmt.Printf("%-20s  %-10s  %6.1f  %6.1f  %6.1f  %6.1f\n",
-			cfg.Config, cfg.Difficulty,
-			pct(cfg.AccAtK[1]),
-			pct(cfg.AccAtK[3]),
-			pct(cfg.AccAtK[5]),
-			pct(cfg.AccAtK[10]),
-		)
-	}
-	fmt.Printf("%s\n", strings.Repeat("-", 64))
-	s := result.Summary
-	fmt.Printf("%-20s  %-10s  %6.1f  %6.1f  %6.1f  %6.1f  (macro avg, n=%d)\n",
-		"OVERALL", "",
-		pct(s.AccAtK[1]),
-		pct(s.AccAtK[3]),
-		pct(s.AccAtK[5]),
-		pct(s.AccAtK[10]),
-		s.TotalSamples,
-	)
-}
-
-func repoBenchMarkdown(result *RepoBenchResult) string {
-	var sb strings.Builder
-	sb.WriteString("# RepoBench-R Results\n\n")
-	fmt.Fprintf(&sb, "**Retrieval mode:** `%s`  \n", result.RetrievalMode)
-	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n\n", result.Timestamp)
-
-	sb.WriteString("## Per-Config Results\n\n")
-	sb.WriteString("| Config | Difficulty | Samples | Acc@1 | Acc@3 | Acc@5 | Acc@10 | Avg Gold Rank |\n")
-	sb.WriteString("|--------|-----------|---------|-------|-------|-------|--------|---------------|\n")
-	for _, cfg := range result.Configs {
-		fmt.Fprintf(&sb, "| %s | %s | %d | %.1f%% | %.1f%% | %.1f%% | %.1f%% | %.1f |\n",
-			cfg.Config, cfg.Difficulty, cfg.Samples,
-			pct(cfg.AccAtK[1]),
-			pct(cfg.AccAtK[3]),
-			pct(cfg.AccAtK[5]),
-			pct(cfg.AccAtK[10]),
-			cfg.AvgRank,
-		)
-	}
-
-	sb.WriteString("\n## Summary (Macro Average)\n\n")
-	s := result.Summary
-	fmt.Fprintf(&sb, "- **Total samples:** %d\n", s.TotalSamples)
-	fmt.Fprintf(&sb, "- **Acc@1:** %.1f%%\n", pct(s.AccAtK[1]))
-	fmt.Fprintf(&sb, "- **Acc@3:** %.1f%%\n", pct(s.AccAtK[3]))
-	fmt.Fprintf(&sb, "- **Acc@5:** %.1f%%\n", pct(s.AccAtK[5]))
-	fmt.Fprintf(&sb, "- **Acc@10:** %.1f%%\n", pct(s.AccAtK[10]))
-
-	sb.WriteString("\n## Comparison Against Published Baselines\n\n")
-	sb.WriteString("| System | Acc@5 (hard) |\n")
-	sb.WriteString("|--------|-------------|\n")
-	sb.WriteString("| BM25 baseline (RepoBench paper) | ~60% |\n")
-	sb.WriteString("| Dense retrieval, ada-002 | ~65% |\n")
-	fmt.Fprintf(&sb, "| **Synapses %s** | **%.1f%%** |\n", result.RetrievalMode, pct(s.AccAtK[5]))
-
-	return sb.String()
-}
-
 // ─── ContextBench ─────────────────────────────────────────────────────────────
 
 // ContextBenchResult holds the full results of a ContextBench run.
 type ContextBenchResult struct {
-	Timestamp    string                   `json:"timestamp"`
-	TotalTasks   int                      `json:"total_tasks"`
-	AvgPrecision float64                  `json:"avg_precision"`
-	AvgRecall    float64                  `json:"avg_recall"`
-	AvgF1        float64                  `json:"avg_f1"`
-	PerLanguage  []ContextBenchLangResult `json:"per_language"`
-	TaskResults  []interface{}            `json:"tasks"` // []ContextBenchTaskResult from benchmarks pkg
+	Timestamp          string                   `json:"timestamp"`
+	TotalTasks         int                      `json:"total_tasks"`
+	AvgPrecision       float64                  `json:"avg_precision"`
+	AvgRecall          float64                  `json:"avg_recall"`
+	AvgF1              float64                  `json:"avg_f1"`
+	AvgTokensRetrieved int                      `json:"avg_tokens_retrieved,omitempty"`
+	AvgTokensGold      int                      `json:"avg_tokens_gold,omitempty"`
+	AvgTokenPrecision  float64                  `json:"avg_token_precision,omitempty"`
+	TokenEfficiency    float64                  `json:"token_efficiency,omitempty"` // gold/retrieved ratio
+	PerLanguage        []ContextBenchLangResult `json:"per_language"`
+	TaskResults        []interface{}            `json:"tasks"` // []ContextBenchTaskResult from benchmarks pkg
+	// Multi-budget evaluation (always populated).
+	MultiBudget *MultiBudgetResult `json:"multi_budget,omitempty"`
+	// Cold/warm comparison (populated when --cb-warmup > 0).
+	ColdWarm *ColdWarmComparison `json:"cold_warm,omitempty"`
+	// Compaction comparison (populated when --cb-compaction).
+	Compaction *CompactionComparison `json:"compaction,omitempty"`
+}
+
+// MultiBudgetResult holds F1 at different retrieval budgets.
+type MultiBudgetResult struct {
+	Budget250  BudgetMetrics `json:"budget_250"`
+	Budget500  BudgetMetrics `json:"budget_500"`
+	Budget1000 BudgetMetrics `json:"budget_1000"`
+}
+
+// BudgetMetrics holds avg metrics for one budget level.
+type BudgetMetrics struct {
+	Budget       int     `json:"budget"`
+	AvgPrecision float64 `json:"avg_precision"`
+	AvgRecall    float64 `json:"avg_recall"`
+	AvgF1        float64 `json:"avg_f1"`
+}
+
+// ColdWarmComparison holds the learning lift measurement.
+type ColdWarmComparison struct {
+	ColdF1         float64 `json:"cold_f1"`
+	WarmF1         float64 `json:"warm_f1"`
+	LearningLift   float64 `json:"learning_lift"` // warm - cold
+	WarmupSessions int     `json:"warmup_sessions"`
+}
+
+// CompactionComparison holds pre/post compaction measurement.
+type CompactionComparison struct {
+	PreCompactionF1  float64 `json:"pre_compaction_f1"`
+	PostCompactionF1 float64 `json:"post_compaction_f1"`
+	RecoveryDelta    float64 `json:"recovery_delta"` // post - pre (negative = lost quality)
 }
 
 // ContextBenchLangResult holds per-language metrics.
@@ -177,6 +109,15 @@ func (r *Reporter) PrintContextBenchSummary(result *ContextBenchResult) {
 		result.AvgRecall*100,
 		result.AvgF1*100,
 	)
+	if result.MultiBudget != nil {
+		fmt.Printf("\n%-12s  %10s  %8s  %6s\n", "Budget", "Precision", "Recall", "F1")
+		fmt.Printf("%s\n", strings.Repeat("-", 42))
+		for _, b := range []BudgetMetrics{result.MultiBudget.Budget250, result.MultiBudget.Budget500, result.MultiBudget.Budget1000} {
+			fmt.Printf("%-12d  %9.1f%%  %7.1f%%  %5.1f%%\n",
+				b.Budget, b.AvgPrecision*100, b.AvgRecall*100, b.AvgF1*100)
+		}
+	}
+
 	if len(result.PerLanguage) > 0 {
 		fmt.Printf("\n%-12s  %6s  %10s  %8s  %6s\n", "Language", "Tasks", "Precision", "Recall", "F1")
 		fmt.Printf("%s\n", strings.Repeat("-", 50))
@@ -201,6 +142,17 @@ func contextBenchMarkdown(result *ContextBenchResult) string {
 	fmt.Fprintf(&sb, "- **Context Precision:** %.1f%%\n", result.AvgPrecision*100)
 	fmt.Fprintf(&sb, "- **Context Recall:** %.1f%%\n", result.AvgRecall*100)
 	fmt.Fprintf(&sb, "- **Context F1:** %.1f%%\n\n", result.AvgF1*100)
+
+	if result.MultiBudget != nil {
+		sb.WriteString("## Multi-Budget Evaluation\n\n")
+		sb.WriteString("| Budget | Precision | Recall | F1 |\n")
+		sb.WriteString("|--------|-----------|--------|----|\n")
+		for _, b := range []BudgetMetrics{result.MultiBudget.Budget250, result.MultiBudget.Budget500, result.MultiBudget.Budget1000} {
+			fmt.Fprintf(&sb, "| %d | %.1f%% | %.1f%% | %.1f%% |\n",
+				b.Budget, b.AvgPrecision*100, b.AvgRecall*100, b.AvgF1*100)
+		}
+		sb.WriteString("\n")
+	}
 
 	if len(result.PerLanguage) > 0 {
 		sb.WriteString("## Per-Language Breakdown\n\n")
@@ -280,6 +232,7 @@ func asFloat(v interface{}) float64 {
 // GraphBenchResult holds the full results of a GraphBench run.
 type GraphBenchResult struct {
 	Timestamp       string            `json:"timestamp"`
+	Mode            string            `json:"mode,omitempty"` // "smoke" or "full" (default)
 	TotalTests      int               `json:"total_tests"`
 	ErrorCount      int               `json:"error_count"`
 	Correctness     float64           `json:"correctness"`    // fraction of non-error tests with recall > 0
@@ -663,15 +616,34 @@ func (r *Reporter) PrintSWEBenchSummary(result *SWEBenchResult) {
 // FeatureBenchReport holds aggregated FeatureBench results.
 // Defined here to avoid circular import with benchmarks package.
 type FeatureBenchReport struct {
-	Timestamp  string         `json:"timestamp"`
-	Mode       string         `json:"mode"`
-	Model      string         `json:"model"`
-	TotalTasks int            `json:"total_tasks"`
-	PatchCount int            `json:"patch_count"`
-	PatchRate  float64        `json:"patch_rate"`
-	AvgTurns   float64        `json:"avg_turns"`
-	ToolUsage  map[string]int `json:"tool_usage"`
-	Tasks      []interface{}  `json:"tasks"`
+	Timestamp      string         `json:"timestamp"`
+	Mode           string         `json:"mode"`
+	Model          string         `json:"model"`
+	TotalTasks     int            `json:"total_tasks"`
+	PatchCount     int            `json:"patch_count"`
+	PatchRate      float64        `json:"patch_rate"`
+	AvgTurns       float64        `json:"avg_turns"`
+	AvgInputTokens int            `json:"avg_input_tokens,omitempty"`
+	AvgOutputTokens int           `json:"avg_output_tokens,omitempty"`
+	AvgCostUSD     float64        `json:"avg_cost_usd,omitempty"`
+	TotalCostUSD   float64        `json:"total_cost_usd,omitempty"`
+	ToolUsage      map[string]int `json:"tool_usage"`
+	Tasks          []interface{}  `json:"tasks"`
+	// BothModes comparison (populated when --fb-both-modes).
+	BothModes *FeatureBenchComparison `json:"both_modes,omitempty"`
+}
+
+// FeatureBenchComparison holds side-by-side baseline vs synapses metrics.
+type FeatureBenchComparison struct {
+	BaselinePatchRate  float64 `json:"baseline_patch_rate"`
+	SynapsesPatchRate  float64 `json:"synapses_patch_rate"`
+	AgentLift          float64 `json:"agent_lift"`            // synapses - baseline
+	BaselineAvgCost    float64 `json:"baseline_avg_cost_usd"`
+	SynapsesAvgCost    float64 `json:"synapses_avg_cost_usd"`
+	CostSavingsPct     float64 `json:"cost_savings_pct"`      // (baseline - synapses) / baseline * 100
+	BaselineAvgTokens  int     `json:"baseline_avg_tokens"`
+	SynapsesAvgTokens  int     `json:"synapses_avg_tokens"`
+	TokenSavingsPct    float64 `json:"token_savings_pct"`
 }
 
 // WriteFeatureBench writes JSON + Markdown results.
@@ -871,5 +843,234 @@ func sweBenchMarkdown(result *SWEBenchResult) string {
 	}
 
 	sb.WriteString("\n---\n*Generated by Synapses SWE-bench runner*\n")
+	return sb.String()
+}
+
+// ─── DriftBench ─────────────────────────────────────────────────────────────
+
+// DriftBenchResult holds the full results of a DriftBench run.
+type DriftBenchResult struct {
+	Timestamp         string                `json:"timestamp"`
+	ReposRun          int                   `json:"repos_run"`
+	AvgFidelity       float64               `json:"avg_fidelity"`
+	AvgRenameSurvival float64               `json:"avg_rename_survival"`
+	AvgDeletionClean  float64               `json:"avg_deletion_clean"`
+	AvgSpeedRatio     float64               `json:"avg_speed_ratio"`
+	Repos             []DriftBenchRepoResult `json:"repos"`
+}
+
+// DriftBenchRepoResult holds per-repo metrics.
+type DriftBenchRepoResult struct {
+	Repo                string                        `json:"repo"`
+	Language            string                        `json:"language"`
+	TotalCommits        int                           `json:"total_commits"`
+	TotalQueries        int                           `json:"total_queries"`
+	IncrementalFidelity float64                       `json:"incremental_fidelity"`
+	EdgeLossRate        float64                       `json:"edge_loss_rate"`
+	RenameSurvival      float64                       `json:"rename_survival"`
+	DeletionClean       float64                       `json:"deletion_cleanliness"`
+	SpeedRatio          float64                       `json:"speed_ratio"`
+	DriftCurve          []float64                     `json:"drift_curve"`
+	PerCategory         map[string]DriftCategoryMetrics `json:"per_category"`
+	Error               string                        `json:"error,omitempty"`
+}
+
+// DriftCategoryMetrics holds metrics for one commit category.
+type DriftCategoryMetrics struct {
+	Commits  int     `json:"commits"`
+	Queries  int     `json:"queries"`
+	Fidelity float64 `json:"fidelity"`
+}
+
+// WriteDriftBench writes JSON + Markdown results for a DriftBench run.
+func (r *Reporter) WriteDriftBench(result *DriftBenchResult) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("driftbench_%s.json", ts))
+	mdPath := filepath.Join(r.dir, fmt.Sprintf("driftbench_%s.md", ts))
+
+	if err := writeJSON(jsonPath, result); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(driftBenchMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
+	}
+	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
+	return nil
+}
+
+// PrintDriftBenchSummary prints a compact summary.
+func (r *Reporter) PrintDriftBenchSummary(result *DriftBenchResult) {
+	fmt.Printf("\n=== DriftBench Summary ===\n")
+	fmt.Printf("%-30s  %-8s  %8s  %8s  %8s  %8s\n",
+		"Repo", "Lang", "Fidelity", "Rename", "Delete", "Speed")
+	fmt.Printf("%s\n", strings.Repeat("-", 85))
+	for _, repo := range result.Repos {
+		if repo.Error != "" {
+			fmt.Printf("%-30s  %-8s  ERROR: %s\n", repo.Repo, repo.Language, repo.Error)
+			continue
+		}
+		fmt.Printf("%-30s  %-8s  %7.1f%%  %7.1f%%  %7.1f%%  %7.2fx\n",
+			repo.Repo, repo.Language,
+			repo.IncrementalFidelity*100,
+			repo.RenameSurvival*100,
+			repo.DeletionClean*100,
+			repo.SpeedRatio)
+	}
+	fmt.Printf("%s\n", strings.Repeat("-", 85))
+	fmt.Printf("%-30s  %-8s  %7.1f%%  %7.1f%%  %7.1f%%  %7.2fx\n",
+		"AVERAGE", "",
+		result.AvgFidelity*100,
+		result.AvgRenameSurvival*100,
+		result.AvgDeletionClean*100,
+		result.AvgSpeedRatio)
+}
+
+func driftBenchMarkdown(result *DriftBenchResult) string {
+	var sb strings.Builder
+	sb.WriteString("# DriftBench Results — Incremental Correctness\n\n")
+	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n", result.Timestamp)
+	fmt.Fprintf(&sb, "**Repos evaluated:** %d  \n\n", result.ReposRun)
+
+	sb.WriteString("## Summary\n\n")
+	fmt.Fprintf(&sb, "- **Avg Incremental Fidelity:** %.1f%%\n", result.AvgFidelity*100)
+	fmt.Fprintf(&sb, "- **Avg Rename Survival:** %.1f%%\n", result.AvgRenameSurvival*100)
+	fmt.Fprintf(&sb, "- **Avg Deletion Cleanliness:** %.1f%%\n", result.AvgDeletionClean*100)
+	fmt.Fprintf(&sb, "- **Avg Speed Ratio:** %.2fx (incremental/clean)\n\n", result.AvgSpeedRatio)
+
+	sb.WriteString("## Per-Repo Results\n\n")
+	sb.WriteString("| Repo | Language | Fidelity | Rename | Delete | Speed |\n")
+	sb.WriteString("|------|----------|----------|--------|--------|-------|\n")
+	for _, repo := range result.Repos {
+		if repo.Error != "" {
+			fmt.Fprintf(&sb, "| %s | %s | ERROR | - | - | - |\n", repo.Repo, repo.Language)
+			continue
+		}
+		fmt.Fprintf(&sb, "| %s | %s | %.1f%% | %.1f%% | %.1f%% | %.2fx |\n",
+			repo.Repo, repo.Language,
+			repo.IncrementalFidelity*100,
+			repo.RenameSurvival*100,
+			repo.DeletionClean*100,
+			repo.SpeedRatio)
+	}
+
+	// Per-category breakdown from first non-error repo.
+	for _, repo := range result.Repos {
+		if repo.Error != "" || len(repo.PerCategory) == 0 {
+			continue
+		}
+		sb.WriteString("\n## Per-Category Breakdown\n\n")
+		sb.WriteString("| Category | Commits | Queries | Fidelity |\n")
+		sb.WriteString("|----------|---------|---------|----------|\n")
+		for cat, cm := range repo.PerCategory {
+			fmt.Fprintf(&sb, "| %s | %d | %d | %.1f%% |\n",
+				cat, cm.Commits, cm.Queries, cm.Fidelity*100)
+		}
+		break
+	}
+
+	sb.WriteString("\n---\n*Generated by Synapses DriftBench*\n")
+	return sb.String()
+}
+
+// ─── RecallBench ────────────────────────────────────────────────────────────
+
+// RecallBenchResult holds the full results of a RecallBench run.
+type RecallBenchResult struct {
+	Timestamp              string                            `json:"timestamp"`
+	PairsRun               int                               `json:"pairs_run"`
+	AvgColdF1              float64                           `json:"avg_cold_f1"`
+	AvgWarmF1              float64                           `json:"avg_warm_f1"`
+	AvgRecallLift          float64                           `json:"avg_recall_lift"`
+	AvgCrossProjectHitRate float64                           `json:"avg_cross_project_hit_rate"`
+	AvgDriftAccuracy       float64                           `json:"avg_drift_accuracy"`
+	PerRelationship        map[string]RecallRelationshipMetrics `json:"per_relationship"`
+	Pairs                  []RecallBenchPairResult           `json:"pairs"`
+}
+
+// RecallBenchPairResult holds per-pair metrics.
+type RecallBenchPairResult struct {
+	PairID            string  `json:"pair_id"`
+	Relationship      string  `json:"relationship"`
+	ColdF1            float64 `json:"cold_f1"`
+	WarmF1            float64 `json:"warm_f1"`
+	RecallLift        float64 `json:"recall_lift"`
+	CrossProjectHits  int     `json:"cross_project_hits"`
+	CrossProjectPrec  float64 `json:"cross_project_precision"`
+	DriftDetected     int     `json:"drift_detected"`
+	DriftAccuracy     float64 `json:"drift_accuracy"`
+	Error             string  `json:"error,omitempty"`
+}
+
+// RecallRelationshipMetrics holds metrics per relationship type.
+type RecallRelationshipMetrics struct {
+	Pairs     int     `json:"pairs"`
+	AvgLift   float64 `json:"avg_lift"`
+	AvgHitRate float64 `json:"avg_hit_rate"`
+}
+
+// WriteRecallBench writes JSON + Markdown results for a RecallBench run.
+func (r *Reporter) WriteRecallBench(result *RecallBenchResult) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("recallbench_%s.json", ts))
+	mdPath := filepath.Join(r.dir, fmt.Sprintf("recallbench_%s.md", ts))
+
+	if err := writeJSON(jsonPath, result); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(recallBenchMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
+	}
+	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
+	return nil
+}
+
+// PrintRecallBenchSummary prints a compact summary.
+func (r *Reporter) PrintRecallBenchSummary(result *RecallBenchResult) {
+	fmt.Printf("\n=== RecallBench Summary ===\n")
+	fmt.Printf("%-20s  %-18s  %8s  %8s  %8s  %8s\n",
+		"Pair", "Relationship", "Cold F1", "Warm F1", "Lift", "XProj%")
+	fmt.Printf("%s\n", strings.Repeat("-", 80))
+	for _, p := range result.Pairs {
+		if p.Error != "" {
+			fmt.Printf("%-20s  %-18s  ERROR: %s\n", p.PairID, p.Relationship, p.Error)
+			continue
+		}
+		fmt.Printf("%-20s  %-18s  %7.1f%%  %7.1f%%  %+6.1f%%  %7.1f%%\n",
+			p.PairID, p.Relationship,
+			p.ColdF1*100, p.WarmF1*100,
+			p.RecallLift*100, p.CrossProjectPrec*100)
+	}
+	fmt.Printf("%s\n", strings.Repeat("-", 80))
+	fmt.Printf("%-20s  %-18s  %7.1f%%  %7.1f%%  %+6.1f%%\n",
+		"AVERAGE", "",
+		result.AvgColdF1*100, result.AvgWarmF1*100, result.AvgRecallLift*100)
+}
+
+func recallBenchMarkdown(result *RecallBenchResult) string {
+	var sb strings.Builder
+	sb.WriteString("# RecallBench Results — Cross-Project Memory\n\n")
+	fmt.Fprintf(&sb, "**Run timestamp:** %s  \n", result.Timestamp)
+	fmt.Fprintf(&sb, "**Pairs evaluated:** %d  \n\n", result.PairsRun)
+
+	sb.WriteString("## Summary\n\n")
+	fmt.Fprintf(&sb, "- **Avg Cold F1:** %.1f%%\n", result.AvgColdF1*100)
+	fmt.Fprintf(&sb, "- **Avg Warm F1:** %.1f%%\n", result.AvgWarmF1*100)
+	fmt.Fprintf(&sb, "- **Avg Recall Lift:** %+.1f%%\n", result.AvgRecallLift*100)
+	fmt.Fprintf(&sb, "- **Avg Cross-Project Hit Rate:** %.1f%%\n\n", result.AvgCrossProjectHitRate*100)
+
+	sb.WriteString("## Per-Pair Results\n\n")
+	sb.WriteString("| Pair | Relationship | Cold F1 | Warm F1 | Lift | XProj Hits |\n")
+	sb.WriteString("|------|-------------|---------|---------|------|------------|\n")
+	for _, p := range result.Pairs {
+		if p.Error != "" {
+			fmt.Fprintf(&sb, "| %s | %s | ERROR | - | - | - |\n", p.PairID, p.Relationship)
+			continue
+		}
+		fmt.Fprintf(&sb, "| %s | %s | %.1f%% | %.1f%% | %+.1f%% | %d |\n",
+			p.PairID, p.Relationship,
+			p.ColdF1*100, p.WarmF1*100, p.RecallLift*100, p.CrossProjectHits)
+	}
+
+	sb.WriteString("\n---\n*Generated by Synapses RecallBench*\n")
 	return sb.String()
 }

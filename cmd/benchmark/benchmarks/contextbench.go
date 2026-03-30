@@ -59,6 +59,14 @@ type ContextBenchOptions struct {
 	SkipIndex bool
 	// SynapsesBin is the path to the synapses binary (empty = auto-detect).
 	SynapsesBin string
+	// WarmupSessions: when > 0, run N warm-up sessions on each repo before tasks
+	// to build edge weight history, then compare cold F1 (fresh) vs warm F1.
+	// Measures whether Synapses' learning features improve retrieval quality.
+	WarmupSessions int
+	// CompactionMode: when true, run each task normally (Phase 1), then simulate
+	// a compaction event and re-run with only the recovery packet (Phase 2).
+	// Measures how well compaction recovery preserves context quality.
+	CompactionMode bool
 }
 
 // ContextBenchTask is a single record from the ContextBench dataset.
@@ -85,17 +93,30 @@ type GoldContextBlock struct {
 
 // ContextBenchTaskResult holds per-task metrics.
 type ContextBenchTaskResult struct {
-	InstanceID string  `json:"instance_id"`
-	Repo       string  `json:"repo"`
-	Language   string  `json:"language"`
-	Precision  float64 `json:"precision"`
-	Recall     float64 `json:"recall"`
-	F1         float64 `json:"f1"`
-	GoldLines  int     `json:"gold_lines"`
-	HitLines   int     `json:"hit_lines"`
-	TotalLines int     `json:"total_retrieved_lines"`
-	ToolCalls  int     `json:"tool_calls"`
-	Error      string  `json:"error,omitempty"`
+	InstanceID     string  `json:"instance_id"`
+	Repo           string  `json:"repo"`
+	Language       string  `json:"language"`
+	Precision      float64 `json:"precision"`
+	Recall         float64 `json:"recall"`
+	F1             float64 `json:"f1"`
+	GoldLines      int     `json:"gold_lines"`
+	HitLines       int     `json:"hit_lines"`
+	TotalLines     int     `json:"total_retrieved_lines"`
+	ToolCalls      int     `json:"tool_calls"`
+	TokensRetrieved int    `json:"tokens_retrieved"`  // estimated tokens in retrieved context
+	TokensGold      int    `json:"tokens_gold"`       // estimated tokens in gold context
+	TokenPrecision  float64 `json:"token_precision"`   // hit_tokens / retrieved_tokens
+	// Multi-budget metrics at different retrieval line limits.
+	PAt250          float64 `json:"p_at_250"`
+	RAt250          float64 `json:"r_at_250"`
+	F1At250         float64 `json:"f1_at_250"`
+	PAt500          float64 `json:"p_at_500"`
+	RAt500          float64 `json:"r_at_500"`
+	F1At500         float64 `json:"f1_at_500"`
+	PAt1000         float64 `json:"p_at_1000"`
+	RAt1000         float64 `json:"r_at_1000"`
+	F1At1000        float64 `json:"f1_at_1000"`
+	Error          string  `json:"error,omitempty"`
 }
 
 // RunContextBench runs the full ContextBench evaluation.
@@ -125,6 +146,11 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 	// Run each task sequentially (tool calls hit daemon, moderate parallelism).
 	var results []ContextBenchTaskResult
 	var totalP, totalR, totalF1 float64
+	var totalTokensRetrieved, totalTokensGold int
+	var totalTokenPrecision float64
+	var totalPAt250, totalRAt250, totalF1At250 float64
+	var totalPAt500, totalRAt500, totalF1At500 float64
+	var totalPAt1000, totalRAt1000, totalF1At1000 float64
 	for i, task := range tasks {
 		fmt.Printf("[contextbench] task %d/%d: %s\n", i+1, len(tasks), task.InstanceID)
 
@@ -133,20 +159,43 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 		totalP += tr.Precision
 		totalR += tr.Recall
 		totalF1 += tr.F1
-		fmt.Printf("  → P=%.1f%% R=%.1f%% F1=%.1f%% (gold=%d hits=%d retrieved=%d tools=%d)\n",
+		totalTokensRetrieved += tr.TokensRetrieved
+		totalTokensGold += tr.TokensGold
+		totalTokenPrecision += tr.TokenPrecision
+		totalPAt250 += tr.PAt250
+		totalRAt250 += tr.RAt250
+		totalF1At250 += tr.F1At250
+		totalPAt500 += tr.PAt500
+		totalRAt500 += tr.RAt500
+		totalF1At500 += tr.F1At500
+		totalPAt1000 += tr.PAt1000
+		totalRAt1000 += tr.RAt1000
+		totalF1At1000 += tr.F1At1000
+		fmt.Printf("  → P=%.1f%% R=%.1f%% F1=%.1f%% (gold=%d hits=%d retrieved=%d tools=%d F1@250=%.1f%% F1@1000=%.1f%%)\n",
 			tr.Precision*100, tr.Recall*100, tr.F1*100,
 			tr.GoldLines, tr.HitLines, tr.TotalLines, tr.ToolCalls,
+			tr.F1At250*100, tr.F1At1000*100,
 		)
 	}
 
 	n := float64(len(results))
+	avgTokensRetrieved := totalTokensRetrieved / max(len(results), 1)
+	avgTokensGold := totalTokensGold / max(len(results), 1)
+	var tokenEfficiency float64
+	if avgTokensRetrieved > 0 {
+		tokenEfficiency = float64(avgTokensGold) / float64(avgTokensRetrieved)
+	}
 	result := &reporter.ContextBenchResult{
-		Timestamp:    reporter.Timestamp(),
-		TotalTasks:   len(results),
-		TaskResults:  toInterfaceSlice(results),
-		AvgPrecision: totalP / n,
-		AvgRecall:    totalR / n,
-		AvgF1:        totalF1 / n,
+		Timestamp:          reporter.Timestamp(),
+		TotalTasks:         len(results),
+		TaskResults:        toInterfaceSlice(results),
+		AvgPrecision:       totalP / n,
+		AvgRecall:          totalR / n,
+		AvgF1:              totalF1 / n,
+		AvgTokensRetrieved: avgTokensRetrieved,
+		AvgTokensGold:      avgTokensGold,
+		AvgTokenPrecision:  totalTokenPrecision / n,
+		TokenEfficiency:    tokenEfficiency,
 	}
 
 	// Per-language breakdown.
@@ -174,6 +223,129 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 			AvgRecall:    lm.r / float64(lm.n),
 			AvgF1:        lm.f1 / float64(lm.n),
 		})
+	}
+
+	// Multi-budget aggregation.
+	result.MultiBudget = &reporter.MultiBudgetResult{
+		Budget250:  reporter.BudgetMetrics{Budget: 250, AvgPrecision: totalPAt250 / n, AvgRecall: totalRAt250 / n, AvgF1: totalF1At250 / n},
+		Budget500:  reporter.BudgetMetrics{Budget: 500, AvgPrecision: totalPAt500 / n, AvgRecall: totalRAt500 / n, AvgF1: totalF1At500 / n},
+		Budget1000: reporter.BudgetMetrics{Budget: 1000, AvgPrecision: totalPAt1000 / n, AvgRecall: totalRAt1000 / n, AvgF1: totalF1At1000 / n},
+	}
+
+	// ── Cold/Warm comparison (Phase 3b) ─────────────────────────────────────
+	if opts.WarmupSessions > 0 {
+		fmt.Printf("\n[contextbench] cold/warm comparison: %d warmup sessions\n", opts.WarmupSessions)
+
+		// Cold F1 is the normal run we just did.
+		coldF1 := result.AvgF1
+
+		// Warm-up: simulate N agent sessions per repo to build edge weight history.
+		// Group tasks by repo to warm up each repo once.
+		repoTasks := make(map[string][]ContextBenchTask)
+		for _, t := range tasks {
+			repoTasks[t.Repo] = append(repoTasks[t.Repo], t)
+		}
+
+		warmClient := agent.NewClient(client.Endpoint(), "")
+		for repo, rTasks := range repoTasks {
+			// Get project path from cache.
+			repoDir := cache.Get(repo + "@" + rTasks[0].BaseCommit)
+			if repoDir == "" {
+				continue
+			}
+			projClient := warmClient.WithProject(repoDir)
+
+			for s := 0; s < opts.WarmupSessions; s++ {
+				agentID := fmt.Sprintf("cb-warmup-%s-%d", repo, s)
+				projClient.SessionInit(agentID, "")
+
+				// Explore 5-10 entities from this repo's tasks to create context deliveries.
+				for j, t := range rTasks {
+					if j >= 10 {
+						break
+					}
+					projClient.GetContextJSON(agentID, t.ProblemStatement[:min(len(t.ProblemStatement), 60)], "summary")
+				}
+				projClient.EndSession(agentID, "success")
+			}
+			fmt.Printf("  warmed up %s (%d sessions)\n", repo, opts.WarmupSessions)
+		}
+
+		// Re-run tasks with warm edge weights.
+		var warmF1Sum float64
+		for i, task := range tasks {
+			if i < 5 { // only log first 5
+				fmt.Printf("[contextbench-warm] task %d/%d: %s\n", i+1, len(tasks), task.InstanceID)
+			}
+			tr := runContextBenchTask(client, task, cache, opts)
+			warmF1Sum += tr.F1
+		}
+		warmF1 := warmF1Sum / float64(len(tasks))
+
+		result.ColdWarm = &reporter.ColdWarmComparison{
+			ColdF1:         coldF1,
+			WarmF1:         warmF1,
+			LearningLift:   warmF1 - coldF1,
+			WarmupSessions: opts.WarmupSessions,
+		}
+		fmt.Printf("[contextbench] cold=%.1f%% warm=%.1f%% lift=%+.1f%%\n",
+			coldF1*100, warmF1*100, (warmF1-coldF1)*100)
+	}
+
+	// ── Compaction comparison (Phase 3b) ────────────────────────────────────
+	if opts.CompactionMode {
+		fmt.Printf("\n[contextbench] compaction mode: testing recovery quality\n")
+
+		// Pre-compaction F1 is the normal run.
+		preF1 := result.AvgF1
+
+		// For each task: simulate compaction by calling session_init(scope=compaction)
+		// to get the recovery packet, then re-run the task. The recovery packet
+		// seeds the agent's context — measure how much F1 is preserved.
+		compClient := agent.NewClient(client.Endpoint(), "")
+		var postF1Sum float64
+		var postCount int
+		for i, task := range tasks {
+			repoDir := cache.Get(task.Repo + "@" + task.BaseCommit)
+			if repoDir == "" {
+				continue
+			}
+			projClient := compClient.WithProject(repoDir)
+
+			// Get compaction recovery packet.
+			agentID := fmt.Sprintf("cb-compact-%d", i)
+			recoveryRaw, err := projClient.SessionInit(agentID, "compaction")
+			if err != nil {
+				continue
+			}
+
+			// The recovery packet seeds the agent — now run the same task.
+			// The recovery context should help the agent find the right files
+			// even though it's a "fresh" session.
+			_ = recoveryRaw // Recovery packet is automatically in the session context
+
+			tr := runContextBenchTask(projClient, task, cache, opts)
+			postF1Sum += tr.F1
+			postCount++
+
+			projClient.EndSession(agentID, "success")
+
+			if i < 5 {
+				fmt.Printf("  [compact] task %d: pre=%.1f%% post=%.1f%%\n",
+					i+1, preF1*100, tr.F1*100)
+			}
+		}
+
+		if postCount > 0 {
+			postF1 := postF1Sum / float64(postCount)
+			result.Compaction = &reporter.CompactionComparison{
+				PreCompactionF1:  preF1,
+				PostCompactionF1: postF1,
+				RecoveryDelta:    postF1 - preF1,
+			}
+			fmt.Printf("[contextbench] pre=%.1f%% post=%.1f%% delta=%+.1f%%\n",
+				preF1*100, postF1*100, (postF1-preF1)*100)
+		}
 	}
 
 	return result, nil
@@ -276,12 +448,26 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 
 	toolCalls := 0
 
-	// Pass 1 — broad search with the clean first sentence of the problem.
-	// We strip HTML comment blocks (<!-- ... -->) and markdown boilerplate that
-	// appear in SWE-bench problem statements; these dilute the search query with
-	// noise. Using just the first clean sentence (~100 chars) focuses the query
-	// on the actual problem description.
+	// Pass 0 — session_init priming. Primes the daemon session and extracts
+	// entity/file hints from the bootstrap response (stale_context_hints,
+	// relevant_memories, scale_guidance).
+	var sessionEntities []string
+	if initResp, err := sc.SessionInit("contextbench-"+task.InstanceID, "standard"); err == nil && initResp != "" {
+		collectMarkdownMentions(initResp, addMention)
+		sessionEntities = extractEntitiesFromResponse(initResp)
+	}
+	toolCalls++
+
+	// Pass 0.5 — memory recall. Search episodic memory for relevant context
+	// from prior sessions. Surfaces entities and files from past work.
 	query := cleanFirstSentence(task.ProblemStatement)
+	if recallR, err := sc.Recall(task.InstanceID, query); err == nil && recallR.Text != "" {
+		collectMarkdownMentions(recallR.Text, addMention)
+		sessionEntities = append(sessionEntities, extractEntitiesFromResponse(recallR.Text)...)
+	}
+	toolCalls++
+
+	// Pass 1 — broad search with the clean first sentence of the problem.
 	if sr, err := sc.Search(task.InstanceID, query); err == nil && sr.Text != "" {
 		collectSearchMentions(sr.Text, addMention)
 	}
@@ -289,10 +475,14 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 
 	// Pass 2 — for each code entity: search (broad symbol lookup) + prepare_context
 	// (graph traversal) + get_impact (downstream effects).
-	// Running Search per entity is critical: it returns ALL symbols matching the name
-	// across all files, giving strong file-score signal (e.g. "SlicedLowLevelWCS"
-	// returns 19 hits all in sliced_wcs.py, scoring it far above noise files).
+	// Entities come from problem statement + session_init/memory discoveries.
 	entities := extractEntitiesFromProblem(task.ProblemStatement)
+	// Prepend session-discovered entities (from Pass 0/0.5) for early coverage.
+	for _, se := range sessionEntities {
+		if se != "" && len(se) >= 3 {
+			entities = append(entities, se)
+		}
+	}
 	var followUpEntities []string
 	seenEntity := make(map[string]bool)
 	for _, e := range entities {
@@ -320,6 +510,8 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		// Impact analysis — finds downstream affected symbols.
 		if impR, err := sc.GetImpact(task.InstanceID, entity); err == nil && impR.Text != "" {
 			collectImpactMentions(impR.Text, addMention)
+			// Also extract entity names from impact tiers for follow-up discovery.
+			followUpEntities = append(followUpEntities, extractEntitiesFromResponse(impR.Text)...)
 		}
 		toolCalls++
 	}
@@ -425,12 +617,7 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 			entityStems[s] = true
 		}
 	}
-	type fileScore struct {
-		file   string
-		score  int
-		source bool
-		depth  int
-	}
+	// fileScore is defined at package level for use by buildRetrievedLines.
 	var scored []fileScore
 	for file, lines := range fileMentions {
 		score := len(lines)
@@ -479,130 +666,30 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		}
 	}
 
-	// Retrieve from top files using density-sorted per-file windows.
-	//
-	// For each top file we:
-	//  1. Expand every mentioned line into a ±window range.
-	//  2. Merge overlapping ranges into contiguous blocks.
-	//  3. Score each block by how many original mentions fall inside it.
-	//  4. Emit blocks in descending density order up to perFileBudget lines.
-	//
-	// This gives every ranked file a fair share of the 500-line budget and
-	// ensures we pull the DENSEST (most-mentioned) region of each file first —
-	// solving the "right file at rank 2 budget-starved by rank 1" problem.
-	const (
-		topFiles          = 8
-		windowBefore      = 5
-		windowAfter       = 60 // covers most function bodies after the definition line
-		mergeGap          = 10 // merge windows within 10 lines of each other
-		maxRetrievedLines = 500
-		perFileBudget     = 120 // max lines contributed by any single file
-	)
-	type windowBlock struct {
-		start, end   int
-		mentionCount int
-	}
-	buildWindows := func(mentions map[int]bool, winAfter int) []windowBlock {
-		lineSet := make(map[int]bool)
-		for line := range mentions {
-			for l := maxInt(1, line-windowBefore); l <= line+winAfter; l++ {
-				lineSet[l] = true
-			}
-		}
-		var ls []int
-		for l := range lineSet {
-			ls = append(ls, l)
-		}
-		for ii := 1; ii < len(ls); ii++ {
-			for j := ii; j > 0 && ls[j] < ls[j-1]; j-- {
-				ls[j], ls[j-1] = ls[j-1], ls[j]
-			}
-		}
-		if len(ls) == 0 {
-			return nil
-		}
-		var blocks []windowBlock
-		cur := windowBlock{start: ls[0], end: ls[0]}
-		for _, l := range ls[1:] {
-			if l <= cur.end+mergeGap {
-				cur.end = l
-			} else {
-				blocks = append(blocks, cur)
-				cur = windowBlock{start: l, end: l}
-			}
-		}
-		blocks = append(blocks, cur)
-		// Count original mentions inside each block.
-		for i := range blocks {
-			for ml := range mentions {
-				if ml >= blocks[i].start && ml <= blocks[i].end {
-					blocks[i].mentionCount++
-				}
-			}
-		}
-		// Sort blocks by mention count descending (densest first).
-		for ii := 1; ii < len(blocks); ii++ {
-			for j := ii; j > 0 && blocks[j].mentionCount > blocks[j-1].mentionCount; j-- {
-				blocks[j], blocks[j-1] = blocks[j-1], blocks[j]
-			}
-		}
-		return blocks
-	}
-
-	retrievedLines := make(map[string]bool)
+	// Pass 5 — get_file_context on top-scored files. Retrieves exact entity
+	// definition lines from the daemon, improving window centering precision.
+	// Run before window building so the injected lines influence block density.
 	for i, fs := range scored {
-		if i >= topFiles || len(retrievedLines) >= maxRetrievedLines {
+		if i >= 3 || toolCalls >= 40 {
 			break
 		}
-		blocks := buildWindows(fileMentions[fs.file], windowAfter)
-		if len(blocks) == 0 {
-			continue
-		}
-		// Top-2 files get a larger budget — they're the most likely to contain
-		// gold context and need more coverage for implementation regions.
-		fileBudget := perFileBudget
-		if i == 0 {
-			fileBudget = perFileBudget * 2 // 240 lines for #1 file
-		}
-		// Two-pass budget distribution: give each block a minimum share,
-		// then allocate remaining budget to denser blocks. This prevents
-		// a single large definition block from starving implementation blocks.
-		fileAdded := 0
-		minPerBlock := fileBudget / (len(blocks) + 1) // floor share
-		if minPerBlock < 20 {
-			minPerBlock = 20
-		}
-		// Pass 1: each block gets up to minPerBlock lines (centered on mentions).
-		blockUsed := make([]int, len(blocks))
-		for bi, b := range blocks {
-			limit := minPerBlock
-			if limit > b.end-b.start+1 {
-				limit = b.end - b.start + 1
-			}
-			for ll := b.start; ll <= b.end && blockUsed[bi] < limit && fileAdded < fileBudget && len(retrievedLines) < maxRetrievedLines; ll++ {
-				key := fmt.Sprintf("%s:%d", fs.file, ll)
-				if !retrievedLines[key] {
-					retrievedLines[key] = true
-					fileAdded++
-					blockUsed[bi]++
+		if fcr, err := sc.GetFileContext(task.InstanceID, fs.file); err == nil && fcr != nil {
+			for _, ent := range fcr.Entities {
+				if ent.Line > 0 {
+					addMention(fcr.File, ent.Line)
 				}
 			}
 		}
-		// Pass 2: distribute remaining budget to blocks in density order.
-		for bi, b := range blocks {
-			if fileAdded >= fileBudget || len(retrievedLines) >= maxRetrievedLines {
-				break
-			}
-			for ll := b.start + blockUsed[bi]; ll <= b.end && fileAdded < fileBudget && len(retrievedLines) < maxRetrievedLines; ll++ {
-				key := fmt.Sprintf("%s:%d", fs.file, ll)
-				if !retrievedLines[key] {
-					retrievedLines[key] = true
-					fileAdded++
-				}
-			}
-			_ = bi
-		}
+		toolCalls++
 	}
+
+	// Multi-budget evaluation: build retrieved line sets at 250, 500, 1000 budgets.
+	retrieved250 := buildRetrievedLines(scored, fileMentions, 250)
+	retrieved500 := buildRetrievedLines(scored, fileMentions, 500)
+	retrieved1000 := buildRetrievedLines(scored, fileMentions, 1000)
+
+	// Primary metrics use the 500-line budget (backward compatible).
+	retrievedLines := retrieved500
 
 	result.ToolCalls = toolCalls
 	result.TotalLines = len(retrievedLines)
@@ -625,13 +712,11 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		}
 		fmt.Printf("  [debug] retrieved sample: %v\n", retSample)
 		fmt.Printf("  [debug] gold sample: %v\n", goldSample)
-		// print file score summary
 		fmt.Printf("  [debug] fileMentions top files: ")
 		for _, fs := range scored[:minInt(3, len(scored))] {
 			fmt.Printf("%s(%d) ", fs.file, fs.score)
 		}
 		fmt.Println()
-		// Debug: show mention lines for gold files
 		goldFiles := map[string]bool{}
 		for gl := range goldLines {
 			parts := strings.SplitN(gl, ":", 2)
@@ -656,26 +741,167 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		}
 	}
 
-	// Compute Context F1.
-	var hits int
-	for line := range retrievedLines {
+	// Compute Context F1 at each budget.
+	computeF1 := func(retrieved map[string]bool) (precision, recall, f1 float64) {
+		var h int
+		for line := range retrieved {
+			if goldLines[line] {
+				h++
+			}
+		}
+		if len(retrieved) > 0 {
+			precision = float64(h) / float64(len(retrieved))
+		}
+		if len(goldLines) > 0 {
+			recall = float64(h) / float64(len(goldLines))
+		}
+		if precision+recall > 0 {
+			f1 = 2 * precision * recall / (precision + recall)
+		}
+		return
+	}
+
+	result.Precision, result.Recall, result.F1 = computeF1(retrieved500)
+	result.HitLines = 0
+	for line := range retrieved500 {
 		if goldLines[line] {
-			hits++
+			result.HitLines++
 		}
 	}
-	result.HitLines = hits
 
-	if len(retrievedLines) > 0 {
-		result.Precision = float64(hits) / float64(len(retrievedLines))
+	// Multi-budget metrics.
+	result.PAt250, result.RAt250, result.F1At250 = computeF1(retrieved250)
+	result.PAt500, result.RAt500, result.F1At500 = computeF1(retrieved500)
+	result.PAt1000, result.RAt1000, result.F1At1000 = computeF1(retrieved1000)
+
+	// Token efficiency: estimate tokens as chars/4 (standard approximation for code).
+	result.TokensRetrieved = result.TotalLines * 40 / 4 // ~40 chars per line average
+	result.TokensGold = result.GoldLines * 40 / 4
+	hitTokens := result.HitLines * 40 / 4
+	if result.TokensRetrieved > 0 {
+		result.TokenPrecision = float64(hitTokens) / float64(result.TokensRetrieved)
 	}
-	if len(goldLines) > 0 {
-		result.Recall = float64(hits) / float64(len(goldLines))
-	}
-	if result.Precision+result.Recall > 0 {
-		result.F1 = 2 * result.Precision * result.Recall / (result.Precision + result.Recall)
-	}
+
+	// Session cleanup — finalize the daemon session to prevent accumulation.
+	sc.EndSession("contextbench-"+task.InstanceID, "success")
 
 	return result
+}
+
+// ─── retrieval budget ───────────────────────────────────────────────────────
+
+// fileScore holds a file's relevance score for ranking.
+type fileScore struct {
+	file   string
+	score  int
+	source bool
+	depth  int
+}
+
+// buildRetrievedLines builds a set of "file:line" keys from scored files using
+// density-sorted per-file windows, capped at maxLines total.
+func buildRetrievedLines(scored []fileScore, fileMentions map[string]map[int]bool, maxLines int) map[string]bool {
+	const (
+		topFiles     = 8
+		windowBefore = 5
+		windowAfter  = 60
+		mergeGap     = 10
+	)
+	perFileBudget := maxLines / 4 // scale per-file budget with total budget
+	if perFileBudget < 60 {
+		perFileBudget = 60
+	}
+
+	type windowBlock struct {
+		start, end   int
+		mentionCount int
+	}
+	buildWindows := func(mentions map[int]bool) []windowBlock {
+		lineSet := make(map[int]bool)
+		for line := range mentions {
+			for l := maxInt(1, line-windowBefore); l <= line+windowAfter; l++ {
+				lineSet[l] = true
+			}
+		}
+		var ls []int
+		for l := range lineSet {
+			ls = append(ls, l)
+		}
+		sort.Ints(ls)
+		if len(ls) == 0 {
+			return nil
+		}
+		var blocks []windowBlock
+		cur := windowBlock{start: ls[0], end: ls[0]}
+		for _, l := range ls[1:] {
+			if l <= cur.end+mergeGap {
+				cur.end = l
+			} else {
+				blocks = append(blocks, cur)
+				cur = windowBlock{start: l, end: l}
+			}
+		}
+		blocks = append(blocks, cur)
+		for i := range blocks {
+			for ml := range mentions {
+				if ml >= blocks[i].start && ml <= blocks[i].end {
+					blocks[i].mentionCount++
+				}
+			}
+		}
+		sort.Slice(blocks, func(i, j int) bool {
+			return blocks[i].mentionCount > blocks[j].mentionCount
+		})
+		return blocks
+	}
+
+	retrieved := make(map[string]bool)
+	for i, fs := range scored {
+		if i >= topFiles || len(retrieved) >= maxLines {
+			break
+		}
+		blocks := buildWindows(fileMentions[fs.file])
+		if len(blocks) == 0 {
+			continue
+		}
+		fileBudget := perFileBudget
+		if i == 0 {
+			fileBudget = perFileBudget * 2
+		}
+		fileAdded := 0
+		minPerBlock := fileBudget / (len(blocks) + 1)
+		if minPerBlock < 20 {
+			minPerBlock = 20
+		}
+		blockUsed := make([]int, len(blocks))
+		for bi, b := range blocks {
+			limit := minPerBlock
+			if limit > b.end-b.start+1 {
+				limit = b.end - b.start + 1
+			}
+			for ll := b.start; ll <= b.end && blockUsed[bi] < limit && fileAdded < fileBudget && len(retrieved) < maxLines; ll++ {
+				key := fmt.Sprintf("%s:%d", fs.file, ll)
+				if !retrieved[key] {
+					retrieved[key] = true
+					fileAdded++
+					blockUsed[bi]++
+				}
+			}
+		}
+		for bi, b := range blocks {
+			if fileAdded >= fileBudget || len(retrieved) >= maxLines {
+				break
+			}
+			for ll := b.start + blockUsed[bi]; ll <= b.end && fileAdded < fileBudget && len(retrieved) < maxLines; ll++ {
+				key := fmt.Sprintf("%s:%d", fs.file, ll)
+				if !retrieved[key] {
+					retrieved[key] = true
+					fileAdded++
+				}
+			}
+		}
+	}
+	return retrieved
 }
 
 // ─── repo management ─────────────────────────────────────────────────────────
@@ -1208,3 +1434,31 @@ func loadContextBenchTasks(path string) ([]ContextBenchTask, error) {
 	}
 	return tasks, nil
 }
+
+// stopWords are pure language keywords that appear in nearly every file and
+// carry zero discriminative signal. Shared across benchmarks.
+var stopWords = map[string]bool{
+	// Natural language
+	"the": true, "and": true, "for": true, "are": true, "not": true,
+	"this": true, "that": true, "with": true, "from": true,
+	// Python keywords
+	"import": true, "def": true, "class": true, "return": true, "self": true,
+	"true": true, "false": true, "none": true, "pass": true, "elif": true,
+	"lambda": true, "yield": true, "async": true, "await": true,
+	// Java / Kotlin keywords
+	"null": true, "void": true, "new": true, "public": true, "private": true,
+	"protected": true, "static": true, "final": true, "extends": true,
+	"implements": true, "override": true, "super": true, "abstract": true,
+	"interface": true,
+	// Go keywords
+	"func": true, "package": true, "var": true, "const": true, "type": true,
+	"range": true, "make": true, "append": true,
+	// TypeScript / JavaScript keywords
+	"let": true, "export": true, "default": true, "typeof": true,
+	// Control flow
+	"if": true, "else": true, "break": true, "continue": true,
+	// Structural
+	"struct": true,
+}
+
+func isStopWord(s string) bool { return stopWords[s] }

@@ -530,6 +530,45 @@ func (s *Server) handleSearch(
 		}
 	}
 
+	// Hybrid boost: when an embedder is available, run a parallel vector search
+	// and inject high-scoring semantic matches that the lexical scan missed.
+	// This catches NL-to-code matches (e.g., "auth handler" → validateCredentials)
+	// without slowing down the common case (exact name queries still resolve via
+	// the lexical scan above). Vector results that already appear in lexical hits
+	// are skipped (dedup by node ID).
+	if s.embedClient != nil && s.store != nil {
+		embedCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+		queryVec, embedErr := s.embedClient.Embed(embedCtx, query)
+		cancel()
+		if embedErr == nil && len(queryVec) > 0 {
+			vr, verr := s.store.VectorSearch(queryVec, 10)
+			if verr == nil {
+				// Build dedup set from lexical hits.
+				lexicalIDs := make(map[graph.NodeID]bool, len(hits))
+				for _, h := range hits {
+					lexicalIDs[graph.NodeID(h.node.ID)] = true
+				}
+				for _, sr := range vr {
+					nid := graph.NodeID(sr.ID)
+					if lexicalIDs[nid] {
+						continue // already in lexical results
+					}
+					n := s.graph.GetNode(nid)
+					if n == nil {
+						continue
+					}
+					// Score 7: semantic match — above doc-only (5) but below
+					// name-contains (10). High-similarity vectors get +2 boost.
+					score := 7
+					if sr.Score > 0.7 {
+						score = 9
+					}
+					hits = append(hits, hit{n, score})
+				}
+			}
+		}
+	}
+
 	// Deprioritize vendored/external/generated nodes so user-authored code
 	// ranks higher. Without this, bundled third-party libraries (e.g.
 	// vendor/configobj.py) can dominate results for common terms.

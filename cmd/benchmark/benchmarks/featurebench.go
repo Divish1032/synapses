@@ -37,6 +37,7 @@ type FeatureBenchOptions struct {
 	SynapsesBin string   // path to synapses binary (for init + index)
 	OutputDir   string   // where to write predictions JSONL
 	Debug       bool     // dump raw stream-json to file for inspection
+	BothModes   bool     // run both baseline and synapses, compute delta
 }
 
 // FeatureBenchTask is one task from the FeatureBench dataset.
@@ -55,15 +56,18 @@ type FeatureBenchTask struct {
 
 // FeatureBenchTaskResult is the outcome of running Claude on one task.
 type FeatureBenchTaskResult struct {
-	InstanceID string            `json:"instance_id"`
-	Repo       string            `json:"repo"`
-	Mode       string            `json:"mode"`
-	ModelPatch string            `json:"model_patch"`
-	ToolCalls  map[string]int    `json:"tool_calls,omitempty"`
-	Turns      int               `json:"turns"`
-	Error      string            `json:"error,omitempty"`
-	Duration   string            `json:"duration"`
-	Task       *FeatureBenchTask `json:"-"` // for metadata output
+	InstanceID      string            `json:"instance_id"`
+	Repo            string            `json:"repo"`
+	Mode            string            `json:"mode"`
+	ModelPatch      string            `json:"model_patch"`
+	ToolCalls       map[string]int    `json:"tool_calls,omitempty"`
+	Turns           int               `json:"turns"`
+	InputTokens     int               `json:"input_tokens"`      // total LLM input tokens across all turns
+	OutputTokens    int               `json:"output_tokens"`     // total LLM output tokens across all turns
+	CostEstimateUSD float64           `json:"cost_estimate_usd"` // estimated cost based on model pricing
+	Error           string            `json:"error,omitempty"`
+	Duration        string            `json:"duration"`
+	Task            *FeatureBenchTask `json:"-"` // for metadata output
 }
 
 // FeatureBenchPrediction is the JSONL format that fb eval expects.
@@ -249,7 +253,12 @@ func runFeatureBenchTask(claudeBin string, task FeatureBenchTask, opts FeatureBe
 	}
 
 	// 7. Parse stats from stream output.
-	result.ToolCalls, result.Turns = parseStreamStats(streamJSON)
+	stats := parseStreamStats(streamJSON)
+	result.ToolCalls = stats.ToolCalls
+	result.Turns = stats.Turns
+	result.InputTokens = stats.InputTokens
+	result.OutputTokens = stats.OutputTokens
+	result.CostEstimateUSD = estimateCost(opts.Model, stats.InputTokens, stats.OutputTokens)
 
 	// 8. Capture patch — exclude benchmark artifacts (.mcp.json, .claude/, synapses.json).
 	// This diff is relative to corruption commit (step 3), so it contains ONLY agent changes.
@@ -433,8 +442,15 @@ func runClaudeCode(claudeBin, repoDir, prompt, allowedTools, disallowedTools, mo
 	}
 }
 
-func parseStreamStats(streamJSON string) (toolCalls map[string]int, turns int) {
-	toolCalls = make(map[string]int)
+type streamStats struct {
+	ToolCalls    map[string]int
+	Turns        int
+	InputTokens  int
+	OutputTokens int
+}
+
+func parseStreamStats(streamJSON string) streamStats {
+	stats := streamStats{ToolCalls: make(map[string]int)}
 	scanner := bufio.NewScanner(strings.NewReader(streamJSON))
 	scanner.Buffer(make([]byte, 0), 1024*1024) // 1MB per line
 
@@ -447,20 +463,41 @@ func parseStreamStats(streamJSON string) (toolCalls map[string]int, turns int) {
 					Name string `json:"name"`
 				} `json:"content"`
 			} `json:"message"`
+			// Result message (final) contains usage stats.
+			Result struct {
+				Usage struct {
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"result"`
+			// Some stream formats put usage at top level per-turn.
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
 			continue
 		}
 		if msg.Type == "assistant" {
-			turns++
+			stats.Turns++
 			for _, c := range msg.Message.Content {
 				if c.Type == "tool_use" && c.Name != "" {
-					toolCalls[c.Name]++
+					stats.ToolCalls[c.Name]++
 				}
 			}
 		}
+		// Accumulate token usage from any message that reports it.
+		if msg.Usage.InputTokens > 0 {
+			stats.InputTokens += msg.Usage.InputTokens
+			stats.OutputTokens += msg.Usage.OutputTokens
+		}
+		if msg.Result.Usage.InputTokens > 0 {
+			stats.InputTokens += msg.Result.Usage.InputTokens
+			stats.OutputTokens += msg.Result.Usage.OutputTokens
+		}
 	}
-	return
+	return stats
 }
 
 // ─── Synapses Setup (Docker-isolated) ───────────────────────────────────────
@@ -727,6 +764,22 @@ func countMCPToolCalls(m map[string]int) int {
 	return n
 }
 
+// estimateCost computes the estimated USD cost based on Claude model pricing.
+func estimateCost(model string, inputTokens, outputTokens int) float64 {
+	// Pricing per million tokens (as of 2026).
+	var inputPrice, outputPrice float64
+	switch {
+	case strings.Contains(model, "opus"):
+		inputPrice, outputPrice = 15.0, 75.0
+	case strings.Contains(model, "haiku"):
+		inputPrice, outputPrice = 0.25, 1.25
+	default: // sonnet and other models
+		inputPrice, outputPrice = 3.0, 15.0
+	}
+	return (float64(inputTokens) * inputPrice / 1_000_000) +
+		(float64(outputTokens) * outputPrice / 1_000_000)
+}
+
 // minInt is already defined in contextbench.go (same package).
 
 // BuildFeatureBenchReport aggregates task results into a reporter-compatible struct.
@@ -740,11 +793,16 @@ func BuildFeatureBenchReport(mode, model string, results []FeatureBenchTaskResul
 	}
 
 	totalTurns := 0
+	var totalInput, totalOutput int
+	var totalCost float64
 	for _, tr := range results {
 		if tr.ModelPatch != "" {
 			r.PatchCount++
 		}
 		totalTurns += tr.Turns
+		totalInput += tr.InputTokens
+		totalOutput += tr.OutputTokens
+		totalCost += tr.CostEstimateUSD
 		for name, count := range tr.ToolCalls {
 			r.ToolUsage[name] += count
 		}
@@ -752,8 +810,13 @@ func BuildFeatureBenchReport(mode, model string, results []FeatureBenchTaskResul
 	}
 
 	if len(results) > 0 {
-		r.PatchRate = float64(r.PatchCount) / float64(len(results)) * 100
-		r.AvgTurns = float64(totalTurns) / float64(len(results))
+		n := float64(len(results))
+		r.PatchRate = float64(r.PatchCount) / n * 100
+		r.AvgTurns = float64(totalTurns) / n
+		r.AvgInputTokens = totalInput / len(results)
+		r.AvgOutputTokens = totalOutput / len(results)
+		r.AvgCostUSD = totalCost / n
+		r.TotalCostUSD = totalCost
 	}
 
 	return r

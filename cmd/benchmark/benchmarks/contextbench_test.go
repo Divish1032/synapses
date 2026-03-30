@@ -505,3 +505,80 @@ func TestFileLinePatternEdgeCases(t *testing.T) {
 		t.Error("expected internal/pkg/handler/auth.go:99")
 	}
 }
+
+// ─── buildRetrievedLines ────────────────────────────────────────────────────
+
+func TestBuildRetrievedLines(t *testing.T) {
+	mentions := map[string]map[int]bool{
+		"src/auth.py": {10: true, 20: true, 30: true},
+		"src/db.py":   {5: true, 100: true},
+	}
+	scored := []fileScore{
+		{file: "src/auth.py", score: 10, source: true, depth: 1},
+		{file: "src/db.py", score: 5, source: true, depth: 1},
+	}
+
+	// Budget 50 should produce <= 50 lines.
+	r50 := buildRetrievedLines(scored, mentions, 50)
+	if len(r50) > 50 {
+		t.Errorf("budget 50: got %d lines, want <= 50", len(r50))
+	}
+	if len(r50) == 0 {
+		t.Error("budget 50: got 0 lines, want > 0")
+	}
+
+	// Budget 500 should produce more lines than budget 50.
+	r500 := buildRetrievedLines(scored, mentions, 500)
+	if len(r500) <= len(r50) {
+		t.Errorf("budget 500 (%d) should produce more lines than budget 50 (%d)", len(r500), len(r50))
+	}
+
+	// All retrieved lines should be from the scored files.
+	for key := range r50 {
+		parts := splitFileLine(key)
+		if parts[0] != "src/auth.py" && parts[0] != "src/db.py" {
+			t.Errorf("unexpected file in retrieved: %s", parts[0])
+		}
+	}
+}
+
+func splitFileLine(key string) [2]string {
+	for i := len(key) - 1; i >= 0; i-- {
+		if key[i] == ':' {
+			return [2]string{key[:i], key[i+1:]}
+		}
+	}
+	return [2]string{key, ""}
+}
+
+// ─── entity extraction from impact responses ────────────────────────────────
+
+func TestExtractEntitiesFromImpactResponse(t *testing.T) {
+	// Impact responses contain entity names in tier nodes.
+	// extractEntitiesFromResponse should find bracketed names.
+	resp := `## Impact Analysis
+Tier 1 (direct):
+- [Handle] in src/handler.go:55
+- [Process] in src/service.go:30
+
+Calls: Validate, Transform`
+
+	entities := extractEntitiesFromResponse(resp)
+	entitySet := make(map[string]bool)
+	for _, e := range entities {
+		entitySet[e] = true
+	}
+
+	if !entitySet["Handle"] {
+		t.Errorf("expected Handle in entities %v", entities)
+	}
+	if !entitySet["Process"] {
+		t.Errorf("expected Process in entities %v", entities)
+	}
+	if !entitySet["Validate"] {
+		t.Errorf("expected Validate in entities %v", entities)
+	}
+	if !entitySet["Transform"] {
+		t.Errorf("expected Transform in entities %v", entities)
+	}
+}

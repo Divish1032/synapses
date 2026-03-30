@@ -20,8 +20,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
+	"github.com/SynapsesOS/synapses/internal/parser"
 )
 
 // validateOllamaURL checks that the Ollama URL uses http(s) and points to
@@ -486,6 +488,108 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 				logutil.Info("reindex %s complete\n", absPath)
 			}
 		}()
+	})
+
+	// ── POST /api/admin/projects/incremental-reindex — mtime-based reindex ──
+	// Unlike /reindex (which tears down and rebuilds), this performs a fast
+	// incremental reindex on the EXISTING in-memory graph using stored file mtimes.
+	// Only re-parses changed/new/deleted files. The MCP server's graph pointer
+	// is updated in place. Runs synchronously — response indicates completion.
+	// Used by DriftBench to test incremental correctness vs clean reindex.
+	mux.HandleFunc("/api/admin/projects/incremental-reindex", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.Path == "" {
+			http.Error(w, "path field required", http.StatusBadRequest)
+			return
+		}
+		absPath, err := canonicalPath(req.Path)
+		if err != nil {
+			http.Error(w, "invalid path: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusBadRequest)
+			return
+		}
+
+		// Look up existing project instance — must already be indexed.
+		inst, err := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+			return initProject(absPath)
+		})
+		if err != nil {
+			http.Error(w, "project not available: "+mcpsrv.StripInternalPaths(err.Error()), http.StatusInternalServerError)
+			return
+		}
+
+		g := inst.Graph
+		st := inst.Store
+		if g == nil || st == nil {
+			http.Error(w, "project graph or store not loaded", http.StatusInternalServerError)
+			return
+		}
+
+		// Load stored file mtimes from the previous index.
+		known, err := st.LoadFileMtimes()
+		if err != nil || len(known) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+				"status": "error",
+				"error":  "no stored file mtimes — use full /reindex first",
+			})
+			return
+		}
+
+		// Run incremental reindex on the EXISTING graph (in-place mutation).
+		// Wrapped in recover() to prevent daemon crash if IncrementalReindex
+		// panics (e.g., concurrent map access, nil node during git checkout).
+		var fresh map[string]int64
+		var changed, removed int
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("incremental reindex panic: %v", r)
+				}
+			}()
+			pw := parser.NewWalker()
+			fresh, changed, removed, err = pw.IncrementalReindex(g, absPath, known)
+		}()
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+				"status": "error",
+				"error":  mcpsrv.StripInternalPaths(err.Error()),
+			})
+			return
+		}
+
+		// Re-resolve edges if anything changed (same as smartReindex).
+		if changed+removed > 0 {
+			if stored, loadErr := st.LoadCallSites(); loadErr == nil {
+				g.BulkAddCallSites(stored)
+			}
+			resolver.ResolveCallEdges(g)
+			resolver.ResolveImplementsEdges(g)
+			resolver.ResolveDocEdges(g)
+		}
+
+		// Save updated mtimes for next incremental run.
+		if saveErr := st.SaveFileMtimes(fresh); saveErr != nil {
+			logutil.Error("incremental-reindex: save mtimes: %v\n", saveErr)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"status":  "ok",
+			"path":    absPath,
+			"changed": changed,
+			"removed": removed,
+			"nodes":   g.NodeCount(),
+			"edges":   g.EdgeCount(),
+		})
 	})
 
 	// ── POST /api/admin/projects/hibernate — manually hibernate a project ────

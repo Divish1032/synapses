@@ -194,7 +194,8 @@ Save your findings via remember() and save_session_state() so they persist.`
 	if err != nil {
 		log.Printf("  Phase 1 error: %v", err)
 	}
-	result.P1ToolCalls, result.P1Turns = parseStreamStats(p1Stream)
+	p1Stats := parseStreamStats(p1Stream)
+	result.P1ToolCalls, result.P1Turns = p1Stats.ToolCalls, p1Stats.Turns
 	result.P1Duration = time.Since(p1Start).Truncate(time.Second).String()
 
 	if opts.Debug && opts.OutputDir != "" {
@@ -236,7 +237,8 @@ Save your findings via remember() and save_session_state() so they persist.`
 	if err != nil {
 		log.Printf("  Phase 2 error: %v", err)
 	}
-	result.P2ToolCalls, result.P2Turns = parseStreamStats(p2Stream)
+	p2Stats := parseStreamStats(p2Stream)
+	result.P2ToolCalls, result.P2Turns = p2Stats.ToolCalls, p2Stats.Turns
 	result.P2Duration = time.Since(p2Start).Truncate(time.Second).String()
 	result.P2TurnsToEdit = turnsToFirstEdit(p2Stream)
 	result.P2SearchCalls = countSearchCalls(p2Stream)

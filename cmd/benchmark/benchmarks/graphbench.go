@@ -40,6 +40,7 @@ type GraphBenchOptions struct {
 	DataFile string // path to graphbench.jsonl
 	ReposDir string // where repos are cloned
 	Limit    int    // max test suites (0 = all)
+	Mode     string // "full" (default, curated ground truth) or "smoke" (self-validating, CI-safe)
 }
 
 // GraphBenchSuite is one line from the JSONL file.
@@ -185,8 +186,11 @@ type crossDomainNode struct {
 
 // ─── Runner ──────────────────────────────────────────────────────────────────
 
-// RunGraphBench runs the full benchmark and returns a reporter-compatible result.
+// RunGraphBench runs the benchmark in the selected mode and returns a reporter-compatible result.
 func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*reporter.GraphBenchResult, error) {
+	if opts.Mode == "smoke" {
+		return runGraphBenchSmoke(client)
+	}
 	suites, err := loadGraphBenchData(opts.DataFile)
 	if err != nil {
 		return nil, fmt.Errorf("load data: %w", err)
@@ -1225,4 +1229,121 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// ─── Smoke Mode ─────────────────────────────────────────────────────────────
+
+// runGraphBenchSmoke calls the daemon's MCP benchmark tool (scenario=all) which
+// runs the 6 self-validating scenarios against the currently indexed graph.
+// No external dataset needed — ground truth is derived from the graph topology.
+func runGraphBenchSmoke(client *agent.SynapsesClient) (*reporter.GraphBenchResult, error) {
+	log.Printf("graphbench smoke: calling daemon benchmark tool (scenario=all)")
+
+	raw, err := client.RunBenchmark("all")
+	if err != nil {
+		return nil, fmt.Errorf("daemon benchmark call: %w", err)
+	}
+
+	// Parse the benchmark.Result JSON from daemon.
+	var bmResult struct {
+		Timestamp  string `json:"timestamp"`
+		RepoID     string `json:"repo_id"`
+		NodeCount  int    `json:"node_count"`
+		EdgeCount  int    `json:"edge_count"`
+		DurationMs int64  `json:"duration_ms"`
+		Summary    struct {
+			ScenariosRun     int     `json:"scenarios_run"`
+			ScenariosPassed  int     `json:"scenarios_passed"`
+			ScenariosErrored int     `json:"scenarios_errored"`
+			AvgPrecision     float64 `json:"avg_precision"`
+			AvgRecall        float64 `json:"avg_recall"`
+			AvgF1            float64 `json:"avg_f1"`
+			AvgLatencyMs     float64 `json:"avg_latency_ms"`
+			P95LatencyMs     float64 `json:"p95_latency_ms"`
+		} `json:"summary"`
+		Scenarios []struct {
+			Name         string  `json:"name"`
+			Description  string  `json:"description"`
+			Passed       bool    `json:"passed"`
+			AvgPrecision float64 `json:"avg_precision"`
+			AvgRecall    float64 `json:"avg_recall"`
+			AvgF1        float64 `json:"avg_f1"`
+			AvgLatencyMs float64 `json:"avg_latency_ms"`
+			Error        string  `json:"error"`
+			Queries      []struct {
+				Label     string  `json:"label"`
+				Precision float64 `json:"precision"`
+				Recall    float64 `json:"recall"`
+				F1        float64 `json:"f1"`
+				LatencyMs float64 `json:"latency_ms"`
+				Expected  int     `json:"expected"`
+				Returned  int     `json:"returned"`
+				Relevant  int     `json:"relevant"`
+			} `json:"queries"`
+		} `json:"scenarios"`
+	}
+
+	if err := json.Unmarshal([]byte(raw), &bmResult); err != nil {
+		return nil, fmt.Errorf("parse benchmark response: %w", err)
+	}
+
+	// Convert to reporter.GraphBenchResult.
+	result := &reporter.GraphBenchResult{
+		Timestamp:   bmResult.Timestamp,
+		Mode:        "smoke",
+		Correctness: float64(bmResult.Summary.ScenariosPassed) / float64(max(bmResult.Summary.ScenariosRun, 1)),
+		Summary: reporter.GraphBenchMetrics{
+			Precision: bmResult.Summary.AvgPrecision,
+			Recall:    bmResult.Summary.AvgRecall,
+			F1:        bmResult.Summary.AvgF1,
+		},
+	}
+
+	// Map scenarios to by_query_type slices.
+	var totalTests int
+	var errorCount int
+	for _, sc := range bmResult.Scenarios {
+		totalTests += len(sc.Queries)
+		if sc.Error != "" {
+			errorCount++
+		}
+		// Compute per-scenario precision/recall from individual queries if available.
+		var scP, scR float64
+		if len(sc.Queries) > 0 {
+			for _, q := range sc.Queries {
+				scP += q.Precision
+				scR += q.Recall
+			}
+			scP /= float64(len(sc.Queries))
+			scR /= float64(len(sc.Queries))
+		} else {
+			scP = sc.AvgPrecision
+			scR = sc.AvgRecall
+		}
+		result.ByQueryType = append(result.ByQueryType, reporter.GraphBenchSlice{
+			Label: sc.Name,
+			Tests: len(sc.Queries),
+			Metrics: reporter.GraphBenchMetrics{
+				Precision: scP,
+				Recall:    scR,
+				F1:        sc.AvgF1,
+			},
+		})
+	}
+	result.TotalTests = totalTests
+	result.ErrorCount = errorCount
+
+	// Add repo stats.
+	result.RepoStatsData = []reporter.RepoStats{{
+		Repo:      bmResult.RepoID,
+		Language:  "mixed",
+		NodeCount: bmResult.NodeCount,
+		EdgeCount: bmResult.EdgeCount,
+	}}
+
+	log.Printf("graphbench smoke: %d scenarios, %d passed, avg F1=%.1f%%",
+		bmResult.Summary.ScenariosRun, bmResult.Summary.ScenariosPassed,
+		bmResult.Summary.AvgF1*100)
+
+	return result, nil
 }

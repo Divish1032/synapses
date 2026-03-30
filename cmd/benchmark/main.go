@@ -5,55 +5,54 @@
 //
 // Usage:
 //
-//	# Local modes (no daemon needed):
-//	benchmark --benchmark=repobench --retrieval=hybrid-rrf --no-synapses
-//
-//	# Full synapses-embed mode (all repos cloned + indexed automatically):
-//	benchmark --benchmark=repobench --retrieval=synapses-embed \
-//	          --repos-dir=/tmp/repobench_repos --cache-file=/tmp/index_cache.json
-//
-//	# Index only (pre-flight step):
-//	benchmark --benchmark=repobench --index-only \
-//	          --repos-dir=/tmp/repobench_repos --cache-file=/tmp/index_cache.json
+//	benchmark --benchmark=contextbench --cb-data=contextbench.jsonl --limit=50
+//	benchmark --benchmark=graphbench --gb-data=graphbench.jsonl
+//	benchmark --benchmark=featurebench --fb-split=lite --mode=synapses
+//	benchmark --benchmark=driftbench --db-data=driftbench.jsonl
+//	benchmark --benchmark=recallbench --rb-data=recallbench.jsonl
+//	benchmark --benchmark=swe-verified --swe-data=swebench_pilot.jsonl  # optional sanity check
 package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/cmd/benchmark/agent"
 	"github.com/SynapsesOS/synapses/cmd/benchmark/benchmarks"
-	"github.com/SynapsesOS/synapses/cmd/benchmark/indexer"
 	"github.com/SynapsesOS/synapses/cmd/benchmark/reporter"
 )
 
 func main() {
 	var (
-		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench | graphbench | featurebench | compactionbench")
+		benchmarkName = flag.String("benchmark", "contextbench", "Benchmark to run: contextbench | graphbench | featurebench | compactionbench | driftbench | recallbench | nlbench | swe-verified (optional)")
 		endpoint      = flag.String("endpoint", "http://127.0.0.1:11435", "Synapses daemon REST endpoint")
-		project       = flag.String("project", "", "Single project path (overrides per-repo routing for synapses-embed)")
+		project       = flag.String("project", "", "Single project path (overrides per-repo routing)")
 		outputDir     = flag.String("output-dir", "results", "Directory to write JSON and markdown results")
-		retrieval     = flag.String("retrieval", "hybrid-rrf", "Retrieval mode: fts-only | vector-only | hybrid-rrf | hybrid-convex | hybrid-anchor | next-hint | bm25-lenorm | hybrid-ngram | cluster-hybrid | synapses-search | synapses-embed | synapses-embed-local | rerank-bm25 | rerank-tfidf | rerank-hybrid | rerank-convex | embed-codebert | embed-jina-v2-code | embed-jina-v3")
-		configs       = flag.String("configs", "python_cff,python_cfr,java_cff,java_cfr", "Comma-separated RepoBench configs")
-		difficulty    = flag.String("difficulty", "easy,hard", "Comma-separated difficulties: easy | hard")
-		limit         = flag.Int("limit", 0, "Max samples per config/difficulty (0 = all)")
+		limit         = flag.Int("limit", 0, "Max tasks (0 = all)")
 		noSynapses    = flag.Bool("no-synapses", false, "Control run: disable Synapses MCP")
-		reposDir      = flag.String("repos-dir", "/tmp/repobench_repos", "Directory where repos are cloned")
-		cacheFile     = flag.String("cache-file", "/tmp/repobench_index_cache.json", "JSON cache of indexed repos")
+		reposDir      = flag.String("repos-dir", "/tmp/bench_repos", "Directory where repos are cloned")
+		cacheFile     = flag.String("cache-file", "/tmp/bench_index_cache.json", "JSON cache of indexed repos")
 		indexWorkers  = flag.Int("index-workers", 8, "Parallel workers for cloning+indexing")
-		indexOnly     = flag.Bool("index-only", false, "Clone and index repos, then exit")
+		// index-only removed — use indexer.Run() directly if needed.
 		skipIndex     = flag.Bool("skip-index", false, "Skip synapses index step (clone only)")
 		// ContextBench-specific flags.
 		cbDataFile  = flag.String("cb-data", "contextbench.jsonl", "Path to ContextBench JSONL dataset")
 		cbLanguages = flag.String("cb-languages", "", "Comma-separated language filter for ContextBench (empty = all)")
 		cbSources   = flag.String("cb-sources", "", "Comma-separated source filter for ContextBench (e.g. Verified)")
+		cbWarmup    = flag.Int("cb-warmup", 0, "Cold/warm comparison: run N warmup sessions, then compare F1 (0 = off)")
+		cbCompaction = flag.Bool("cb-compaction", false, "Compaction mode: test recovery quality after simulated context loss")
 		// GraphBench-specific flags.
 		gbDataFile = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
+		gbMode     = flag.String("gb-mode", "full", "GraphBench mode: full (curated ground truth) | smoke (self-validating, CI-safe)")
 		// NLBench-specific flags.
 		nlDataFile = flag.String("nl-data", "nlbench.jsonl", "Path to NLBench JSONL dataset")
+		// DriftBench-specific flags.
+		dbDataFile  = flag.String("db-data", "driftbench.jsonl", "Path to DriftBench JSONL dataset")
+		dbSkipClean = flag.Bool("db-skip-clean", false, "Skip clean reindex verification (trust dataset ground truth)")
+		// RecallBench-specific flags.
+		rbDataFile = flag.String("rb-data", "recallbench.jsonl", "Path to RecallBench JSONL dataset")
 		// SWE-bench-specific flags.
 		sweDataFile = flag.String("swe-data", "swebench_pilot.jsonl", "Path to SWE-bench JSONL dataset")
 		sweMode     = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
@@ -64,31 +63,12 @@ func main() {
 		fbLevel     = flag.Int("fb-level", 0, "FeatureBench level filter: 1 or 2 (0 = all)")
 		fbTimeout   = flag.Int("fb-timeout", 1200, "Timeout per FeatureBench task in seconds")
 		fbDebug     = flag.Bool("fb-debug", false, "Dump raw stream-json to file for MCP tool inspection")
+		fbBothModes = flag.Bool("fb-both-modes", false, "Run both baseline and synapses modes, compute agent lift delta")
 		sweMaxTurns = flag.Int("max-turns", 25, "Max agent loop turns for SWE-bench")
 	)
 	flag.Parse()
 
 	*benchmarkName = strings.ToLower(strings.TrimSpace(*benchmarkName))
-
-	// ── Index-only mode ──────────────────────────────────────────────────────
-	if *indexOnly {
-		repos := collectRepos(splitComma(*configs), splitComma(*difficulty))
-		fmt.Printf("Indexing %d unique repos with %d workers...\n", len(repos), *indexWorkers)
-		results, err := indexer.Run(indexer.Options{
-			ReposDir:       *reposDir,
-			CacheFile:      *cacheFile,
-			Repos:          repos,
-			Workers:        *indexWorkers,
-			SkipIndex:      *skipIndex,
-			TimeoutPerRepo: 0, // use default
-			Verbose:        false,
-		})
-		if err != nil {
-			log.Fatalf("indexer: %v", err)
-		}
-		indexer.Summary(results)
-		return
-	}
 
 	// ── Build MCP client ────────────────────────────────────────────────────
 	var mcpClient *agent.SynapsesClient
@@ -105,97 +85,18 @@ func main() {
 	rep := reporter.New(*outputDir)
 
 	switch *benchmarkName {
-	case "repobench", "repobench-r":
-		cfgList := splitComma(*configs)
-		diffList := splitComma(*difficulty)
-
-		// For synapses-embed, load the index cache so the runner can route
-		// each sample to its own project path.
-		var repoCache *indexer.Cache
-		if *retrieval == "synapses-embed" || *retrieval == "synapses-search" {
-			cache, err := indexer.LoadCache(*cacheFile)
-			if err != nil {
-				log.Printf("warning: could not load index cache %s: %v (falling back to --project flag)", *cacheFile, err)
-			} else {
-				repoCache = cache
-			}
-		}
-
-		// For rerank-* modes, initialise the cross-encoder reranker.
-		var reranker *benchmarks.CrossEncoderReranker
-		if benchmarks.IsRerankMode(*retrieval) {
-			log.Printf("loading cross-encoder reranker...")
-			r, err := benchmarks.NewCrossEncoderReranker()
-			if err != nil {
-				log.Fatalf("could not load cross-encoder: %v", err)
-			}
-			defer r.Close()
-			reranker = r
-			log.Printf("cross-encoder reranker ready")
-		}
-
-		// For embed-* modes (V2-E1), initialise the code-specific embedding model.
-		var codeEmb *benchmarks.CodeModelEmbedder
-		if benchmarks.IsCodeEmbedMode(*retrieval) {
-			spec, ok := benchmarks.CodeModelSpecs[*retrieval]
-			if !ok {
-				log.Fatalf("unknown code embed mode %q", *retrieval)
-			}
-			log.Printf("loading code embedding model: %s ...", spec.Description)
-			e, err := benchmarks.NewCodeModelEmbedder(spec)
-			if err != nil {
-				// Non-fatal: log and fall back to hybrid-rrf for this run.
-				log.Printf("WARNING: could not load code embedder %q: %v — falling back to hybrid-rrf", spec.ModelID, err)
-			} else {
-				defer e.Close()
-				codeEmb = e
-				log.Printf("code embedder ready: %s", spec.Description)
-			}
-		}
-
-		// For synapses-embed-local, initialise the in-process ONNX embedder.
-		var localEmb *benchmarks.LocalEmbedder
-		if *retrieval == "synapses-embed-local" {
-			log.Printf("loading local nomic-embed model...")
-			e, err := benchmarks.NewLocalEmbedder(3)
-			if err != nil {
-				log.Fatalf("could not load local embedder: %v", err)
-			}
-			defer e.Close()
-			localEmb = e
-			log.Printf("local embedder ready")
-		}
-
-		opts := benchmarks.RepoBenchOptions{
-			Configs:       cfgList,
-			Difficulties:  diffList,
-			RetrievalMode: *retrieval,
-			LimitPerSet:   *limit,
-			ReposDir:      *reposDir,
-			RepoCache:     repoCache,
-			LocalEmbedder: localEmb,
-			Reranker:      reranker,
-			CodeEmbedder:  codeEmb,
-		}
-		result, err := benchmarks.RunRepoBench(mcpClient, opts)
-		if err != nil {
-			log.Fatalf("repobench failed: %v", err)
-		}
-		if err := rep.WriteRepoBench(result); err != nil {
-			log.Fatalf("write results: %v", err)
-		}
-		rep.PrintRepoBenchSummary(result)
-
 	case "contextbench":
 		cbOpts := benchmarks.ContextBenchOptions{
-			DataFile:     *cbDataFile,
-			ReposDir:     *reposDir,
-			CacheFile:    *cacheFile,
-			Limit:        *limit,
-			Languages:    splitComma(*cbLanguages),
-			Sources:      splitComma(*cbSources),
-			IndexWorkers: *indexWorkers,
-			SkipIndex:    *skipIndex,
+			DataFile:       *cbDataFile,
+			ReposDir:       *reposDir,
+			CacheFile:      *cacheFile,
+			Limit:          *limit,
+			Languages:      splitComma(*cbLanguages),
+			Sources:        splitComma(*cbSources),
+			IndexWorkers:   *indexWorkers,
+			SkipIndex:      *skipIndex,
+			WarmupSessions: *cbWarmup,
+			CompactionMode: *cbCompaction,
 		}
 		cbResult, err := benchmarks.RunContextBench(mcpClient, cbOpts)
 		if err != nil {
@@ -211,6 +112,7 @@ func main() {
 			DataFile: *gbDataFile,
 			ReposDir: *reposDir,
 			Limit:    *limit,
+			Mode:     *gbMode,
 		}
 		gbResult, err := benchmarks.RunGraphBench(mcpClient, gbOpts)
 		if err != nil {
@@ -255,7 +157,7 @@ func main() {
 		rep.PrintSWEBenchSummary(sweResult)
 
 	case "featurebench", "feature-bench", "feature_bench":
-		fbResults, err := benchmarks.RunFeatureBench(benchmarks.FeatureBenchOptions{
+		baseOpts := benchmarks.FeatureBenchOptions{
 			Split:     *fbSplit,
 			TaskIDs:   splitComma(*fbTaskIDs),
 			Level:     *fbLevel,
@@ -266,15 +168,70 @@ func main() {
 			Timeout:   *fbTimeout,
 			OutputDir: *outputDir,
 			Debug:     *fbDebug,
-		})
-		if err != nil {
-			log.Fatalf("featurebench failed: %v", err)
+			BothModes: *fbBothModes,
 		}
-		fbReport := benchmarks.BuildFeatureBenchReport(*sweMode, *sweModel, fbResults)
-		if err := rep.WriteFeatureBench(fbReport); err != nil {
-			log.Fatalf("write results: %v", err)
+
+		if *fbBothModes {
+			// Run baseline first, then synapses, compute delta.
+			log.Printf("featurebench: both-modes enabled — running baseline then synapses")
+
+			baselineOpts := baseOpts
+			baselineOpts.Mode = "baseline"
+			baselineResults, err := benchmarks.RunFeatureBench(baselineOpts)
+			if err != nil {
+				log.Fatalf("featurebench baseline failed: %v", err)
+			}
+			baselineReport := benchmarks.BuildFeatureBenchReport("baseline", *sweModel, baselineResults)
+
+			synapsesOpts := baseOpts
+			synapsesOpts.Mode = "synapses"
+			synapsesResults, err := benchmarks.RunFeatureBench(synapsesOpts)
+			if err != nil {
+				log.Fatalf("featurebench synapses failed: %v", err)
+			}
+			synapsesReport := benchmarks.BuildFeatureBenchReport("synapses", *sweModel, synapsesResults)
+
+			// Compute comparison.
+			comparison := &reporter.FeatureBenchComparison{
+				BaselinePatchRate:  baselineReport.PatchRate,
+				SynapsesPatchRate:  synapsesReport.PatchRate,
+				AgentLift:          synapsesReport.PatchRate - baselineReport.PatchRate,
+				BaselineAvgCost:    baselineReport.AvgCostUSD,
+				SynapsesAvgCost:    synapsesReport.AvgCostUSD,
+				BaselineAvgTokens:  baselineReport.AvgInputTokens + baselineReport.AvgOutputTokens,
+				SynapsesAvgTokens:  synapsesReport.AvgInputTokens + synapsesReport.AvgOutputTokens,
+			}
+			if baselineReport.AvgCostUSD > 0 {
+				comparison.CostSavingsPct = (baselineReport.AvgCostUSD - synapsesReport.AvgCostUSD) / baselineReport.AvgCostUSD * 100
+			}
+			if comparison.BaselineAvgTokens > 0 {
+				comparison.TokenSavingsPct = float64(comparison.BaselineAvgTokens-comparison.SynapsesAvgTokens) / float64(comparison.BaselineAvgTokens) * 100
+			}
+
+			// Attach comparison to the synapses report (primary output).
+			synapsesReport.BothModes = comparison
+			if err := rep.WriteFeatureBench(synapsesReport); err != nil {
+				log.Fatalf("write results: %v", err)
+			}
+			rep.PrintFeatureBenchSummary(synapsesReport)
+
+			log.Printf("\n=== Both-Modes Comparison ===")
+			log.Printf("Baseline patch rate: %.1f%%", comparison.BaselinePatchRate)
+			log.Printf("Synapses patch rate: %.1f%%", comparison.SynapsesPatchRate)
+			log.Printf("Agent lift: %+.1f%%", comparison.AgentLift)
+			log.Printf("Cost savings: %.1f%%", comparison.CostSavingsPct)
+			log.Printf("Token savings: %.1f%%", comparison.TokenSavingsPct)
+		} else {
+			fbResults, err := benchmarks.RunFeatureBench(baseOpts)
+			if err != nil {
+				log.Fatalf("featurebench failed: %v", err)
+			}
+			fbReport := benchmarks.BuildFeatureBenchReport(*sweMode, *sweModel, fbResults)
+			if err := rep.WriteFeatureBench(fbReport); err != nil {
+				log.Fatalf("write results: %v", err)
+			}
+			rep.PrintFeatureBenchSummary(fbReport)
 		}
-		rep.PrintFeatureBenchSummary(fbReport)
 
 	case "compactionbench", "compaction-bench", "compaction_bench":
 		cbResults, err := benchmarks.RunCompactionBench(benchmarks.CompactionBenchOptions{
@@ -299,45 +256,39 @@ func main() {
 		}
 		rep.PrintCompactionBenchSummary(cbReport)
 
+	case "driftbench", "drift-bench", "drift_bench":
+		dbResult, err := benchmarks.RunDriftBench(mcpClient, benchmarks.DriftBenchOptions{
+			DataFile:  *dbDataFile,
+			ReposDir:  *reposDir,
+			Limit:     *limit,
+			SkipClean: *dbSkipClean,
+			OutputDir: *outputDir,
+		})
+		if err != nil {
+			log.Fatalf("driftbench failed: %v", err)
+		}
+		if err := rep.WriteDriftBench(dbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintDriftBenchSummary(dbResult)
+
+	case "recallbench", "recall-bench", "recall_bench":
+		rbResult, err := benchmarks.RunRecallBench(mcpClient, benchmarks.RecallBenchOptions{
+			DataFile: *rbDataFile,
+			ReposDir: *reposDir,
+			Limit:    *limit,
+		})
+		if err != nil {
+			log.Fatalf("recallbench failed: %v", err)
+		}
+		if err := rep.WriteRecallBench(rbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintRecallBenchSummary(rbResult)
+
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)
 	}
-}
-
-// collectRepos reads all unique repo names from the JSONL files.
-func collectRepos(configs, difficulties []string) []string {
-	seen := make(map[string]bool)
-	var repos []string
-	for _, cfg := range configs {
-		for _, diff := range difficulties {
-			path := fmt.Sprintf("repobench_%s_%s.jsonl", cfg, diff)
-			data, err := os.ReadFile(path)
-			if err != nil {
-				continue
-			}
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				// Fast JSON field extraction without full parse.
-				if idx := strings.Index(line, `"repo_name"`); idx >= 0 {
-					rest := line[idx+len(`"repo_name"`):]
-					if colon := strings.Index(rest, `"`); colon >= 0 {
-						rest = rest[colon+1:]
-						if end := strings.Index(rest, `"`); end >= 0 {
-							repo := rest[:end]
-							if !seen[repo] {
-								seen[repo] = true
-								repos = append(repos, repo)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	return repos
 }
 
 func splitComma(s string) []string {

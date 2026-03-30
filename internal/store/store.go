@@ -1498,51 +1498,89 @@ type SearchResult struct {
 	Score     float64 `json:"score"` // higher = more relevant (normalised from BM25)
 }
 
-// SemanticSearch queries the FTS5 index using BM25 ranking. Returns up to
-// limit results ordered by relevance. Column weights: name=10, split_name=8,
-// signature=5, doc=2 — exact name matches rank highest.
-// The query is sanitized to avoid FTS5 syntax errors; on failure a LIKE
-// fallback is used.
+// SemanticSearch uses a two-stage pipeline for code entity search:
+//
+// Stage 1 (structured): Exact name match, then prefix match on the name column.
+// Code entities have hierarchical names (pkg.Class.Method) that BM25 treats as
+// bags of tokens. Stage 1 ensures the right entity ranks first when the user
+// knows the exact name or a prefix of it.
+//
+// Stage 2 (fuzzy): FTS5 BM25 on name, split_name, signature, doc columns.
+// Fills remaining slots with semantically related results.
+//
+// Results: Stage 1 hits first (exact, then prefix), then Stage 2 hits (BM25),
+// deduped by node_id.
 func (s *Store) SemanticSearch(query string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	q := sanitizeFTSQuery(query)
-	if q == "" {
-		return nil, nil
-	}
 
-	// bm25() returns negative values: more negative = better match.
-	// We invert the sign so Score is positive and higher = better.
-	// Secondary sort: exact name match always ranks first within the same score
-	// tier, so searching "handleFoo" returns the node named exactly "handleFoo"
-	// at position #1 even when other nodes contain that word in their doc/sig.
-	const ftsSQL = `
-        SELECT node_id, name, signature, doc, -bm25(nodes_fts, 0, 10, 8, 7, 5, 2) AS score
+	seen := make(map[string]bool)
+	var results []SearchResult
+
+	// ── Stage 1: Exact + prefix name match ──────────────────────────────────
+	// This is O(index-scan) but fast for SQLite on indexed columns.
+	// Returns exact matches first, then prefix matches, both ordered by name length
+	// (shorter = more specific).
+	const nameSQL = `
+        SELECT node_id, name, signature, doc, 100.0 AS score
         FROM nodes_fts
-        WHERE nodes_fts MATCH ?
-        ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END ASC, score DESC
+        WHERE name = ?
+        UNION ALL
+        SELECT node_id, name, signature, doc, 50.0 AS score
+        FROM nodes_fts
+        WHERE name != ? AND name LIKE ? || '%'
+        ORDER BY score DESC, length(name) ASC
         LIMIT ?`
 
-	rows, err := s.graphDB.Query(ftsSQL, q, q, limit)
-	if err != nil {
-		// FTS5 syntax error — fall back to LIKE search on name.
-		return s.likeSearch(query, limit)
-	}
-	defer rows.Close()
-
-	var results []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
-			return nil, err
+	nameRows, err := s.graphDB.Query(nameSQL, query, query, query, limit)
+	if err == nil {
+		defer nameRows.Close()
+		for nameRows.Next() {
+			var r SearchResult
+			if err := nameRows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
+				break
+			}
+			if !seen[r.ID] {
+				seen[r.ID] = true
+				results = append(results, r)
+			}
 		}
-		results = append(results, r)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	// ── Stage 2: FTS5 BM25 fuzzy search ─────────────────────────────────────
+	// Fills remaining slots. Deduped against Stage 1 hits.
+	remaining := limit - len(results)
+	if remaining > 0 {
+		q := sanitizeFTSQuery(query)
+		if q != "" {
+			const ftsSQL = `
+                SELECT node_id, name, signature, doc, -bm25(nodes_fts, 0, 10, 8, 7, 5, 2) AS score
+                FROM nodes_fts
+                WHERE nodes_fts MATCH ?
+                ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END ASC, score DESC
+                LIMIT ?`
+
+			// Request more than needed because we'll dedup against Stage 1.
+			ftsRows, err := s.graphDB.Query(ftsSQL, q, query, remaining+len(results))
+			if err == nil {
+				defer ftsRows.Close()
+				for ftsRows.Next() && remaining > 0 {
+					var r SearchResult
+					if err := ftsRows.Scan(&r.ID, &r.Name, &r.Signature, &r.Doc, &r.Score); err != nil {
+						break
+					}
+					if !seen[r.ID] {
+						seen[r.ID] = true
+						results = append(results, r)
+						remaining--
+					}
+				}
+			}
+		}
 	}
-	// If FTS returned nothing, try LIKE as a last resort.
+
+	// If both stages returned nothing, fall back to LIKE.
 	if len(results) == 0 {
 		return s.likeSearch(query, limit)
 	}

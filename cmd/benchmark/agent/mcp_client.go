@@ -69,6 +69,20 @@ type RecallResult struct {
 	Text string
 }
 
+// FileContextEntity is one entity returned by get_file_context.
+type FileContextEntity struct {
+	Name     string `json:"name"`
+	Line     int    `json:"line"`
+	Type     string `json:"type"`
+	Exported bool   `json:"exported"`
+}
+
+// FileContextResult is returned by GetFileContext.
+type FileContextResult struct {
+	File     string              `json:"file"`
+	Entities []FileContextEntity `json:"entities"`
+}
+
 // HealthResult is the subset of the /v1/health response we care about.
 type HealthResult struct {
 	NodeCount int `json:"nodes"`
@@ -119,6 +133,9 @@ func readAuthToken() string {
 func NewDisabledClient() *SynapsesClient {
 	return &SynapsesClient{disabled: true}
 }
+
+// Endpoint returns the daemon endpoint URL.
+func (c *SynapsesClient) Endpoint() string { return c.endpoint }
 
 // WithProject returns a shallow copy of the client with a different project path.
 // Used for per-repo routing in RepoBench-R: each sample gets routed to its own
@@ -220,6 +237,26 @@ func (c *SynapsesClient) GetImpactWithDepth(taskID, entity string, depth int) (*
 	}
 	c.recordAccess(taskID, "get_impact", raw)
 	return &ImpactResult{Raw: raw, Text: raw}, nil
+}
+
+// GetFileContext calls get_file_context to list all entities defined in a file.
+func (c *SynapsesClient) GetFileContext(taskID, filePath string) (*FileContextResult, error) {
+	if c.disabled {
+		return &FileContextResult{}, nil
+	}
+	args := map[string]interface{}{"file": filePath}
+	raw, err := c.callTool("get_file_context", args)
+	if err != nil {
+		return nil, err
+	}
+	c.recordAccess(taskID, "get_file_context", raw)
+
+	var result FileContextResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		// Response might be wrapped differently; return raw as fallback.
+		return &FileContextResult{File: filePath}, nil
+	}
+	return &result, nil
 }
 
 // Recall calls the recall tool.
@@ -329,6 +366,167 @@ func (c *SynapsesClient) GetHealth() (*HealthResult, error) {
 		NodeCount: raw.TotalNodes,
 		EdgeCount: raw.TotalEdges,
 	}, nil
+}
+
+// RunBenchmark calls the MCP benchmark tool with the given scenario name.
+// Returns the raw JSON response string.
+func (c *SynapsesClient) RunBenchmark(scenario string) (string, error) {
+	if c.disabled {
+		return "", fmt.Errorf("client disabled")
+	}
+	return c.callTool("benchmark", map[string]interface{}{
+		"scenario": scenario,
+	})
+}
+
+// fetchCSRFToken gets a CSRF token from the daemon admin API.
+func (c *SynapsesClient) fetchCSRFToken() (string, error) {
+	u := fmt.Sprintf("%s/api/admin/csrf-token", c.endpoint)
+	resp, err := c.httpClient.Get(u)
+	if err != nil {
+		return "", fmt.Errorf("fetch csrf: %w", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("parse csrf: %w", err)
+	}
+	return result.Token, nil
+}
+
+// adminPost sends a POST to an admin API endpoint with CSRF token.
+// Uses a longer timeout (5 min) since admin operations like reindex can be slow.
+func (c *SynapsesClient) adminPost(path string, payload interface{}) ([]byte, error) {
+	csrf, err := c.fetchCSRFToken()
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	u := fmt.Sprintf("%s%s", c.endpoint, path)
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
+	// Admin operations can be slow (reindex of large repos). Use a dedicated
+	// client with 5-minute timeout instead of the default 30s.
+	adminClient := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := adminClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("admin post: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("admin %s returned %d: %s", path, resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
+}
+
+// TriggerReindex forces a full clean reindex of the project via the admin API.
+// The reindex runs asynchronously on the daemon — this method returns immediately.
+func (c *SynapsesClient) TriggerReindex() error {
+	if c.disabled {
+		return fmt.Errorf("client disabled")
+	}
+	_, err := c.adminPost("/api/admin/projects/reindex", map[string]string{"path": c.project})
+	return err
+}
+
+// TriggerIncrementalReindex performs an mtime-based incremental reindex on the
+// existing in-memory graph. Unlike TriggerReindex (full teardown), this only
+// re-parses files with changed mtimes. Runs synchronously — returns when done.
+func (c *SynapsesClient) TriggerIncrementalReindex() (changed, removed int, err error) {
+	if c.disabled {
+		return 0, 0, fmt.Errorf("client disabled")
+	}
+	respBody, err := c.adminPost("/api/admin/projects/incremental-reindex", map[string]string{"path": c.project})
+	if err != nil {
+		return 0, 0, err
+	}
+	var result struct {
+		Changed int `json:"changed"`
+		Removed int `json:"removed"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, 0, fmt.Errorf("parse response: %w", err)
+	}
+	return result.Changed, result.Removed, nil
+}
+
+// WaitForReady polls the health endpoint until the project's graph is loaded.
+// Returns node and edge counts, or error on timeout.
+func (c *SynapsesClient) WaitForReady(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		h, err := c.GetHealth()
+		if err == nil && h.NodeCount > 0 {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("timeout waiting for project ready after %v", timeout)
+}
+
+// SessionInit calls session_init for the project. Used by RecallBench to create sessions.
+func (c *SynapsesClient) SessionInit(agentID, scope string) (string, error) {
+	if c.disabled {
+		return "", fmt.Errorf("client disabled")
+	}
+	args := map[string]interface{}{"agent_id": agentID}
+	if scope != "" {
+		args["scope"] = scope
+	}
+	return c.callTool("session_init", args)
+}
+
+// EndSession calls end_session for the project. Used by RecallBench to finalize sessions.
+func (c *SynapsesClient) EndSession(agentID, outcome string) (string, error) {
+	if c.disabled {
+		return "", fmt.Errorf("client disabled")
+	}
+	return c.callTool("end_session", map[string]interface{}{
+		"agent_id": agentID,
+		"outcome":  outcome,
+	})
+}
+
+// RecordEpisode saves an episode via the unified memory tool. Used by RecallBench warm-up.
+func (c *SynapsesClient) RecordEpisode(agentID, episodeType, decision, outcome string) (string, error) {
+	if c.disabled {
+		return "", fmt.Errorf("client disabled")
+	}
+	return c.callTool("memory", map[string]interface{}{
+		"action":       "save",
+		"agent_id":     agentID,
+		"episode_type": episodeType,
+		"decision":     decision,
+		"outcome":      outcome,
+	})
+}
+
+// RecallWithProjects calls recall with the projects parameter for cross-project search.
+func (c *SynapsesClient) RecallWithProjects(query string, projects string, limit int) (string, error) {
+	if c.disabled {
+		return "", fmt.Errorf("client disabled")
+	}
+	args := map[string]interface{}{
+		"query": query,
+		"limit": limit,
+	}
+	if projects != "" {
+		args["projects"] = projects
+	}
+	return c.callTool("recall", args)
 }
 
 // ─── internals ───────────────────────────────────────────────────────────────
@@ -484,6 +682,28 @@ func extractContextAccesses(taskID, tool, text string) []ContextAccess {
 							Timestamp: now,
 						})
 					}
+				}
+			}
+		}
+
+	case "get_file_context":
+		var resp struct {
+			File     string `json:"file"`
+			Entities []struct {
+				Line int `json:"line"`
+			} `json:"entities"`
+		}
+		if err := json.Unmarshal([]byte(text), &resp); err == nil && resp.File != "" {
+			for _, e := range resp.Entities {
+				if e.Line > 0 {
+					out = append(out, ContextAccess{
+						TaskID:    taskID,
+						Tool:      tool,
+						File:      resp.File,
+						LineStart: e.Line,
+						LineEnd:   e.Line,
+						Timestamp: now,
+					})
 				}
 			}
 		}
