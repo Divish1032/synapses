@@ -1540,6 +1540,11 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			if e.To == sg.Root {
 				callersOfRoot[e.From] = true
 			}
+		case graph.EdgeImplements:
+			// IMPLEMENTS edges: From = Implementor, To = Interface.
+			// Surface both directions in Related for find_implementations queries.
+			// (Also reached via default → DomainCode → Related, but explicit
+			// handling here ensures they're never misrouted.)
 		case graph.EdgeDocumentedBy:
 			// code entity → section: section is a doc of root
 			if e.From == sg.Root {
@@ -1592,6 +1597,11 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	dc := &directionalContext{
 		Truncated:      sg.Truncated,
 		TruncatedCount: sg.TruncatedCount,
+		// Initialize slices to empty (not nil) so JSON serializes as []
+		// instead of null — consumers can always iterate without nil checks.
+		Callees: []graph.CarvedNode{},
+		Callers: []graph.CarvedNode{},
+		Related: []graph.CarvedNode{},
 	}
 	for i := range sg.Nodes {
 		cn := sg.Nodes[i]
