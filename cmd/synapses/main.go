@@ -1302,9 +1302,12 @@ var synapsesSection = synapsesSectionStart + `## Synapses — Knowledge Substrat
 ### Session Start
 Call ` + "`session_init(agent_id=\"...\", intent=\"what you're doing\")`" + ` at the start of every session. Returns pending tasks, project identity, scale guidance, working state, and proactive tool suggestions in one round-trip. Declare your intent to get relevant tool suggestions automatically.
 
+### After Context Compaction
+If your context was compacted (conversation history summarized), call ` + "`session_init(agent_id=\"...\", scope=\"compaction\")`" + ` to recover your prior work state — decisions, entity memories, rules, and a ranked list of entities you were working on. This eliminates re-exploration.
+
 ### Key Tools
 
-These 12 core tools cover 95% of workflows. All 40+ tools remain available — call ` + "`discover_tools(query=\"...\")`" + ` to find specialized ones.
+These 13 core tools cover 95% of workflows. All 40+ tools remain available — call ` + "`discover_tools(query=\"...\")`" + ` to find specialized ones.
 
 | Goal | Tool |
 |---|---|
