@@ -216,28 +216,8 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 	// --- Function / method definitions (class-qualified via AST walk) ---
 	p.extractFunctionsAndMethods(g, root, src, filePath, moduleName, fileNodeID, declInfo)
 
-	// --- Class definitions ---
-	classQuery := `(class_definition name: (identifier) @class_name)`
-	if err := runQuery(lang, root, src, classQuery, func(captures map[string]string, startLine int) {
-		name := captures["class_name"]
-		if name == "" {
-			return
-		}
-		nodeID := g.MakeNodeID(filePath, name)
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeStruct,
-			Name:     name,
-			Package:  moduleName,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isPythonPublic(name),
-			Metadata: buildLangMeta(declInfo[name]),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-	}); err != nil {
-		return err
-	}
+	// --- Class definitions (with heritage extraction for find_implementations) ---
+	extractPythonClasses(g, root, src, filePath, moduleName, fileNodeID, declInfo)
 
 	// --- Module-level ALL_CAPS constants (e.g. MAX_RETRIES = 3, DEFAULT_TIMEOUT = 30) ---
 	// Walk top-level assignment nodes; if the name is ALL_CAPS, emit a const node.
@@ -932,6 +912,91 @@ func isBuiltinPython(name string) bool {
 		"breakpoint", "help", "ascii", "pow", "divmod", "slice",
 		"AttributeError", "FileNotFoundError", "PermissionError",
 		"OSError", "ImportError", "ModuleNotFoundError":
+		return true
+	}
+	return false
+}
+
+// extractPythonClasses walks the AST for class_definition nodes and emits
+// struct nodes with heritage_extends metadata for base classes.
+func extractPythonClasses(g *graph.Graph, root sitter.Node, src []byte, filePath, moduleName string, fileNodeID graph.NodeID, declInfo map[string]declMeta) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		if nodeType(n) == "class_definition" {
+			nameNode := n.ChildByFieldName("name")
+			if nameNode.IsNull() {
+				goto recurse
+			}
+			{
+				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				if name == "" {
+					goto recurse
+				}
+				var bases []string
+				if supers := n.ChildByFieldName("superclasses"); !supers.IsNull() {
+					for i := uint32(0); i < supers.NamedChildCount(); i++ {
+						child := supers.NamedChild(i)
+						if child.IsNull() {
+							continue
+						}
+						switch nodeType(child) {
+						case "identifier":
+							base := string(src[child.StartByte():child.EndByte()])
+							if base != "" && !isPythonBuiltinType(base) {
+								bases = append(bases, base)
+							}
+						case "attribute":
+							attr := child.ChildByFieldName("attribute")
+							if !attr.IsNull() {
+								base := string(src[attr.StartByte():attr.EndByte()])
+								if base != "" && !isPythonBuiltinType(base) {
+									bases = append(bases, base)
+								}
+							}
+						}
+					}
+				}
+				meta := buildLangMeta(declInfo[name])
+				if len(bases) > 0 {
+					if meta == nil {
+						meta = make(map[string]string)
+					}
+					meta["heritage_extends"] = strings.Join(bases, ",")
+				}
+				nodeID := g.MakeNodeID(filePath, name)
+				g.AddNode(&graph.Node{
+					ID:       nodeID,
+					Type:     graph.NodeStruct,
+					Name:     name,
+					Package:  moduleName,
+					File:     filePath,
+					Line:     int(nameNode.StartPoint().Row) + 1,
+					Exported: isPythonPublic(name),
+					Metadata: meta,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+	recurse:
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// isPythonBuiltinType returns true for Python built-in types that should not
+// generate heritage_extends edges.
+func isPythonBuiltinType(name string) bool {
+	switch name {
+	case "object", "type", "Exception", "BaseException",
+		"ValueError", "TypeError", "KeyError", "IndexError",
+		"RuntimeError", "StopIteration", "GeneratorExit",
+		"dict", "list", "set", "tuple", "str", "int", "float", "bool",
+		"ABC":
 		return true
 	}
 	return false

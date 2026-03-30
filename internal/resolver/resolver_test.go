@@ -328,3 +328,49 @@ func TestResolveCallEdges_DeterministicAcrossImports(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveCallEdges_CapitalizedAliasHeuristic tests that lowercase variable
+// names (e.g. "router") are matched to their capitalized type (Router.method).
+// This is essential for Rust/Go where router.route() should resolve to Router.route.
+func TestResolveCallEdges_CapitalizedAliasHeuristic(t *testing.T) {
+	g := graph.New("test")
+
+	// Setup: file with a struct + method
+	fileID := g.MakeNodeID("router.rs", "router.rs")
+	g.AddNode(&graph.Node{ID: fileID, Type: graph.NodeFile, Name: "router.rs", File: "router.rs"})
+
+	structID := g.MakeNodeID("router.rs", "Router")
+	g.AddNode(&graph.Node{ID: structID, Type: graph.NodeStruct, Name: "Router", Package: "axum", File: "router.rs"})
+
+	methodID := g.MakeNodeID("router.rs", "Router.route")
+	g.AddNode(&graph.Node{ID: methodID, Type: graph.NodeMethod, Name: "Router.route", Package: "axum", File: "router.rs"})
+
+	// Caller file with call site: router.route()
+	callerFileID := g.MakeNodeID("main.rs", "main.rs")
+	g.AddNode(&graph.Node{ID: callerFileID, Type: graph.NodeFile, Name: "main.rs", File: "main.rs"})
+
+	callerID := g.MakeNodeID("main.rs", "main")
+	g.AddNode(&graph.Node{ID: callerID, Type: graph.NodeFunction, Name: "main", Package: "axum", File: "main.rs"})
+
+	g.AddCallSite(graph.CallSite{
+		CallerID:   callerID,
+		CallerFile: "main.rs",
+		FuncName:   "route",
+		PkgAlias:   "router", // lowercase — should match Router.route
+	})
+
+	count := resolver.ResolveCallEdges(g)
+	if count == 0 {
+		t.Fatal("expected at least 1 CALLS edge from capitalized alias heuristic, got 0")
+	}
+
+	found := false
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeCalls && e.From == callerID && e.To == methodID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected CALLS edge main → Router.route via capitalized alias heuristic")
+	}
+}

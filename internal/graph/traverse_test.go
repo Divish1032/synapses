@@ -1758,3 +1758,42 @@ func TestCarveEgoGraph_DocEdgeConfidenceWeighting(t *testing.T) {
 			embedScore, nameMatchScore)
 	}
 }
+
+// TestCarveEgoGraph_ImplementorsInOutput verifies that querying an interface
+// returns its implementing structs in the SubGraph output.
+func TestCarveEgoGraph_ImplementorsInOutput(t *testing.T) {
+	g := graph.New("test")
+
+	ifaceID := g.MakeNodeID("svc.py", "View")
+	impl1ID := g.MakeNodeID("svc.py", "MethodView")
+	impl2ID := g.MakeNodeID("svc.py", "ListView")
+
+	// Python classes are NodeStruct (not NodeInterface), so test with struct root
+	// to match real Python behavior where base classes are also structs.
+	g.AddNode(&graph.Node{ID: ifaceID, Type: graph.NodeStruct, Name: "View", File: "svc.py", Package: "views"})
+	g.AddNode(&graph.Node{ID: impl1ID, Type: graph.NodeStruct, Name: "MethodView", File: "svc.py", Package: "views"})
+	g.AddNode(&graph.Node{ID: impl2ID, Type: graph.NodeStruct, Name: "ListView", File: "svc.py", Package: "views"})
+
+	g.AddEdge(&graph.Edge{From: impl1ID, To: ifaceID, Type: graph.EdgeImplements})
+	g.AddEdge(&graph.Edge{From: impl2ID, To: ifaceID, Type: graph.EdgeImplements})
+
+	sg, err := g.CarveEgoGraph(ifaceID, graph.CarveConfig{
+		MaxDepth:     3,
+		TokenBudget:  2000,
+		MinRelevance: 0.01,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := map[string]bool{}
+	for _, cn := range sg.Nodes {
+		found[string(cn.Node.ID)] = true
+	}
+	if !found[string(impl1ID)] {
+		t.Errorf("MethodView not in carve output")
+	}
+	if !found[string(impl2ID)] {
+		t.Errorf("ListView not in carve output")
+	}
+}

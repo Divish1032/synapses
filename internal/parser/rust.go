@@ -211,6 +211,9 @@ func (p *RustParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
 	})
 
+	// --- use declarations with scoped_use_list: use std::{io, fs} / use {self::x, self::y} ---
+	extractRustScopedUseLists(g, root, src, filePath, fileNodeID)
+
 	// --- All declarations via AST walk (handles impl blocks for class-qualification) ---
 	p.extractAllDeclarations(g, root, src, filePath, fileNodeID, declInfo)
 
@@ -567,4 +570,90 @@ func isRustBuiltin(name string) bool {
 		return true
 	}
 	return false
+}
+
+// extractRustScopedUseLists handles `use prefix::{a, b, c}` and `use {self::x, self::y}`
+// patterns that the simple scoped_identifier query misses.
+func extractRustScopedUseLists(g *graph.Graph, root sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID) {
+	var walk func(n sitter.Node)
+	walk = func(n sitter.Node) {
+		if n.IsNull() {
+			return
+		}
+		if nodeType(n) == "use_declaration" {
+			for i := uint32(0); i < n.NamedChildCount(); i++ {
+				child := n.NamedChild(i)
+				if nodeType(child) == "scoped_use_list" {
+					extractFromScopedUseList(g, child, src, filePath, fileNodeID, "")
+				}
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+func extractFromScopedUseList(g *graph.Graph, n sitter.Node, src []byte, filePath string, fileNodeID graph.NodeID, prefix string) {
+	localPrefix := prefix
+	if path := n.ChildByFieldName("path"); !path.IsNull() {
+		pathText := string(src[path.StartByte():path.EndByte()])
+		if localPrefix != "" {
+			localPrefix = localPrefix + "::" + pathText
+		} else {
+			localPrefix = pathText
+		}
+	}
+	if list := n.ChildByFieldName("list"); !list.IsNull() {
+		for i := uint32(0); i < list.NamedChildCount(); i++ {
+			child := list.NamedChild(i)
+			if child.IsNull() {
+				continue
+			}
+			switch nodeType(child) {
+			case "identifier", "scoped_identifier":
+				name := string(src[child.StartByte():child.EndByte()])
+				if name == "" || isRustBuiltin(name) {
+					continue
+				}
+				fullPath := name
+				if localPrefix != "" {
+					fullPath = localPrefix + "::" + name
+				}
+				importNodeID := g.MakeNodeID(fullPath, fullPath)
+				if g.GetNode(importNodeID) != nil {
+					continue
+				}
+				g.AddNode(&graph.Node{
+					ID: importNodeID, Type: graph.NodePackage, Name: fullPath,
+					Package: fullPath, File: filePath,
+				})
+				g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+			case "scoped_use_list":
+				extractFromScopedUseList(g, child, src, filePath, fileNodeID, localPrefix)
+			case "use_as_clause":
+				if path := child.ChildByFieldName("path"); !path.IsNull() {
+					name := string(src[path.StartByte():path.EndByte()])
+					if name == "" {
+						continue
+					}
+					fullPath := name
+					if localPrefix != "" {
+						fullPath = localPrefix + "::" + name
+					}
+					importNodeID := g.MakeNodeID(fullPath, fullPath)
+					if g.GetNode(importNodeID) != nil {
+						continue
+					}
+					g.AddNode(&graph.Node{
+						ID: importNodeID, Type: graph.NodePackage, Name: fullPath,
+						Package: fullPath, File: filePath,
+					})
+					g.AddEdge(&graph.Edge{From: fileNodeID, To: importNodeID, Type: graph.EdgeImports})
+				}
+			}
+		}
+	}
 }

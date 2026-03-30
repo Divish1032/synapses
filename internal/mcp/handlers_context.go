@@ -1932,6 +1932,17 @@ func (s *Server) handleGetImpact(
 		candidates = s.graph.FindByFile(symbol)
 	}
 	if len(candidates) == 0 {
+		// Fuzzy fallback: try inlineFindEntity (dotted-name splitting, etc.)
+		// before giving up — mirrors get_context's fallback behavior.
+		inline := s.inlineFindEntity(symbol)
+		if len(inline) > 0 {
+			// Re-resolve via the first suggestion's full name.
+			if topName, _ := inline[0]["name"].(string); topName != "" {
+				candidates = s.graph.FindByName(topName)
+			}
+		}
+	}
+	if len(candidates) == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf("entity not found: %q", symbol)), nil
 	}
 	root := pickBestNode(candidates, s.graph, symbol)

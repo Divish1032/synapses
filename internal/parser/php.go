@@ -180,6 +180,8 @@ func (p *PHPParser) extractAllDeclarations(
 					break
 				}
 			}
+			// Extract extends and implements from PHP class heritage.
+			meta = extractPHPHeritage(n, src, meta)
 			g.AddNode(&graph.Node{
 				ID: nodeID, Type: graph.NodeStruct, Name: name, File: filePath,
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
@@ -466,4 +468,56 @@ func collectPHPCallSites(g *graph.Graph, lang *sitter.Language, root sitter.Node
 		}
 		g.AddCallSite(graph.CallSite{CallerID: fileNodeID, CallerFile: filePath, FuncName: typeName})
 	})
+}
+
+// extractPHPHeritage extracts extends/implements clauses from a PHP class node.
+func extractPHPHeritage(n sitter.Node, src []byte, meta map[string]string) map[string]string {
+	var extendsNames, implementsNames []string
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.IsNull() {
+			continue
+		}
+		switch nodeType(child) {
+		case "base_clause":
+			extendsNames = extractPHPNames(child, src)
+		case "class_interface_clause":
+			implementsNames = extractPHPNames(child, src)
+		}
+	}
+	if len(extendsNames) > 0 {
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta["heritage_extends"] = strings.Join(extendsNames, ",")
+	}
+	if len(implementsNames) > 0 {
+		if meta == nil {
+			meta = make(map[string]string)
+		}
+		meta["heritage_implements"] = strings.Join(implementsNames, ",")
+	}
+	return meta
+}
+
+// extractPHPNames extracts class/interface names from a PHP clause node.
+func extractPHPNames(n sitter.Node, src []byte) []string {
+	var names []string
+	for i := uint32(0); i < n.NamedChildCount(); i++ {
+		child := n.NamedChild(i)
+		if child.IsNull() {
+			continue
+		}
+		t := nodeType(child)
+		if t == "name" || t == "qualified_name" {
+			name := string(src[child.StartByte():child.EndByte()])
+			if idx := strings.LastIndex(name, "\\"); idx >= 0 {
+				name = name[idx+1:]
+			}
+			if name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }

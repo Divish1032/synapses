@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 )
 
@@ -252,5 +253,104 @@ func TestStructuralImplements_StillWorksForGoNodes(t *testing.T) {
 	count := resolver.ResolveImplementsEdges(g)
 	if count != 1 {
 		t.Errorf("expected 1 structural IMPLEMENTS edge for Go-style node, got %d", count)
+	}
+}
+
+// --- Parser → Resolver integration tests ---
+// These verify that heritage metadata extracted by parsers produces
+// correct IMPLEMENTS edges after ResolveHeritageEdges.
+
+func TestHeritage_PythonParserIntegration(t *testing.T) {
+	g := graph.New("test")
+	src := []byte(`
+class View:
+    def dispatch(self):
+        pass
+
+class MethodView(View):
+    def dispatch(self):
+        pass
+
+class ListView(View):
+    def get(self):
+        pass
+`)
+	if err := parser.NewPythonParser().Parse(g, "views.py", src); err != nil {
+		t.Fatal(err)
+	}
+
+	count := resolver.ResolveHeritageEdges(g)
+	if count != 2 {
+		t.Errorf("expected 2 IMPLEMENTS edges (MethodView→View, ListView→View), got %d", count)
+	}
+
+	viewNodes := g.FindByName("View")
+	if len(viewNodes) == 0 {
+		t.Fatal("View node not found")
+	}
+	viewID := viewNodes[0].ID
+
+	// Check both implementors point to View.
+	implCount := 0
+	for _, e := range g.AllEdges() {
+		if e.Type == graph.EdgeImplements && e.To == viewID {
+			implCount++
+		}
+	}
+	if implCount != 2 {
+		t.Errorf("expected 2 IMPLEMENTS edges pointing to View, got %d", implCount)
+	}
+}
+
+func TestHeritage_RubyParserIntegration(t *testing.T) {
+	g := graph.New("test")
+	src := []byte(`
+class Handler
+  def call(env)
+  end
+end
+
+class CGI < Handler
+  def call(env)
+  end
+end
+
+class WEBrick < Handler
+  def call(env)
+  end
+end
+`)
+	if err := parser.NewRubyParser().Parse(g, "handlers.rb", src); err != nil {
+		t.Fatal(err)
+	}
+
+	count := resolver.ResolveHeritageEdges(g)
+	if count != 2 {
+		t.Errorf("expected 2 IMPLEMENTS edges (CGI→Handler, WEBrick→Handler), got %d", count)
+	}
+}
+
+func TestHeritage_PHPParserIntegration(t *testing.T) {
+	g := graph.New("test")
+	src := []byte(`<?php
+interface Serializable {}
+
+class ServiceProvider {}
+
+class EventServiceProvider extends ServiceProvider implements Serializable {}
+`)
+	if err := parser.NewPHPParser().Parse(g, "test.php", src); err != nil {
+		t.Fatal(err)
+	}
+
+	count := resolver.ResolveHeritageEdges(g)
+	// Should create 2 edges: EventServiceProvider→ServiceProvider and EventServiceProvider→Serializable
+	if count != 2 {
+		t.Errorf("expected 2 IMPLEMENTS edges, got %d", count)
+		for _, e := range g.AllEdges() {
+			if e.Type == graph.EdgeImplements {
+				t.Logf("  IMPLEMENTS: %s → %s", e.From, e.To)
+			}
+		}
 	}
 }

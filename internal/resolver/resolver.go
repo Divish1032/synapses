@@ -187,6 +187,19 @@ func ResolveCallEdges(g *graph.Graph) int {
 				}
 			}
 
+			// Capitalized-alias heuristic: for Rust/Go, variable names are often
+			// lowercase versions of their type (router → Router, app → App).
+			// Try capitalizing the first letter and look up TypeName.method.
+			if len(targets) == 0 && len(site.PkgAlias) > 0 {
+				first := site.PkgAlias[0]
+				if first >= 'a' && first <= 'z' {
+					capitalized := strings.ToUpper(site.PkgAlias[:1]) + site.PkgAlias[1:]
+					if id := findByTypedMethod(methodIndex, capitalized, site.FuncName); id != "" {
+						targets = []graph.NodeID{id}
+					}
+				}
+			}
+
 			// Fallback: alias was not an import, typed var, or class name — treat as var.Method().
 			// Search the caller's own package and all imported packages
 			// for a method matching ".FuncName" (e.g. Graph.CarveEgoGraph).

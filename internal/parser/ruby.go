@@ -169,10 +169,36 @@ func (p *RubyParser) extractAllDeclarations(
 				break
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
+			meta := buildLangMeta(declInfo[name])
+			// Extract superclass: class Foo < Bar
+			// The superclass field may include the `<` token or a `superclass`
+			// wrapper node. Walk named children to find the actual identifier/scope.
+			if superclass := n.ChildByFieldName("superclass"); !superclass.IsNull() {
+				var base string
+				// Try to find an identifier or scope_resolution child.
+				for ci := uint32(0); ci < superclass.NamedChildCount(); ci++ {
+					sc := superclass.NamedChild(ci)
+					if t := nodeType(sc); t == "constant" || t == "identifier" || t == "scope_resolution" {
+						base = string(src[sc.StartByte():sc.EndByte()])
+						break
+					}
+				}
+				// Fallback: if no named child, use the raw text and strip `<`.
+				if base == "" {
+					base = strings.TrimSpace(strings.TrimPrefix(
+						string(src[superclass.StartByte():superclass.EndByte()]), "<"))
+				}
+				if base != "" {
+					if meta == nil {
+						meta = make(map[string]string)
+					}
+					meta["heritage_extends"] = base
+				}
+			}
 			nodeID := g.MakeNodeID(filePath, name)
 			g.AddNode(&graph.Node{
 				ID: nodeID, Type: graph.NodeStruct, Name: name, File: filePath,
-				Line: int(n.StartPoint().Row) + 1, Exported: isRubyPublic(name), Metadata: buildLangMeta(declInfo[name]),
+				Line: int(n.StartPoint().Row) + 1, Exported: isRubyPublic(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			if body := firstChildOfType(n, "body_statement"); !body.IsNull() {

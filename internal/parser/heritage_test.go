@@ -356,3 +356,200 @@ public class AuthService implements Authenticator {
 		t.Errorf("heritage_implements = %q, want %q", hi, "Authenticator")
 	}
 }
+
+// --- Python heritage tests ---
+
+func TestPythonParser_HeritageExtends(t *testing.T) {
+	src := `
+class Base:
+    pass
+
+class Child(Base):
+    pass
+
+class Multi(Base, Mixin):
+    pass
+
+class Dotted(module.Parent):
+    pass
+
+class Builtin(object):
+    pass
+`
+	g := graph.New("test")
+	if err := parser.NewPythonParser().Parse(g, "test.py", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"Child", "Base"},
+		{"Multi", "Base,Mixin"},
+		{"Dotted", "Parent"},
+		{"Builtin", ""},     // object is filtered out
+		{"Base", ""},        // no parent
+	}
+	for _, tt := range tests {
+		nodes := g.FindByName(tt.name)
+		if len(nodes) == 0 {
+			t.Errorf("class %q not found", tt.name)
+			continue
+		}
+		got := nodes[0].Metadata["heritage_extends"]
+		if got != tt.want {
+			t.Errorf("class %s: heritage_extends = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+// --- Ruby heritage tests ---
+
+func TestRubyParser_HeritageExtends(t *testing.T) {
+	src := `
+class Handler < BaseHandler
+  def process
+  end
+end
+
+class Simple
+  def go
+  end
+end
+`
+	g := graph.New("test")
+	if err := parser.NewRubyParser().Parse(g, "test.rb", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes := g.FindByName("Handler")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Handler' not found")
+	}
+	he := nodes[0].Metadata["heritage_extends"]
+	if he != "BaseHandler" {
+		t.Errorf("Handler: heritage_extends = %q, want %q", he, "BaseHandler")
+	}
+
+	nodes = g.FindByName("Simple")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Simple' not found")
+	}
+	he = nodes[0].Metadata["heritage_extends"]
+	if he != "" {
+		t.Errorf("Simple: heritage_extends = %q, want empty", he)
+	}
+}
+
+// --- Rust scoped use list tests ---
+
+func TestRustParser_ScopedUseList(t *testing.T) {
+	src := `
+use crate::{body, extract};
+use self::future;
+use std::io;
+
+fn main() {}
+`
+	g := graph.New("test")
+	p := parser.NewRustParser()
+	if err := p.Parse(g, "test.rs", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+
+	wantImports := []string{"crate::body", "crate::extract", "self::future", "std::io"}
+	for _, want := range wantImports {
+		found := false
+		for _, n := range g.AllNodes() {
+			if n.Name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Check if it exists with different qualification
+			var names []string
+			for _, n := range g.AllNodes() {
+				if n.Type == "package" {
+					names = append(names, n.Name)
+				}
+			}
+			t.Errorf("import %q not found; got packages: %v", want, names)
+		}
+	}
+}
+
+// --- PHP heritage tests ---
+
+func TestPHPParser_HeritageExtends(t *testing.T) {
+	src := `<?php
+class ServiceProvider {}
+class EventServiceProvider extends ServiceProvider {}
+`
+	g := graph.New("test")
+	if err := parser.NewPHPParser().Parse(g, "test.php", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("EventServiceProvider")
+	if len(nodes) == 0 {
+		t.Fatal("class 'EventServiceProvider' not found")
+	}
+	he := nodes[0].Metadata["heritage_extends"]
+	if he != "ServiceProvider" {
+		t.Errorf("heritage_extends = %q, want %q", he, "ServiceProvider")
+	}
+
+	// Base class should have no heritage
+	nodes = g.FindByName("ServiceProvider")
+	if len(nodes) == 0 {
+		t.Fatal("class 'ServiceProvider' not found")
+	}
+	if he := nodes[0].Metadata["heritage_extends"]; he != "" {
+		t.Errorf("ServiceProvider: heritage_extends = %q, want empty", he)
+	}
+}
+
+func TestPHPParser_HeritageImplements(t *testing.T) {
+	src := `<?php
+interface Loggable {}
+interface Cacheable {}
+class UserService implements Loggable, Cacheable {}
+`
+	g := graph.New("test")
+	if err := parser.NewPHPParser().Parse(g, "test.php", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("UserService")
+	if len(nodes) == 0 {
+		t.Fatal("class 'UserService' not found")
+	}
+	hi := nodes[0].Metadata["heritage_implements"]
+	if !strings.Contains(hi, "Loggable") || !strings.Contains(hi, "Cacheable") {
+		t.Errorf("heritage_implements = %q, want to contain Loggable and Cacheable", hi)
+	}
+}
+
+func TestPHPParser_HeritageExtendsAndImplements(t *testing.T) {
+	src := `<?php
+class Base {}
+interface Serializable {}
+class Child extends Base implements Serializable {}
+`
+	g := graph.New("test")
+	if err := parser.NewPHPParser().Parse(g, "test.php", []byte(src)); err != nil {
+		t.Fatal(err)
+	}
+	nodes := g.FindByName("Child")
+	if len(nodes) == 0 {
+		t.Fatal("class 'Child' not found")
+	}
+	he := nodes[0].Metadata["heritage_extends"]
+	hi := nodes[0].Metadata["heritage_implements"]
+	if he != "Base" {
+		t.Errorf("heritage_extends = %q, want %q", he, "Base")
+	}
+	if hi != "Serializable" {
+		t.Errorf("heritage_implements = %q, want %q", hi, "Serializable")
+	}
+}
