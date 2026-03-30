@@ -130,8 +130,9 @@ type Watcher struct {
 	rootPath         string                   // absolute resolved project root (set by Start)
 	cpTracker        CrossProjectTracker      // set via SetCrossProjectTracker; may be nil
 	cpBrainTracker   BrainCrossProjectTracker // set via SetBrainCrossProjectTracker; may be nil
-	nmRunner         NameMatcherRunner        // set via SetNameMatcher; may be nil
-	afterRebuildHook func()                   // called after each RebuildIndex; may be nil
+	nmRunner          NameMatcherRunner        // set via SetNameMatcher; may be nil
+	afterRebuildHook  func()                   // called after each RebuildIndex; may be nil
+	onStaleEmbeddings func(memoryIDs []string) // called when embeddings are marked stale; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -397,6 +398,15 @@ func (w *Watcher) SetBrainCrossProjectTracker(tracker BrainCrossProjectTracker) 
 func (w *Watcher) SetAfterRebuildHook(fn func()) {
 	w.mu.Lock()
 	w.afterRebuildHook = fn
+	w.mu.Unlock()
+}
+
+// SetOnStaleEmbeddings registers a callback invoked when memory embeddings are
+// marked stale due to anchored entity changes. The server uses this to eagerly
+// queue re-embedding instead of waiting for the 60s background retry loop.
+func (w *Watcher) SetOnStaleEmbeddings(fn func(memoryIDs []string)) {
+	w.mu.Lock()
+	w.onStaleEmbeddings = fn
 	w.mu.Unlock()
 }
 
@@ -1585,6 +1595,8 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			} else if len(memIDs) > 0 {
 				if err := w.store.MarkMemoryEmbeddingsStale(memIDs); err != nil {
 					logutil.Warn("synapses/watcher: invalidate anchor embeddings: %v\n", err)
+				} else if w.onStaleEmbeddings != nil {
+					w.onStaleEmbeddings(memIDs)
 				}
 			}
 		}
@@ -1885,6 +1897,8 @@ func (w *Watcher) reparseFile(path, _ string) {
 			} else if len(memIDs) > 0 {
 				if err := w.store.MarkMemoryEmbeddingsStale(memIDs); err != nil {
 					logutil.Warn("synapses/watcher: invalidate anchor embeddings: %v\n", err)
+				} else if w.onStaleEmbeddings != nil {
+					w.onStaleEmbeddings(memIDs)
 				}
 			}
 		}
