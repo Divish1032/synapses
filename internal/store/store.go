@@ -954,6 +954,8 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_wl_session ON work_ledger(session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_wl_project ON work_ledger(project_id, created_at)`,
+		// Cross-project recall: track which project originated each memory.
+		`ALTER TABLE memories ADD COLUMN source_project TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

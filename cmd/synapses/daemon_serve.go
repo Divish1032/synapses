@@ -2381,6 +2381,19 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			if cfg.UseFlatGraph {
 				fw.SetAfterRebuildHook(func() { g.EnableFlatGraph() })
 			}
+			// Eager re-embed: when watcher marks embeddings stale, immediately
+			// queue them for re-embedding instead of waiting for the 60s retry loop.
+			if memEmbedder != nil {
+				fw.SetOnStaleEmbeddings(func(memoryIDs []string) {
+					for _, memID := range memoryIDs {
+						content, ok := st.GetMemoryContent(memID)
+						if !ok || content == "" {
+							continue
+						}
+						srv.QueueEmbedMemory(projCtx, memEmbedder, st, memID, content)
+					}
+				})
+			}
 			// Wire federation dependency tracker into the watcher so
 			// cross-project imports are detected on every file re-parse.
 			var fedTracker *federation.DeterministicDetector

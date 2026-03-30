@@ -204,7 +204,7 @@ func exportMemoriesTx(tx *sql.Tx) ([]Memory, error) {
 	rows, err := tx.Query(`
 		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
 		       created_at, expires_at, last_accessed_at, source,
-		       importance, access_count
+		       importance, access_count, source_project
 		FROM memories
 		ORDER BY created_at
 		LIMIT ?`, DefaultMaxMemoryRows)

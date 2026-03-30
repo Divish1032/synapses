@@ -460,6 +460,19 @@ func wakeProjectInstance(
 		if cfg.UseFlatGraph {
 			fw2.SetAfterRebuildHook(func() { g.EnableFlatGraph() })
 		}
+		// Eager re-embed: when watcher marks embeddings stale, immediately
+		// queue them for re-embedding instead of waiting for the 60s retry loop.
+		if memEmbedder != nil {
+			fw2.SetOnStaleEmbeddings(func(memoryIDs []string) {
+				for _, memID := range memoryIDs {
+					content, ok := st.GetMemoryContent(memID)
+					if !ok || content == "" {
+						continue
+					}
+					srv.QueueEmbedMemory(projCtx, memEmbedder, st, memID, content)
+				}
+			})
+		}
 
 		// Federation wiring.
 		if len(cfg.Federation) > 0 {

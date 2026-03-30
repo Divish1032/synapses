@@ -150,7 +150,7 @@ func (s *Store) RecentMemoriesCtx(ctx context.Context, limit, sinceDays int, unt
 	nowStr := now.Format(time.RFC3339)
 
 	q := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
-	             created_at, expires_at, last_accessed_at, source, importance, access_count
+	             created_at, expires_at, last_accessed_at, source, importance, access_count, source_project
 	      FROM memories
 	      WHERE created_at >= ?
 	        AND expires_at > ?`
@@ -265,7 +265,7 @@ func (s *Store) GetMemoriesByAnchorNodesCtx(ctx context.Context, nodeIDs []strin
 
 		remaining := limit - len(result)
 		q := `SELECT DISTINCT m.id, m.tier, m.content, m.entity_id, m.agent_id, m.task_id, m.tags,
-		             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count
+		             m.created_at, m.expires_at, m.last_accessed_at, m.source, m.importance, m.access_count, m.source_project
 		      FROM memories m
 		      JOIN memory_anchors ma ON m.id = ma.memory_id
 		      WHERE ma.node_id IN (` + strings.Join(placeholders, ",") + `)

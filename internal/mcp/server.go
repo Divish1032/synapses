@@ -230,6 +230,10 @@ type Server struct {
 	// Key: Synapses session ID (string), Value: *ledgerWatermark.
 	ledgerWatermarks sync.Map
 
+	// recallFootprints tracks recent recall results per session for recall-to-action
+	// quality correlation. Key: Synapses session ID (string), Value: *recallFootprintRing.
+	recallFootprints sync.Map
+
 	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
 	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
 	// the exact same handler functions. In knowledge mode, graph-tool entries hold
@@ -1420,6 +1424,26 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 			alerts = s.filterSeenAlerts(sessionID, alerts)
 			if len(alerts) > 0 {
 				injectAlerts(result, alerts)
+			}
+		}
+
+		// Recall-to-action correlation: check if this tool call touches
+		// entities/files from a recent recall. Fire-and-forget to Pulse.
+		if len(entities) > 0 || len(files) > 0 {
+			if fp, weight := s.checkRecallActedOn(sessionID, entities, files); fp != nil {
+				if pc := s.getPulseClient(); pc != nil {
+					pc.RecordRecallEffectiveness(pulse.RecallEffectivenessEvent{
+						RecallID:         fp.RecallID,
+						Query:            fp.Query,
+						ResultCount:      fp.ResultCount,
+						ActedOn:          true,
+						ActedOnWeight:    weight,
+						TopChannel:       fp.TopChannel,
+						CrossProjectHits: fp.CrossProjectHits,
+						SessionID:        sessionID,
+						ProjectID:        s.projectID,
+					})
+				}
 			}
 		}
 

@@ -185,6 +185,11 @@ func (c *Collector) RecordMemoryOp(ev pulsetypes.MemoryOperationEvent) {
 	c.enqueue(event{kind: "memory_op", data: ev})
 }
 
+// RecordRecallEffectiveness enqueues a recall-to-action correlation event.
+func (c *Collector) RecordRecallEffectiveness(ev pulsetypes.RecallEffectivenessEvent) {
+	c.enqueue(event{kind: "recall_effectiveness", data: ev})
+}
+
 // RecordValidationEvent enqueues a validate_plan or verify_implementation outcome event (P3-5).
 func (c *Collector) RecordValidationEvent(ev pulsetypes.ValidationEvent) {
 	c.enqueue(event{kind: "validation_event", data: ev})

@@ -62,6 +62,9 @@ type GuardEvent = types.GuardEvent
 // MemoryOperationEvent re-exports types.MemoryOperationEvent.
 type MemoryOperationEvent = types.MemoryOperationEvent
 
+// RecallEffectivenessEvent re-exports types.RecallEffectivenessEvent.
+type RecallEffectivenessEvent = types.RecallEffectivenessEvent
+
 // ValidationEvent re-exports types.ValidationEvent.
 type ValidationEvent = types.ValidationEvent
 
@@ -407,6 +410,14 @@ func (c *Client) RecordMemoryOp(ev MemoryOperationEvent) {
 		return
 	}
 	c.coll.RecordMemoryOp(ev)
+}
+
+// RecordRecallEffectiveness enqueues a recall-to-action correlation event. Fire-and-forget.
+func (c *Client) RecordRecallEffectiveness(ev RecallEffectivenessEvent) {
+	if c == nil {
+		return
+	}
+	c.coll.RecordRecallEffectiveness(ev)
 }
 
 // RecordValidationEvent enqueues a validate_plan or verify_implementation outcome event. Fire-and-forget (P3-5).

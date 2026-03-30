@@ -52,17 +52,22 @@ type EffectivenessReport struct {
 	DurationMs int64 `json:"duration_ms"`
 	// Prev7d is the 7-day historical average across all previous sessions (omitted when no history).
 	Prev7d *prev7dSummary `json:"prev_7d,omitempty"`
+	// RecallEffectivenessRate is the fraction of recalls where the agent acted
+	// on entities from the recalled memories within 5 minutes. Nil when no
+	// recall data is available (not 0% — unknown).
+	RecallEffectivenessRate *float64 `json:"recall_effectiveness_rate,omitempty"`
 	// Message is the human-readable effectiveness summary.
 	Message string `json:"message"`
 }
 
 // prev7dSummary holds the 7-day rolling averages for cross-session comparison.
 type prev7dSummary struct {
-	Sessions             int     `json:"sessions"`
-	AvgContextHitRate    float64 `json:"avg_context_hit_rate"`
-	AvgTaskCompletion    float64 `json:"avg_task_completion"`
-	TotalTokensSaved     int     `json:"total_tokens_saved"`
-	TotalKnowledgeGrowth int     `json:"total_knowledge_growth"`
+	Sessions                int     `json:"sessions"`
+	AvgContextHitRate       float64 `json:"avg_context_hit_rate"`
+	AvgTaskCompletion       float64 `json:"avg_task_completion"`
+	TotalTokensSaved        int     `json:"total_tokens_saved"`
+	TotalKnowledgeGrowth    int     `json:"total_knowledge_growth"`
+	AvgRecallEffectiveness  float64 `json:"avg_recall_effectiveness,omitempty"`
 }
 
 // sessionSummary captures the structured extraction from a session.
@@ -307,12 +312,13 @@ func (s *Server) handleEndSession(
 		}
 		if pkgJSON, jsonErr := json.Marshal(env); jsonErr == nil {
 			_, _ = s.store.InsertMemory(store.Memory{
-				Tier:    store.TierSessionLog,
-				Content: string(pkgJSON),
-				AgentID: agentID,
-				TaskID:  taskID,
-				Source:  store.SourceAuto,
-				Tags:    `["work_summary","session_end","auto"]`,
+				Tier:          store.TierSessionLog,
+				Content:       string(pkgJSON),
+				AgentID:       agentID,
+				TaskID:        taskID,
+				Source:        store.SourceAuto,
+				Tags:          `["work_summary","session_end","auto"]`,
+				SourceProject: s.projectID,
 			})
 			// memoriesSaved is intentionally not incremented — this is a
 			// structured record, not a human-readable institutional memory.
@@ -323,12 +329,13 @@ func (s *Server) handleEndSession(
 	sessionContent := buildSessionLogContent(agentID, taskID, summary, sessSummary)
 	if sessionContent != "" {
 		_, err := s.store.InsertMemory(store.Memory{
-			Tier:    store.TierSessionLog,
-			Content: sessionContent,
-			AgentID: agentID,
-			TaskID:  taskID,
-			Source:  store.SourceAuto,
-			Tags:    `["session_end","auto"]`,
+			Tier:          store.TierSessionLog,
+			Content:       sessionContent,
+			AgentID:       agentID,
+			TaskID:        taskID,
+			Source:        store.SourceAuto,
+			Tags:          `["session_end","auto"]`,
+			SourceProject: s.projectID,
 		})
 		if err == nil {
 			memoriesSaved++
@@ -357,13 +364,14 @@ func (s *Server) handleEndSession(
 			}
 
 			_, err := s.store.InsertMemory(store.Memory{
-				Tier:     store.TierEntity,
-				Content:  content,
-				EntityID: string(node.ID),
-				AgentID:  agentID,
-				TaskID:   taskID,
-				Source:   store.SourceAuto,
-				Tags:     `["session_end","entity_change","auto"]`,
+				Tier:          store.TierEntity,
+				Content:       content,
+				EntityID:      string(node.ID),
+				AgentID:       agentID,
+				TaskID:        taskID,
+				Source:        store.SourceAuto,
+				Tags:          `["session_end","entity_change","auto"]`,
+				SourceProject: s.projectID,
 			})
 			if err == nil {
 				memoriesSaved++
@@ -417,12 +425,13 @@ func (s *Server) handleEndSession(
 	// ── Step 4: Save user-provided summary as project memory ──
 	if summary != "" && len(summary) >= 10 {
 		_, err := s.store.InsertMemory(store.Memory{
-			Tier:    store.TierProject,
-			Content: summary,
-			AgentID: agentID,
-			TaskID:  taskID,
-			Source:  store.SourceManual,
-			Tags:    `["session_end","summary"]`,
+			Tier:          store.TierProject,
+			Content:       summary,
+			AgentID:       agentID,
+			TaskID:        taskID,
+			Source:        store.SourceManual,
+			Tags:          `["session_end","summary"]`,
+			SourceProject: s.projectID,
 		})
 		if err == nil {
 			memoriesSaved++
@@ -477,12 +486,13 @@ func (s *Server) handleEndSession(
 						continue
 					}
 					_, _ = sessStore.InsertMemory(store.Memory{
-						Tier:    store.TierProject,
-						Content: m.Content,
-						AgentID: sessAgentID2,
-						TaskID:  sessTaskID2,
-						Source:  store.SourceAuto,
-						Tags:    `["archivist","session_synthesis","auto"]`,
+						Tier:          store.TierProject,
+						Content:       m.Content,
+						AgentID:       sessAgentID2,
+						TaskID:        sessTaskID2,
+						Source:        store.SourceAuto,
+						Tags:          `["archivist","session_synthesis","auto"]`,
+						SourceProject: s.projectID,
 					})
 				}
 			})
@@ -551,10 +561,12 @@ func (s *Server) handleEndSession(
 				p.AvgTaskCompletion += d.AvgTaskCompletion * float64(d.Sessions)
 				p.TotalTokensSaved += d.TotalTokensSaved
 				p.TotalKnowledgeGrowth += d.TotalKnowledgeGrowth
+				p.AvgRecallEffectiveness += d.AvgRecallEffectiveness * float64(d.Sessions)
 			}
 			if p.Sessions > 0 {
 				p.AvgContextHitRate /= float64(p.Sessions)
 				p.AvgTaskCompletion /= float64(p.Sessions)
+				p.AvgRecallEffectiveness /= float64(p.Sessions)
 				prev7d = p
 			}
 		}
@@ -564,16 +576,18 @@ func (s *Server) handleEndSession(
 		if taskCompRate != nil {
 			taskCompRateF64 = *taskCompRate
 		}
+		recallRate, _, _ := s.getRecallEffectiveness(synapseSessionID)
 		eff := pulse.SessionEffectiveness{
-			SessionID:          synapseSessionID,
-			AgentID:            agentID,
-			ProjectID:          s.projectID,
-			ContextHitRate:     contextHitRate,
-			TaskCompletionRate: taskCompRateF64,
-			TokensSaved:        tokensSaved,
-			ToolCalls:          toolCalls,
-			DurationMs:         durationMs,
-			KnowledgeGrowth:    memoriesSaved,
+			SessionID:               synapseSessionID,
+			AgentID:                 agentID,
+			ProjectID:               s.projectID,
+			ContextHitRate:          contextHitRate,
+			TaskCompletionRate:      taskCompRateF64,
+			TokensSaved:             tokensSaved,
+			ToolCalls:               toolCalls,
+			DurationMs:              durationMs,
+			KnowledgeGrowth:         memoriesSaved,
+			RecallEffectivenessRate: recallRate,
 		}
 		s.goBackground(func() { pc.InsertSessionEffectiveness(eff) })
 
@@ -588,6 +602,11 @@ func (s *Server) handleEndSession(
 			KnowledgeGrowth:    memoriesSaved,
 			Prev7d:             prev7d,
 		}
+		// Recall effectiveness: fraction of recalls where agent acted on recalled entities.
+		if rate, total, _ := s.getRecallEffectiveness(synapseSessionID); total > 0 {
+			report.RecallEffectivenessRate = &rate
+		}
+		s.clearRecallFootprints(synapseSessionID)
 		report.Message = buildEffectivenessMessage(report)
 		result.EffectivenessReport = report
 	}
@@ -774,11 +793,12 @@ func (s *Server) triggerAutoSessionLog(agentID string) {
 
 	// Tag as auto_session_log so callers can filter if needed.
 	_, _ = s.store.InsertMemory(store.Memory{
-		Tier:    store.TierSessionLog,
-		Content: content,
-		AgentID: agentID,
-		Source:  store.SourceAuto,
-		Tags:    `["auto_session_log","auto"]`,
+		Tier:          store.TierSessionLog,
+		Content:       content,
+		AgentID:       agentID,
+		Source:        store.SourceAuto,
+		Tags:          `["auto_session_log","auto"]`,
+		SourceProject: s.projectID,
 	})
 
 	// P5 — Item 32: record auto-end termination reason for any active Synapses session.

@@ -311,6 +311,22 @@ type MemoryOperationEvent struct {
 	VectorSearchMs float64 `json:"vector_search_ms,omitempty"`
 }
 
+// RecallEffectivenessEvent tracks whether an agent acted on recalled memories.
+// Emitted when a tool call touches entities/files that appeared in a recent recall,
+// or at end_session for un-acted recalls (ActedOn=false).
+type RecallEffectivenessEvent struct {
+	RecallID         string  `json:"recall_id"`
+	Query            string  `json:"query,omitempty"`
+	ResultCount      int     `json:"result_count"`
+	ActedOn          bool    `json:"acted_on"`
+	ActedOnWeight    float64 `json:"acted_on_weight,omitempty"` // 1.0 = strong (<2min), 0.5 = weak (2-5min)
+	TopChannel       string  `json:"top_channel,omitempty"`
+	LatencyMs        int64   `json:"latency_ms,omitempty"`
+	CrossProjectHits int     `json:"cross_project_hits,omitempty"`
+	SessionID        string  `json:"session_id,omitempty"`
+	ProjectID        string  `json:"project_id,omitempty"`
+}
+
 // ValidationEvent tracks outcomes of validate (phase=pre/post/list/full/safety).
 type ValidationEvent struct {
 	ToolName       string `json:"tool_name"` // "validate" (with phase qualifier)
@@ -445,18 +461,20 @@ type SessionEffectiveness struct {
 	TokensSaved        int     `json:"tokens_saved"`
 	ToolCalls          int     `json:"tool_calls"`
 	DurationMs         int64   `json:"duration_ms"`
-	KnowledgeGrowth    int     `json:"knowledge_growth"`
-	CreatedAt          string  `json:"created_at"`
+	KnowledgeGrowth         int     `json:"knowledge_growth"`
+	RecallEffectivenessRate float64 `json:"recall_effectiveness_rate,omitempty"`
+	CreatedAt               string  `json:"created_at"`
 }
 
 // DailyEffectiveness holds daily aggregated effectiveness for trend charts (Phase 5 Item 13).
 type DailyEffectiveness struct {
-	Day                  string  `json:"day"`
-	AvgContextHitRate    float64 `json:"avg_context_hit_rate"`
-	AvgTaskCompletion    float64 `json:"avg_task_completion"`
-	TotalTokensSaved     int     `json:"total_tokens_saved"`
-	Sessions             int     `json:"sessions"`
-	TotalKnowledgeGrowth int     `json:"total_knowledge_growth"`
+	Day                      string  `json:"day"`
+	AvgContextHitRate        float64 `json:"avg_context_hit_rate"`
+	AvgTaskCompletion        float64 `json:"avg_task_completion"`
+	TotalTokensSaved         int     `json:"total_tokens_saved"`
+	Sessions                 int     `json:"sessions"`
+	TotalKnowledgeGrowth     int     `json:"total_knowledge_growth"`
+	AvgRecallEffectiveness   float64 `json:"avg_recall_effectiveness,omitempty"`
 }
 
 // WeeklyEfficiency holds per-week agent efficiency metrics (SA-B2).

@@ -41,6 +41,16 @@ func (s *Server) embedMemory(parentCtx context.Context, embedder embed.Embedder,
 	}
 }
 
+// QueueEmbedMemory schedules a single memory for (re-)embedding via the
+// background worker pool. Used by the watcher's onStaleEmbeddings callback
+// to eagerly re-embed instead of waiting for the 60s retry loop.
+// Falls back to trackFailedEmbed if the background queue is full.
+func (s *Server) QueueEmbedMemory(parentCtx context.Context, embedder embed.Embedder, st *store.Store, memoryID, content string) {
+	if !s.goBackground(func() { s.embedMemory(parentCtx, embedder, st, memoryID, content) }) {
+		s.trackFailedEmbed(memoryID)
+	}
+}
+
 const maxFailedEmbedIDs = 256
 
 // trackFailedEmbed records a memory ID that failed to embed due to a full

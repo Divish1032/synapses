@@ -168,12 +168,25 @@ func (s *Server) checkOverlaps(sessionID string, myEntities, myFiles []string) [
 		return nil
 	}
 
+	// Pre-resolve my entity short names to full NodeIDs for reliable matching.
+	// This is done once per checkOverlaps call, not per-other-session.
+	var myResolvedIDs []graph.NodeID
+	if s.graph != nil && len(myEntities) > 0 {
+		myResolvedIDs = s.resolveToNodeIDs(myEntities)
+	}
+
 	var alerts []LedgerAlert
 	for _, other := range others {
 		// Tier 1: exact file overlap (highest confidence)
 		commonFiles := intersectStrings(myFiles, other.FilePaths)
-		// Tier 1: exact entity overlap
+		// Tier 1: exact entity overlap (try raw string match first)
 		commonEntities := intersectStrings(myEntities, other.EntityIDs)
+
+		// Tier 1b: resolved entity overlap — catches "AuthService" vs "repo::file::AuthService"
+		if len(commonEntities) == 0 && s.graph != nil && len(myResolvedIDs) > 0 && len(other.EntityIDs) > 0 {
+			otherResolved := s.resolveToNodeIDs(other.EntityIDs)
+			commonEntities = intersectNodeIDs(myResolvedIDs, otherResolved)
+		}
 
 		overlapType := ""
 		var overlap []string
@@ -186,9 +199,6 @@ func (s *Server) checkOverlaps(sessionID string, myEntities, myFiles []string) [
 		}
 
 		// Tier 2: 1-hop graph neighbor (only if no Tier 1 match and graph available).
-		// NOTE: This requires entity strings to be graph NodeIDs (repo::file::Name format).
-		// Entity names from tool args are usually short names, so this may not match.
-		// That's acceptable — Tier 2 is best-effort, Tier 1 is the reliable path.
 		if overlapType == "" && s.graph != nil && len(myEntities) > 0 && len(other.EntityIDs) > 0 {
 			neighbors := s.graphNeighborIntersect(myEntities, other.EntityIDs)
 			if len(neighbors) > 0 {
@@ -216,22 +226,28 @@ func (s *Server) checkOverlaps(sessionID string, myEntities, myFiles []string) [
 // (1-hop via any edge) of any entity in setB. Returns the matching entity pairs.
 //
 // Entity strings may be short names ("AuthService") or full NodeIDs ("repo::file::AuthService").
-// Only full NodeIDs will match graph lookups. Short names are attempted but will
-// return no neighbors (DirectNeighbors returns nil for unknown IDs) — this is safe.
+// Short names are resolved to full NodeIDs via FindByName before graph lookup.
 func (s *Server) graphNeighborIntersect(setA, setB []string) []string {
 	if s.graph == nil {
 		return nil
 	}
-	bSet := make(map[graph.NodeID]struct{}, len(setB))
-	for _, b := range setB {
-		bSet[graph.NodeID(b)] = struct{}{}
+	// Resolve both sets to full NodeIDs.
+	resolvedA := s.resolveToNodeIDs(setA)
+	resolvedB := s.resolveToNodeIDs(setB)
+	if len(resolvedA) == 0 || len(resolvedB) == 0 {
+		return nil
+	}
+
+	bSet := make(map[graph.NodeID]struct{}, len(resolvedB))
+	for _, b := range resolvedB {
+		bSet[b] = struct{}{}
 	}
 	var matches []string
-	for _, a := range setA {
-		neighbors := s.graph.DirectNeighbors(graph.NodeID(a))
+	for _, a := range resolvedA {
+		neighbors := s.graph.DirectNeighbors(a)
 		for _, n := range neighbors {
 			if _, ok := bSet[n]; ok {
-				matches = append(matches, fmt.Sprintf("%s→%s", a, string(n)))
+				matches = append(matches, fmt.Sprintf("%s→%s", string(a), string(n)))
 				if len(matches) >= 3 {
 					return matches // cap to prevent noise
 				}
@@ -239,6 +255,28 @@ func (s *Server) graphNeighborIntersect(setA, setB []string) []string {
 		}
 	}
 	return matches
+}
+
+// resolveToNodeIDs converts a mix of short names and full NodeIDs to full NodeIDs.
+// Full NodeIDs (containing "::") pass through unchanged. Short names are resolved
+// via FindByName, capped at 3 matches per name to avoid explosion.
+func (s *Server) resolveToNodeIDs(names []string) []graph.NodeID {
+	var result []graph.NodeID
+	for _, name := range names {
+		if strings.Contains(name, "::") {
+			result = append(result, graph.NodeID(name))
+			continue
+		}
+		// Short name — resolve via graph index.
+		nodes := s.graph.FindByName(name)
+		for i, n := range nodes {
+			if i >= 3 {
+				break // cap per-name to prevent explosion
+			}
+			result = append(result, n.ID)
+		}
+	}
+	return result
 }
 
 // filterSeenAlerts removes alerts that this session has already seen.
@@ -345,6 +383,24 @@ func intersectStrings(a, b []string) []string {
 	for _, s := range a {
 		if _, ok := set[s]; ok {
 			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// intersectNodeIDs returns string representations of NodeIDs present in both slices.
+func intersectNodeIDs(a, b []graph.NodeID) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return nil
+	}
+	set := make(map[graph.NodeID]struct{}, len(b))
+	for _, id := range b {
+		set[id] = struct{}{}
+	}
+	var result []string
+	for _, id := range a {
+		if _, ok := set[id]; ok {
+			result = append(result, string(id))
 		}
 	}
 	return result

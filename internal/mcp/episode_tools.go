@@ -223,14 +223,15 @@ func (s *Server) handleRemember(
 		}
 		for _, nodeID := range affectedNodes {
 			mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
-				Tier:       store.TierEntity,
-				Content:    memContent,
-				EntityID:   nodeID,
-				AgentID:    agentID,
-				TaskID:     e.ProjectID,
-				Source:     store.SourceManual,
-				Tags:       memTags,
-				Importance: memImportance,
+				Tier:          store.TierEntity,
+				Content:       memContent,
+				EntityID:      nodeID,
+				AgentID:       agentID,
+				TaskID:        e.ProjectID,
+				Source:        store.SourceManual,
+				Tags:          memTags,
+				Importance:    memImportance,
+				SourceProject: s.projectID,
 			}, anchorNodes)
 			if merr == nil && mid != "" {
 				memoryIDs = append(memoryIDs, mid)
@@ -240,13 +241,14 @@ func (s *Server) handleRemember(
 
 	// Project-tier: always write the episode as project knowledge.
 	mid, merr := s.store.InsertMemoryWithAnchors(store.Memory{
-		Tier:       store.TierProject,
-		Content:    memContent,
-		AgentID:    agentID,
-		TaskID:     e.ProjectID,
-		Source:     store.SourceManual,
-		Tags:       memTags,
-		Importance: memImportance,
+		Tier:          store.TierProject,
+		Content:       memContent,
+		AgentID:       agentID,
+		TaskID:        e.ProjectID,
+		Source:        store.SourceManual,
+		Tags:          memTags,
+		Importance:    memImportance,
+		SourceProject: s.projectID,
 	}, anchorNodes)
 	if merr == nil && mid != "" {
 		memoryIDs = append(memoryIDs, mid)
@@ -710,6 +712,12 @@ func (s *Server) handleRecall(
 		})
 	}
 
+	// Extract top channel for pulse and recall quality tracking.
+	var topChan string
+	if len(memories) > 0 {
+		topChan = attr.TopChannel(memories[0].ID)
+	}
+
 	// P3-4: emit recall hit/miss event.
 	if pc := s.getPulseClient(); pc != nil {
 		totalResults := len(episodes) + len(memories)
@@ -729,13 +737,6 @@ func (s *Server) handleRecall(
 		var vecSearchMs float64
 		if traversalInfo != nil {
 			vecSearchMs = traversalInfo.VectorSearchMs
-		}
-		// Sprint 15 #4: TopChannel — the channel that contributed most to the
-		// rank-1 result. attr.TopChannel returns attribution[memories[0].ID][0],
-		// which is sorted best-contributor first by RRFMergeWeighted/ConvexMerge.
-		var topChan string
-		if len(memories) > 0 {
-			topChan = attr.TopChannel(memories[0].ID)
 		}
 		pc.RecordMemoryOp(pulse.MemoryOperationEvent{
 			Operation:      op,
@@ -875,6 +876,49 @@ func (s *Server) handleRecall(
 		}
 	}
 
+	// Dependency-triggered cross-project hints: automatically query sibling
+	// projects when the recall query mentions entities with known cross-project deps.
+	// Only fires when: federation is configured, no explicit projects= was given,
+	// and the query is non-empty. Capped at 2 siblings, 5 results, 3s timeout.
+	if len(crossProjectEpisodes) == 0 && s.federationResolver != nil && s.store != nil && query != "" {
+		// Extract entity-like tokens from the query (words containing uppercase or "::")
+		queryTokens := extractEntityTokens(query)
+		if len(queryTokens) > 0 {
+			// Check cross_project_deps for these entities
+			depAliases := make(map[string]string) // alias → triggering entity
+			for _, tok := range queryTokens {
+				deps, err := s.store.GetCrossProjectDeps(tok)
+				if err == nil {
+					for _, dep := range deps {
+						if _, ok := depAliases[dep.ToProject]; !ok {
+							depAliases[dep.ToProject] = dep.ToEntity
+						}
+					}
+				}
+				if len(depAliases) >= 2 {
+					break // cap at 2 siblings
+				}
+			}
+			if len(depAliases) > 0 {
+				depCtx, depCancel := context.WithTimeout(ctx, 3*time.Second)
+				for alias, entity := range depAliases {
+					hints := s.federationResolver.SearchMemoriesForEntity(depCtx, entity, []string{alias})
+					for _, h := range hints {
+						if len(crossProjectEpisodes) >= 5 {
+							break
+						}
+						crossProjectEpisodes = append(crossProjectEpisodes, map[string]interface{}{
+							"source":                fmt.Sprintf("[%s]", h.Alias),
+							"decision":              h.Summary,
+							"cross_project_dep_via": entity,
+						})
+					}
+				}
+				depCancel()
+			}
+		}
+	}
+
 	// Surface any dynamic rules derived from matching failure episodes.
 	var relatedRules []string
 	for _, ep := range episodes {
@@ -940,6 +984,36 @@ func (s *Server) handleRecall(
 	if contextEnrichment != nil {
 		resp["query_enrichment"] = contextEnrichment
 	}
+
+	// Record recall footprint for recall-to-action quality correlation.
+	fpSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+	if fpSessID != "" && (len(memories) > 0 || len(episodes) > 0) {
+		var fpEntities, fpFiles []string
+		for _, m := range memories {
+			if m.EntityID != "" {
+				fpEntities = append(fpEntities, m.EntityID)
+			}
+		}
+		for _, ep := range episodes {
+			// AffectedNodes/AffectedFiles are JSON array strings — parse them.
+			var nodes, files []string
+			_ = json.Unmarshal([]byte(ep.AffectedNodes), &nodes)
+			_ = json.Unmarshal([]byte(ep.AffectedFiles), &files)
+			fpEntities = append(fpEntities, nodes...)
+			fpFiles = append(fpFiles, files...)
+		}
+		s.recordRecallFootprint(fpSessID, recallFootprint{
+			RecallID:         fmt.Sprintf("r-%d", time.Now().UnixNano()),
+			EntityIDs:        fpEntities,
+			FilePaths:        fpFiles,
+			Timestamp:        time.Now(),
+			Query:            query,
+			ResultCount:      len(memories) + len(episodes),
+			TopChannel:       topChan,
+			CrossProjectHits: len(crossProjectEpisodes),
+		})
+	}
+
 	return jsonResult(resp)
 }
 
@@ -1212,6 +1286,28 @@ func stringArgDefault(req mcp.CallToolRequest, name, def string) string {
 		return def
 	}
 	return v
+}
+
+// extractEntityTokens extracts likely entity names from a recall query string.
+// Returns tokens that look like code identifiers: contain "::" (full NodeIDs),
+// start with uppercase (PascalCase class/struct names), or contain dots (qualified names).
+// Capped at 5 tokens to prevent explosion.
+func extractEntityTokens(query string) []string {
+	words := strings.Fields(query)
+	var tokens []string
+	for _, w := range words {
+		w = strings.Trim(w, ".,;:!?\"'()[]{}") // strip punctuation
+		if w == "" {
+			continue
+		}
+		if strings.Contains(w, "::") || (len(w) > 1 && w[0] >= 'A' && w[0] <= 'Z') || strings.Contains(w, ".") {
+			tokens = append(tokens, w)
+			if len(tokens) >= 5 {
+				break
+			}
+		}
+	}
+	return tokens
 }
 
 // parseFlexibleTime parses a time string in either RFC3339 or date-only "2006-01-02" format.

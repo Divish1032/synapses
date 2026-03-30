@@ -1062,6 +1062,8 @@ func (s *Store) migrateColumns() error {
 		`ALTER TABLE outcome_signals ADD COLUMN signal_weight REAL NOT NULL DEFAULT 0.0`,
 		// Sprint 18 #7: knowledge growth (memories created per session) for productivity dashboard.
 		`ALTER TABLE session_effectiveness ADD COLUMN knowledge_growth INTEGER NOT NULL DEFAULT 0`,
+		// Recall quality: fraction of recalls where agent acted on recalled entities.
+		`ALTER TABLE session_effectiveness ADD COLUMN recall_effectiveness_rate REAL NOT NULL DEFAULT 0.0`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := s.execer().Exec(stmt); err != nil {
@@ -2515,9 +2517,9 @@ func (s *Store) InsertSessionEffectiveness(e pulsetypes.SessionEffectiveness) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.execer().Exec(
-		`INSERT OR REPLACE INTO session_effectiveness (session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms, knowledge_growth)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.SessionID, e.AgentID, e.ProjectID, e.ContextHitRate, e.TaskCompletionRate, e.TokensSaved, e.ToolCalls, e.DurationMs, e.KnowledgeGrowth)
+		`INSERT OR REPLACE INTO session_effectiveness (session_id, agent_id, project_id, context_hit_rate, task_completion_rate, tokens_saved, tool_calls, duration_ms, knowledge_growth, recall_effectiveness_rate)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.SessionID, e.AgentID, e.ProjectID, e.ContextHitRate, e.TaskCompletionRate, e.TokensSaved, e.ToolCalls, e.DurationMs, e.KnowledgeGrowth, e.RecallEffectivenessRate)
 	return err
 }
 
@@ -2970,7 +2972,7 @@ func (s *Store) GetSessionEffectivenessP5(sessionID string) *pulsetypes.SessionE
 // GetRecentEffectivenessTrend returns daily effectiveness for the last N days (Item 13).
 func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetypes.DailyEffectiveness {
 	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
-	q := `SELECT date(created_at), AVG(context_hit_rate), AVG(task_completion_rate), SUM(tokens_saved), COUNT(*), SUM(knowledge_growth)
+	q := `SELECT date(created_at), AVG(context_hit_rate), AVG(task_completion_rate), SUM(tokens_saved), COUNT(*), SUM(knowledge_growth), AVG(recall_effectiveness_rate)
 		FROM session_effectiveness WHERE created_at >= ?`
 	args := []interface{}{since}
 	if agentID != "" {
@@ -2988,7 +2990,7 @@ func (s *Store) GetRecentEffectivenessTrend(days int, agentID string) []pulsetyp
 	var out []pulsetypes.DailyEffectiveness
 	for rows.Next() {
 		var d pulsetypes.DailyEffectiveness
-		rows.Scan(&d.Day, &d.AvgContextHitRate, &d.AvgTaskCompletion, &d.TotalTokensSaved, &d.Sessions, &d.TotalKnowledgeGrowth)
+		rows.Scan(&d.Day, &d.AvgContextHitRate, &d.AvgTaskCompletion, &d.TotalTokensSaved, &d.Sessions, &d.TotalKnowledgeGrowth, &d.AvgRecallEffectiveness)
 		out = append(out, d)
 	}
 	if rows.Err() != nil {
