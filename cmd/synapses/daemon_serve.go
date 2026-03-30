@@ -1185,7 +1185,14 @@ func cmdDaemonServe(args []string) error {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sharedPulse.GetBrainCostStats(days))
+		brainResp := struct {
+			Stats      interface{} `json:"stats"`
+			CostByTier interface{} `json:"cost_by_tier,omitempty"`
+		}{
+			Stats:      sharedPulse.GetBrainCostStats(days),
+			CostByTier: sharedPulse.GetCostByTier(days),
+		}
+		json.NewEncoder(w).Encode(brainResp)
 	})
 
 	// Admin: pulse — graph snapshot (P4-7)

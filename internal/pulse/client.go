@@ -1287,6 +1287,21 @@ func (c *Client) GetBrainCostStats(days int) []pulsestore.BrainCostStat {
 	return stats
 }
 
+// GetCostByTier returns brain LLM costs aggregated by tier (ingest/guardian/enrich/orchestrate).
+func (c *Client) GetCostByTier(days int) []pulsestore.TierCostStat {
+	if c == nil {
+		return nil
+	}
+	if days <= 0 {
+		days = 30
+	}
+	stats, err := c.store.GetCostByTier(days)
+	if err != nil {
+		return nil
+	}
+	return stats
+}
+
 // GetToolStatsRaw returns raw per-tool stats for the last N days (P4-1).
 func (c *Client) GetToolStatsRaw(days int) []pulsestore.ToolStats {
 	if c == nil {
