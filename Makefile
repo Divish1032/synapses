@@ -1,6 +1,6 @@
 .PHONY: build test lint clean install fmt vet completions \
         run/index run/start run/status run/reset run/reset-all \
-        loadtest loadtest/generate
+        loadtest loadtest/generate loadtest/production
 
 BINARY     := synapses
 BUILD_DIR  := bin
@@ -131,6 +131,20 @@ loadtest:
 loadtest/generate:
 	go run internal/loadtest/cmd/generate.go -files 10000 -out /tmp/synthetic_10k
 	go run internal/loadtest/cmd/generate.go -files 50000 -out /tmp/synthetic_50k
+
+## loadtest/production: Clone a large OSS repo and run full indexing + retrieval benchmarks
+## Usage: make loadtest/production REPO=https://github.com/grafana/grafana
+loadtest/production:
+	@REPO=$${REPO:-https://github.com/grafana/grafana}; \
+	CLONE_DIR=$${CLONE_DIR:-/tmp/synapses-prod-loadtest}; \
+	if [ ! -d "$$CLONE_DIR/.git" ]; then \
+		echo "Cloning $$REPO into $$CLONE_DIR ..."; \
+		git clone --depth 1 "$$REPO" "$$CLONE_DIR"; \
+	else \
+		echo "Reusing existing clone at $$CLONE_DIR"; \
+	fi; \
+	LOADTEST_PRODUCTION_REPO="$$REPO" LOADTEST_CLONE_DIR="$$CLONE_DIR" \
+	go test -tags loadtest -run TestLoadProfile_ProductionRepo -v -count 1 -p 1 -parallel 1 -timeout 3600s ./internal/loadtest/
 
 ## help: Print this help message
 help:

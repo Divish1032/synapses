@@ -2440,7 +2440,14 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		return err
 	}
 
-	// Insert nodes in batches.
+	// Only persist primary-project nodes; federated nodes from linked projects
+	// are reloaded at startup by MergeFrom and must not pollute this store.
+	primaryPrefix := g.RepoID() + "::"
+
+	// ── Single-pass node + FTS insertion ─────────────────────────────────
+	// Combines what was previously two separate IterateNodes passes into one,
+	// eliminating a full graph scan (~186K nodes on large repos).
+
 	nodeStmt, err := tx.Prepare(`
         INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain, prev_signature)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2450,14 +2457,20 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	}
 	defer nodeStmt.Close()
 
-	// Only persist primary-project nodes; federated nodes from linked projects
-	// are reloaded at startup by MergeFrom and must not pollute this store.
-	primaryPrefix := g.RepoID() + "::"
+	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
+		return fmt.Errorf("clear fts: %w", err)
+	}
+	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare fts stmt: %w", err)
+	}
+	defer ftsStmt.Close()
 
-	// Insert nodes; count file nodes in the same pass (avoids a second full scan).
-	// Uses IterateNodes to avoid allocating a full snapshot slice.
 	fileCount := 0
+	promotedKeys := [3]string{"doc", "signature", "line_count"}
+	var emptyMeta = []byte("{}")
 	var nodeInsertErr error
+
 	g.IterateNodes(func(n *graph.Node) {
 		if nodeInsertErr != nil {
 			return
@@ -2467,18 +2480,19 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 
 		// Promote doc/signature/line_count to first-class columns.
-		// nodeDocText falls through body→context for section/knowledge nodes.
 		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
 		lineCount := 0
 		if lc, err := strconv.Atoi(n.Metadata["line_count"]); err == nil {
 			lineCount = lc
 		}
-		// Remaining metadata (without promoted fields) goes into the JSON blob.
-		// Avoid allocating a map when all fields are promoted (common case).
-		var meta []byte
-		if len(n.Metadata) > 0 {
-			remaining := make(map[string]string, len(n.Metadata))
+
+		// Remaining metadata → JSON blob. Skip map allocation when all keys
+		// are promoted (the common case for most code nodes).
+		meta := emptyMeta
+		if len(n.Metadata) > len(promotedKeys) {
+			// There are non-promoted keys — build the remaining map.
+			remaining := make(map[string]string, len(n.Metadata)-len(promotedKeys))
 			for k, v := range n.Metadata {
 				if k != "doc" && k != "signature" && k != "line_count" {
 					remaining[k] = v
@@ -2486,11 +2500,24 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			}
 			if len(remaining) > 0 {
 				meta, _ = json.Marshal(remaining)
-			} else {
-				meta = []byte("{}")
 			}
-		} else {
-			meta = []byte("{}")
+		} else if len(n.Metadata) > 0 {
+			// Exact same number of keys as promoted — check if any are different.
+			for k := range n.Metadata {
+				if k != "doc" && k != "signature" && k != "line_count" {
+					// Found a non-promoted key; fall through to marshal.
+					remaining := make(map[string]string, 1)
+					for k2, v := range n.Metadata {
+						if k2 != "doc" && k2 != "signature" && k2 != "line_count" {
+							remaining[k2] = v
+						}
+					}
+					if len(remaining) > 0 {
+						meta, _ = json.Marshal(remaining)
+					}
+					break
+				}
+			}
 		}
 
 		exported := 0
@@ -2508,8 +2535,6 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if domain == "" {
 			domain = "code"
 		}
-		// R20: compute prev_signature — set to old signature when it changed,
-		// '' when the node is new or the signature is unchanged.
 		prevSig := ""
 		if oldSig, existed := oldSigs[string(n.ID)]; existed && oldSig != sig {
 			prevSig = oldSig
@@ -2523,73 +2548,73 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			nodeInsertErr = fmt.Errorf("insert node %s: %w", n.ID, err)
 			return
 		}
+
+		// FTS insertion in the same pass (was a separate full scan before).
+		if n.Type != graph.NodeFile && n.Type != graph.NodePackage {
+			nlDesc := ""
+			if IsCodeNodeType(n.Type) && n.Domain != graph.DomainDocs {
+				nlDesc = GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
+			}
+			if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), nlDesc, sig, doc); err != nil {
+				nodeInsertErr = fmt.Errorf("insert fts node %s: %w", n.ID, err)
+				return
+			}
+		}
 	})
 	if nodeInsertErr != nil {
 		return nodeInsertErr
 	}
 
-	// Rebuild FTS index inside the same transaction so search is always consistent
-	// with the nodes table.
-	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
-		return fmt.Errorf("clear fts: %w", err)
-	}
-	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare fts stmt: %w", err)
-	}
-	defer ftsStmt.Close()
-	var ftsInsertErr error
-	g.IterateNodes(func(n *graph.Node) {
-		if ftsInsertErr != nil {
-			return
-		}
-		if !strings.HasPrefix(string(n.ID), primaryPrefix) {
-			return
-		}
-		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
-			return // not useful for search
-		}
-		doc := nodeDocText(n.Metadata)
-		sig := n.Metadata["signature"]
-		nlDesc := ""
-		if IsCodeNodeType(n.Type) && n.Domain != graph.DomainDocs {
-			nlDesc = GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
-		}
-		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), nlDesc, sig, doc); err != nil {
-			ftsInsertErr = fmt.Errorf("insert fts node %s: %w", n.ID, err)
-			return
-		}
-	})
-	if ftsInsertErr != nil {
-		return ftsInsertErr
-	}
+	// ── Batch edge insertion ─────────────────────────────────────────────
+	// Multi-value INSERT in chunks instead of one-row-at-a-time.
+	// SQLite handles multi-value INSERTs significantly faster because it
+	// reduces per-statement overhead (parse, plan, btree seek) by ~N×.
 
-	// Insert edges.
-	edgeStmt, err := tx.Prepare(`
-        INSERT OR IGNORE INTO edges (from_id, to_id, type)
-        VALUES (?, ?, ?)
-    `)
-	if err != nil {
-		return fmt.Errorf("prepare edge stmt: %w", err)
+	const edgeBatchSize = 500
+	edgeBuf := make([]interface{}, 0, edgeBatchSize*3)
+	edgeFlushed := 0
+
+	flushEdges := func() error {
+		if len(edgeBuf) == 0 {
+			return nil
+		}
+		nRows := len(edgeBuf) / 3
+		var sb strings.Builder
+		sb.WriteString(`INSERT OR IGNORE INTO edges (from_id, to_id, type) VALUES `)
+		for i := 0; i < nRows; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(`(?,?,?)`)
+		}
+		if _, err := tx.Exec(sb.String(), edgeBuf...); err != nil {
+			return fmt.Errorf("batch insert edges (batch %d): %w", edgeFlushed, err)
+		}
+		edgeFlushed++
+		edgeBuf = edgeBuf[:0]
+		return nil
 	}
-	defer edgeStmt.Close()
 
 	var edgeInsertErr error
 	g.IterateEdges(func(e *graph.Edge) {
 		if edgeInsertErr != nil {
 			return
 		}
-		// Skip edges originating from linked-project nodes.
 		if !strings.HasPrefix(string(e.From), primaryPrefix) {
 			return
 		}
-		if _, err := edgeStmt.Exec(string(e.From), string(e.To), string(e.Type)); err != nil {
-			edgeInsertErr = fmt.Errorf("insert edge %s→%s: %w", e.From, e.To, err)
-			return
+		edgeBuf = append(edgeBuf, string(e.From), string(e.To), string(e.Type))
+		if len(edgeBuf) >= edgeBatchSize*3 {
+			if err := flushEdges(); err != nil {
+				edgeInsertErr = err
+			}
 		}
 	})
 	if edgeInsertErr != nil {
 		return edgeInsertErr
+	}
+	if err := flushEdges(); err != nil {
+		return err
 	}
 
 	// Persist metadata (lightweight stats so 'list' never needs to load the full graph).
@@ -4093,6 +4118,104 @@ func (s *Store) GetViolationLog(ruleID string, limit int) ([]ViolationLogEntry, 
 	}
 	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []ViolationLogEntry
+	for rows.Next() {
+		var e ViolationLogEntry
+		if err := rows.Scan(&e.ID, &e.RuleID, &e.Severity,
+			&e.FromNode, &e.ToNode, &e.EdgeType,
+			&e.FirstSeen, &e.LastSeen, &e.Occurrences); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// GetRulesForFiles returns dynamic rules whose from_file_pattern or to_file_pattern
+// matches any of the given files. Uses in-memory glob matching over all rules.
+// Used for compaction recovery to surface applicable architectural constraints.
+func (s *Store) GetRulesForFiles(files []string) ([]config.Rule, error) {
+	allRules, err := s.LoadDynamicRules()
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	fileSet := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		fileSet[f] = struct{}{}
+	}
+	var matched []config.Rule
+	seen := make(map[string]struct{})
+	for _, r := range allRules {
+		if _, ok := seen[r.ID]; ok {
+			continue
+		}
+		for _, f := range files {
+			fromMatch := r.ForbiddenEdge.FromFilePattern != "" && globMatch(r.ForbiddenEdge.FromFilePattern, f)
+			toMatch := r.ForbiddenEdge.ToFilePattern != "" && globMatch(r.ForbiddenEdge.ToFilePattern, f)
+			if fromMatch || toMatch {
+				matched = append(matched, r)
+				seen[r.ID] = struct{}{}
+				break
+			}
+		}
+	}
+	return matched, nil
+}
+
+// globMatch matches a file path against a glob pattern by progressively
+// stripping leading directory segments. This mirrors config.matchFilePath()
+// so "pkg/api/*.go" matches "src/pkg/api/handler.go" as expected.
+func globMatch(pattern, filePath string) bool {
+	p := filepath.ToSlash(filePath)
+	for {
+		if matched, _ := filepath.Match(pattern, p); matched {
+			return true
+		}
+		idx := strings.IndexByte(p, '/')
+		if idx < 0 {
+			break
+		}
+		p = p[idx+1:]
+	}
+	return false
+}
+
+// GetViolationsForFiles returns violation log entries where from_file or to_file
+// matches any of the given files. Used for compaction recovery.
+// Uses parameterized IN clauses — safe against SQL injection.
+func (s *Store) GetViolationsForFiles(files []string, limit int) ([]ViolationLogEntry, error) {
+	if len(files) == 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	// Build parameterized IN clause
+	placeholders := make([]string, len(files))
+	args := make([]interface{}, 0, len(files)*2+1)
+	for i, f := range files {
+		placeholders[i] = "?"
+		args = append(args, f)
+	}
+	inClause := strings.Join(placeholders, ",")
+	// Duplicate the file args for the second IN clause
+	for _, f := range files {
+		args = append(args, f)
+	}
+	args = append(args, limit)
+
+	query := `SELECT id, rule_id, severity, from_node, to_node, edge_type, first_seen, last_seen, occurrences
+	          FROM violation_log
+	          WHERE from_file IN (` + inClause + `) OR to_file IN (` + inClause + `)
+	          ORDER BY last_seen DESC LIMIT ?`
+
+	rows, err := s.knowledgeDB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get violations for files: %w", err)
 	}
 	defer rows.Close()
 

@@ -992,6 +992,10 @@ func runQuery(
 	qc := sitter.NewQueryCursor()
 	iter := qc.Matches(q, root, src)
 
+	// Reuse a single captures map across matches to reduce allocations.
+	// The map is cleared between matches instead of reallocated.
+	captures := make(map[string]string, 8)
+
 	for {
 		m := iter.Next()
 		if m == nil {
@@ -1000,7 +1004,10 @@ func runQuery(
 		if len(m.Captures) == 0 {
 			continue
 		}
-		captures := make(map[string]string, len(m.Captures))
+		// Clear map for reuse (faster than reallocating).
+		for k := range captures {
+			delete(captures, k)
+		}
 		startLine := 0
 		for _, c := range m.Captures {
 			name := q.CaptureNameForID(c.Index)

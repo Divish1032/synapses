@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
 // FullReport is the top-level JSON output for a load test run.
@@ -20,6 +22,19 @@ type FullReport struct {
 	Stages     []*StageReport `json:"stages"`
 	LeakResult *LeakResult    `json:"leak_result,omitempty"`
 	HTTPResult []HTTPResult   `json:"http_result,omitempty"`
+
+	// Retained state (only populated when Config.RetainState is true).
+	Graph   *graph.Graph `json:"-"`
+	DBPath  string       `json:"-"`
+	cleanUp func()
+}
+
+// Close releases retained resources. Safe to call on nil or non-retained reports.
+func (r *FullReport) Close() {
+	if r != nil && r.cleanUp != nil {
+		r.cleanUp()
+		r.cleanUp = nil
+	}
 }
 
 // LeakResult captures the outcome of steady-state leak detection.

@@ -179,6 +179,57 @@ func TestLeakDetection_Quick(t *testing.T) {
 	}
 }
 
+// TestLoadProfile_ProductionRepo profiles against a real large OSS repository.
+// Set LOADTEST_PRODUCTION_REPO to the git clone URL and optionally
+// LOADTEST_CLONE_DIR to control where it's cloned.
+func TestLoadProfile_ProductionRepo(t *testing.T) {
+	repoURL := os.Getenv("LOADTEST_PRODUCTION_REPO")
+	if repoURL == "" {
+		t.Skip("set LOADTEST_PRODUCTION_REPO to a git clone URL (e.g. https://github.com/grafana/grafana)")
+	}
+
+	cloneDir := os.Getenv("LOADTEST_CLONE_DIR")
+	if cloneDir == "" {
+		cloneDir = filepath.Join(os.TempDir(), "synapses-prod-loadtest")
+	}
+
+	report, err := RunProduction(ProductionConfig{
+		RepoURL:      repoURL,
+		CloneDir:     cloneDir,
+		ShallowClone: true,
+		Config: Config{
+			Size:           "production",
+			SkipEmbeddings: true,
+			Output:         os.Stdout,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunProduction: %v", err)
+	}
+
+	// Sanity checks.
+	if report.Indexing == nil || len(report.Indexing.Stages) < 5 {
+		t.Error("expected at least 5 indexing stages")
+	}
+	if report.Retrieval == nil {
+		t.Error("expected retrieval report")
+	} else {
+		for _, ql := range report.Retrieval.GetContext {
+			if ql.P99 > 2*time.Second {
+				t.Errorf("%s p99=%v exceeds 2s", ql.Label, ql.P99)
+			}
+		}
+		if report.Retrieval.Search != nil && report.Retrieval.Search.P99 > time.Second {
+			t.Errorf("search p99=%v exceeds 1s", report.Retrieval.Search.P99)
+		}
+	}
+
+	t.Logf("Lines: %d, Nodes: %d, Edges: %d",
+		report.RepoLineCount,
+		report.Indexing.Graph.NodeCount(),
+		report.Indexing.Graph.EdgeCount())
+}
+
 // findRepoRoot walks up from the test binary's directory to find the
 // synapses repository root (identified by go.mod).
 func findRepoRoot(t *testing.T) string {

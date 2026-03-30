@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unique"
 )
 
 // stableIDRecord holds the identity data used to migrate stable UUIDs across
@@ -166,13 +167,38 @@ func (g *Graph) MakeNodeID(file, name string) NodeID {
 	return NodeID(g.repoID + "::" + relFile + "::" + name)
 }
 
+// DedupString uses Go's unique package to ensure identical strings share
+// one heap allocation. This is the primary mechanism for reducing memory
+// during parsing — Node.Name, Node.Package, and Node.File are deduped
+// here so that 186K nodes in a large repo share ~10K unique strings
+// instead of 186K separate allocations.
+//
+// Strings longer than 512 bytes are returned as-is since they are rarely
+// duplicated (doc comments, full signatures) and hashing them wastes CPU.
+func DedupString(s string) string {
+	if len(s) == 0 || len(s) > 512 {
+		return s
+	}
+	return unique.Make(s).Value()
+}
+
+// dedupNodeStrings interns the high-repetition string fields on a Node.
+func dedupNodeStrings(n *Node) {
+	n.Name = DedupString(n.Name)
+	n.Package = DedupString(n.Package)
+	n.File = DedupString(n.File)
+}
+
 // AddNode inserts or replaces a node. If a node with the same ID already
 // exists it is overwritten — the caller is responsible for deduplication.
 // A stable UUID is generated for n.StableID if it is empty.
+// String fields (Name, Package, File) are deduplicated via unique.Make
+// to reduce heap usage in large repositories.
 func (g *Graph) AddNode(n *Node) {
 	if n.StableID == "" {
 		n.StableID = generateStableID()
 	}
+	dedupNodeStrings(n)
 	g.mu.Lock()
 	g.nodes[n.ID] = n
 	g.piCache = nil // invalidate ProjectIdentity cache
@@ -181,6 +207,7 @@ func (g *Graph) AddNode(n *Node) {
 
 // BulkAddNodes inserts multiple nodes in a single lock acquisition.
 // This amortises mutex overhead when a parser emits many nodes at once.
+// String fields are deduplicated before lock acquisition.
 func (g *Graph) BulkAddNodes(nodes []*Node) {
 	if len(nodes) == 0 {
 		return
@@ -189,6 +216,7 @@ func (g *Graph) BulkAddNodes(nodes []*Node) {
 		if n.StableID == "" {
 			n.StableID = generateStableID()
 		}
+		dedupNodeStrings(n)
 	}
 	g.mu.Lock()
 	for _, n := range nodes {
@@ -702,6 +730,11 @@ func (g *Graph) InvalidateCache() {
 // CacheLen returns the number of entries in the subgraph cache (P9-8).
 func (g *Graph) CacheLen() int {
 	return g.cache.Len()
+}
+
+// SubgraphCacheStats returns hit/miss/eviction counters and current size.
+func (g *Graph) SubgraphCacheStats() CacheStats {
+	return g.cache.Stats()
 }
 
 // InvalidateCacheForFile evicts only cached subgraphs that reference the given

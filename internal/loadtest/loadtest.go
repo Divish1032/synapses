@@ -30,6 +30,10 @@ type Config struct {
 	// Size label for the report (e.g. "small", "medium", "large").
 	Size string
 
+	// RetainState keeps the graph, store, and temp dir alive after Run returns.
+	// The caller must call FullReport.Close() to release resources.
+	RetainState bool
+
 	// PProfDir is where per-stage pprof files are written.
 	// Defaults to /tmp/synapses_loadtest/.
 	PProfDir string
@@ -87,14 +91,18 @@ func Run(cfg Config) (*FullReport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loadtest: create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	if !cfg.RetainState {
+		defer os.RemoveAll(tmpDir)
+	}
 
 	dbPath := filepath.Join(tmpDir, "graph.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("loadtest: open store: %w", err)
 	}
-	defer st.Close()
+	if !cfg.RetainState {
+		defer st.Close()
+	}
 
 	g := graph.New("loadtest")
 	w := parser.NewWalker()
@@ -269,6 +277,17 @@ func Run(cfg Config) (*FullReport, error) {
 			return nil, fmt.Errorf("loadtest: incremental: %w", fnErr)
 		}
 		report.Stages = append(report.Stages, stageReport)
+	}
+
+	// ── Retain state for retrieval benchmarks ────────────────────────────
+
+	if cfg.RetainState {
+		report.Graph = g
+		report.DBPath = dbPath
+		report.cleanUp = func() {
+			st.Close()
+			os.RemoveAll(tmpDir)
+		}
 	}
 
 	// ── Output ───────────────────────────────────────────────────────────
