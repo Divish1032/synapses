@@ -16,7 +16,7 @@ func TestDeferredQueue_AddAndDrain_Green(t *testing.T) {
 	q := newDeferredQueue(10)
 	called := false
 	q.add(&brainTask{key: "k1", priority: PriorityP2, fn: func() { called = true }, enqueuedAt: time.Now(), ttl: time.Minute})
-	tasks := q.drain(HealthGreen)
+	tasks, _ := q.drain(HealthGreen)
 	if len(tasks) != 1 {
 		t.Fatalf("want 1 task; got %d", len(tasks))
 	}
@@ -34,7 +34,7 @@ func TestDeferredQueue_Dedup_KeepsLatest(t *testing.T) {
 	callCount := 0
 	q.add(&brainTask{key: "k1", priority: PriorityP2, fn: func() { callCount += 10 }, enqueuedAt: time.Now(), ttl: time.Minute})
 	q.add(&brainTask{key: "k1", priority: PriorityP2, fn: func() { callCount += 99 }, enqueuedAt: time.Now(), ttl: time.Minute})
-	tasks := q.drain(HealthGreen)
+	tasks, _ := q.drain(HealthGreen)
 	if len(tasks) != 1 {
 		t.Fatalf("want 1 task after dedup; got %d", len(tasks))
 	}
@@ -49,7 +49,7 @@ func TestDeferredQueue_Yellow_P1Runs_P2Deferred(t *testing.T) {
 	q.add(&brainTask{key: "p1", priority: PriorityP1, fn: func() {}, enqueuedAt: time.Now(), ttl: time.Minute})
 	q.add(&brainTask{key: "p2", priority: PriorityP2, fn: func() {}, enqueuedAt: time.Now(), ttl: time.Minute})
 
-	run := q.drain(HealthYellow)
+	run, _ := q.drain(HealthYellow)
 	if len(run) != 1 {
 		t.Fatalf("want 1 task (P1 only) under Yellow; got %d", len(run))
 	}
@@ -66,7 +66,7 @@ func TestDeferredQueue_Red_NothingRuns(t *testing.T) {
 	q.add(&brainTask{key: "p1", priority: PriorityP1, fn: func() {}, enqueuedAt: time.Now(), ttl: time.Minute})
 	q.add(&brainTask{key: "p2", priority: PriorityP2, fn: func() {}, enqueuedAt: time.Now(), ttl: time.Minute})
 
-	run := q.drain(HealthRed)
+	run, _ := q.drain(HealthRed)
 	if len(run) != 0 {
 		t.Fatalf("want 0 tasks under Red; got %d", len(run))
 	}
@@ -85,7 +85,7 @@ func TestDeferredQueue_ExpiredTasksDropped(t *testing.T) {
 		enqueuedAt: time.Now().Add(-10 * time.Minute),
 		ttl:        time.Minute, // expired 9 minutes ago
 	})
-	run := q.drain(HealthGreen)
+	run, _ := q.drain(HealthGreen)
 	if len(run) != 0 {
 		t.Fatalf("want expired task dropped; got %d task(s)", len(run))
 	}
@@ -108,7 +108,7 @@ func TestDeferredQueue_BoundedEvictsOldestP2(t *testing.T) {
 		t.Errorf("want size 3 after eviction; got %d", q.size())
 	}
 	// p2a should be evicted; p2d should be present.
-	tasks := q.drain(HealthGreen)
+	tasks, _ := q.drain(HealthGreen)
 	keys := make(map[string]bool)
 	for _, t := range tasks {
 		keys[t.key] = true
@@ -141,7 +141,7 @@ func TestDeferredQueue_SortOrder_P1BeforeP2(t *testing.T) {
 	q.add(&brainTask{key: "p2", priority: PriorityP2, fn: func() {}, enqueuedAt: base, ttl: time.Minute})
 	q.add(&brainTask{key: "p1", priority: PriorityP1, fn: func() {}, enqueuedAt: base.Add(time.Millisecond), ttl: time.Minute})
 
-	run := q.drain(HealthGreen)
+	run, _ := q.drain(HealthGreen)
 	if len(run) != 2 {
 		t.Fatalf("want 2 tasks; got %d", len(run))
 	}

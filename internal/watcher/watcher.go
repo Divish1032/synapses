@@ -168,8 +168,9 @@ type Watcher struct {
 	// recent successful re-parse. Used by Sprint 10.7 embedding invalidation to
 	// skip staling when file content did not actually change (no-op saves,
 	// IDE auto-saves without edits). Keyed by absolute file path.
-	fileHashMu sync.Mutex
-	fileHashes map[string]string
+	fileHashMu    sync.Mutex
+	fileHashes    map[string]string
+	debounceHits  map[string]int // per-file debounce suppression count, reset after reparse
 
 	// fileHadParseErrors tracks files whose most recent watcher reparse was
 	// skipped due to tree-sitter parse errors. On the FIRST error occurrence,
@@ -235,6 +236,7 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 		stopCtx:            stopCtx,
 		stopCtxFn:          stopCtxFn,
 		fileHashes:         make(map[string]string),
+		debounceHits:       make(map[string]int),
 		fileHadParseErrors: make(map[string]bool),
 		workCh:             make(chan reparseWork, reparseWorkChanSize),
 		parseCh:            make(chan parseFileResult, parseChanSize),
@@ -628,7 +630,7 @@ func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) 
 	g := w.graph
 	if !w.trackGo(func() {
 		defer w.nodeEmbedRunning.Store(0)
-		runNodeEmbedPass(ctx, embedder, st, g)
+		runNodeEmbedPass(ctx, embedder, st, g, w.pulseClient)
 	}) {
 		// Watcher stopped before the goroutine could be launched.
 		// Clear the guard so the atomic doesn't stay stuck at 1.
@@ -952,6 +954,7 @@ func (w *Watcher) debounce(path, root string) {
 			}
 		}
 		t.Reset(debounceDelay)
+		w.debounceHits[path]++
 		return
 	}
 
@@ -1520,8 +1523,17 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 
 		// R3/R34: re-enrich blame and commit context for changed file.
 		if root := w.graph.Root(); root != "" {
+			churnStart := time.Now()
 			metrics.EnrichBlameForFile(w.graph, root, s.result.path)
 			metrics.EnrichCommitContextForFile(w.graph, root, s.result.path)
+			if w.pulseClient != nil {
+				w.pulseClient.RecordEnrichmentEvent(pulse.EnrichmentEvent{
+					EnrichmentType: "churn_blame",
+					DurationMs:     time.Since(churnStart).Milliseconds(),
+					Success:        true,
+					ProjectID:      w.projectID,
+				})
+			}
 		}
 
 		w.graph.InvalidateCacheForFile(s.result.path)
@@ -1538,6 +1550,8 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			}
 			if w.pulseClient != nil {
 				w.pulseClient.RecordGraphSnapshot(pulse.GraphSnapshotEvent{
+					NodesTotal:        w.graph.NodeCount(),
+					EdgesTotal:        w.graph.EdgeCount(),
 					RebuildDurationMs: float64(time.Since(rebuildStart).Milliseconds()),
 					RebuildTrigger:    "file_change",
 				})
@@ -1660,6 +1674,11 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 			if deltaRows < 0 {
 				deltaRows = -deltaRows
 			}
+			// Consume and clear debounce hit count for this file.
+			w.mu.Lock()
+			dbHits := w.debounceHits[s.result.path]
+			delete(w.debounceHits, s.result.path)
+			w.mu.Unlock()
 			w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
 				File:           s.result.path,
 				Language:       lang,
@@ -1671,6 +1690,7 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 				ProjectID:      w.projectID,
 				DeltaRows:      deltaRows,
 				ErrorAction:    s.errorAction,
+				DebounceHits:   dbHits,
 			})
 		}
 
@@ -1991,9 +2011,18 @@ func (w *Watcher) reparseFile(path, _ string) {
 	// R3: re-enrich blame for nodes in the changed file only — keeps blame
 	// current without re-running git against the entire graph.
 	if root := w.graph.Root(); root != "" {
+		churnStart2 := time.Now()
 		metrics.EnrichBlameForFile(w.graph, root, path)
 		// R34: re-enrich commit context for the changed file.
 		metrics.EnrichCommitContextForFile(w.graph, root, path)
+		if w.pulseClient != nil {
+			w.pulseClient.RecordEnrichmentEvent(pulse.EnrichmentEvent{
+				EnrichmentType: "churn_blame",
+				DurationMs:     time.Since(churnStart2).Milliseconds(),
+				Success:        true,
+				ProjectID:      w.projectID,
+			})
+		}
 	}
 
 	w.graph.InvalidateCacheForFile(path)
@@ -2013,6 +2042,8 @@ func (w *Watcher) reparseFile(path, _ string) {
 		// P5 — COV-7: emit graph rebuild duration to pulse.
 		if w.pulseClient != nil {
 			w.pulseClient.RecordGraphSnapshot(pulse.GraphSnapshotEvent{
+				NodesTotal:        w.graph.NodeCount(),
+				EdgesTotal:        w.graph.EdgeCount(),
 				RebuildDurationMs: float64(time.Since(rebuildStart).Milliseconds()),
 				RebuildTrigger:    "file_change",
 			})
@@ -2115,6 +2146,11 @@ func (w *Watcher) reparseFile(path, _ string) {
 		if deltaRows < 0 {
 			deltaRows = -deltaRows
 		}
+		// Consume and clear debounce hit count for this file.
+		w.mu.Lock()
+		dbHits2 := w.debounceHits[path]
+		delete(w.debounceHits, path)
+		w.mu.Unlock()
 		w.pulseClient.RecordReparseEvent(pulse.ReparseEvent{
 			File:           path,
 			Language:       lang,
@@ -2126,6 +2162,7 @@ func (w *Watcher) reparseFile(path, _ string) {
 			ProjectID:      w.projectID,
 			DeltaRows:      deltaRows,
 			ErrorAction:    errorAction, // P9-7
+			DebounceHits:   dbHits2,
 		})
 	}
 
@@ -2173,8 +2210,17 @@ func (w *Watcher) refreshBlameAfterCommit(root string) {
 			absFile = filepath.Join(graphRoot, absFile)
 		}
 
+		gitEnrichStart := time.Now()
 		metrics.EnrichBlameForFile(w.graph, graphRoot, absFile)
 		metrics.EnrichCommitContextForFile(w.graph, graphRoot, absFile)
+		if w.pulseClient != nil {
+			w.pulseClient.RecordEnrichmentEvent(pulse.EnrichmentEvent{
+				EnrichmentType: "churn_blame",
+				DurationMs:     time.Since(gitEnrichStart).Milliseconds(),
+				Success:        true,
+				ProjectID:      w.projectID,
+			})
+		}
 	}
 
 	w.graph.InvalidateCache()

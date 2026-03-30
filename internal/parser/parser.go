@@ -92,6 +92,11 @@ type Walker struct {
 	// initial full-index so the machine stays responsive during the first
 	// impression — incremental updates are already fast and don't need this.
 	Throttle bool
+
+	// TotalFilesWalked is set by WalkDir to the total number of non-directory
+	// files encountered during the filesystem scan (before parser filtering).
+	// Read after WalkDir returns to get the denominator for "% indexed".
+	TotalFilesWalked int
 }
 
 // NewWalker creates a Walker pre-loaded with all built-in language parsers.
@@ -280,6 +285,8 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				return nil
 			}
 		}
+
+		w.TotalFilesWalked++
 
 		ext := strings.ToLower(filepath.Ext(path))
 		p, ok := w.resolveParser(path, ext)

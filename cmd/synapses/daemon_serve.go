@@ -2346,6 +2346,14 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	// Memory embeddings (recall vector search).
 	memEmbedder := createMemoryEmbedder(cfg)
 	if memEmbedder != nil {
+		// Wire model download events to pulse for first-startup observability.
+		if be, ok := memEmbedder.(*embed.BuiltinEmbedder); ok && sharedPulse != nil {
+			pc := sharedPulse
+			be.OnModelEvent = func(eventType string) {
+				logutil.Info("synapses: embed model event: %s\n", eventType)
+				pc.RecordLifecycleEvent(eventType, 0, "")
+			}
+		}
 		srv.SetMemoryEmbedder(memEmbedder)
 		go func() {
 			if err := memEmbedder.WarmUp(projCtx); err != nil {

@@ -490,12 +490,13 @@ func (s *Store) InsertIndexEventTx(ev pulsetypes.IndexEvent) error {
 		coverageJSON = "{}"
 	}
 	_, err := s.execer().Exec(
-		`INSERT INTO index_events (duration_ms, files_indexed, total_nodes, total_edges, call_sites_resolved, call_sites_unresolved, resolution_rate, language_dist, project_id, work_item_type_dist, resolver_duration_ms, files_skipped, resolution_by_lang_json, coverage_json, heritage_edges_created, implements_edges_created)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO index_events (duration_ms, files_indexed, total_nodes, total_edges, call_sites_resolved, call_sites_unresolved, resolution_rate, language_dist, project_id, work_item_type_dist, resolver_duration_ms, files_skipped, resolution_by_lang_json, coverage_json, heritage_edges_created, implements_edges_created, total_repo_files)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ev.DurationMs, ev.FilesIndexed, ev.TotalNodes, ev.TotalEdges,
 		ev.CallSitesResolved, ev.CallSitesUnresolved, ev.ResolutionRate,
 		ev.LanguageDistJSON, ev.ProjectID, workDist, ev.ResolverDurationMs,
 		ev.FilesSkipped, resByLang, coverageJSON, ev.HeritageEdgesCreated, ev.ImplementsEdgesCreated,
+		ev.TotalRepoFiles,
 	)
 	return err
 }
@@ -1064,6 +1065,8 @@ func (s *Store) migrateColumns() error {
 		`ALTER TABLE session_effectiveness ADD COLUMN knowledge_growth INTEGER NOT NULL DEFAULT 0`,
 		// Recall quality: fraction of recalls where agent acted on recalled entities.
 		`ALTER TABLE session_effectiveness ADD COLUMN recall_effectiveness_rate REAL NOT NULL DEFAULT 0.0`,
+		// Pulse audit: total repo files for "% indexed" metric.
+		`ALTER TABLE index_events ADD COLUMN total_repo_files INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range alterStmts {
 		if _, err := s.execer().Exec(stmt); err != nil {
@@ -1771,6 +1774,12 @@ type Summary struct {
 	// ValueMultiplier shows how many tokens the agent would have consumed without
 	// Synapses for every 1 token actually delivered ("Nx multiplier").
 	ValueMultiplier float64 `json:"value_multiplier"`
+	// ContextPrecision is the fraction of deliveries followed by a task_done signal.
+	ContextPrecision float64 `json:"context_precision,omitempty"`
+	// ContextRecall is the fraction of task_done sessions that had a context delivery.
+	ContextRecall float64 `json:"context_recall,omitempty"`
+	// ContextF1 is the harmonic mean of precision and recall.
+	ContextF1 float64 `json:"context_f1,omitempty"`
 }
 
 // GetSummary returns aggregated analytics for the last N days.
@@ -1788,7 +1797,13 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		if err != nil {
 			return nil, err
 		}
-		return mergeSummaries(hist, raw), nil
+		merged := mergeSummaries(hist, raw)
+		merged.ContextPrecision = s.GetContextPrecision(days)
+		merged.ContextRecall = s.GetContextRecall(days)
+		if p, r := merged.ContextPrecision, merged.ContextRecall; p+r > 0 {
+			merged.ContextF1 = 2 * p * r / (p + r)
+		}
+		return merged, nil
 	}
 
 	// ── Slow path: full raw-table scan (rollups absent or incomplete) ──────
@@ -1845,6 +1860,11 @@ func (s *Store) GetSummary(days int) (*Summary, error) {
 		sum.SavingsPct = float64(sum.TokensSaved) / float64(sum.BaselineTokens) * 100.0
 	}
 	computeValueMultiplier(sum)
+	sum.ContextPrecision = s.GetContextPrecision(days)
+	sum.ContextRecall = s.GetContextRecall(days)
+	if p, r := sum.ContextPrecision, sum.ContextRecall; p+r > 0 {
+		sum.ContextF1 = 2 * p * r / (p + r)
+	}
 
 	return sum, nil
 }
@@ -5557,6 +5577,37 @@ func (s *Store) GetBrainCostStats(days int) ([]BrainCostStat, error) {
 		var stat BrainCostStat
 		stat.DayRange = days
 		if err := rows.Scan(&stat.Model, &stat.Tier, &stat.CostUSD, &stat.Calls); err != nil {
+			continue
+		}
+		result = append(result, stat)
+	}
+	return result, rows.Err()
+}
+
+// TierCostStat holds aggregated brain cost statistics per tier (ingest/guardian/enrich/orchestrate).
+type TierCostStat struct {
+	Tier       string  `json:"tier"`
+	CostUSD    float64 `json:"cost_usd"`
+	Calls      int     `json:"calls"`
+	AvgLatency float64 `json:"avg_latency_ms"`
+}
+
+// GetCostByTier returns brain LLM costs aggregated by tier only.
+// Answers "which brain tier costs the most?" for cost optimization decisions.
+func (s *Store) GetCostByTier(days int) ([]TierCostStat, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	rows, err := s.execer().Query(`
+		SELECT tier, SUM(cost_usd), COUNT(*), AVG(duration_ms)
+		FROM brain_usage WHERE created_at >= ?
+		GROUP BY tier ORDER BY SUM(cost_usd) DESC`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TierCostStat
+	for rows.Next() {
+		var stat TierCostStat
+		if err := rows.Scan(&stat.Tier, &stat.CostUSD, &stat.Calls, &stat.AvgLatency); err != nil {
 			continue
 		}
 		result = append(result, stat)

@@ -1144,6 +1144,7 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 		ev := pulse.IndexEvent{
 			DurationMs:             time.Since(buildStart).Milliseconds(),
 			FilesIndexed:           len(mtimes),
+			TotalRepoFiles:        w.TotalFilesWalked,
 			TotalNodes:             g.NodeCount(),
 			TotalEdges:             g.EdgeCount(),
 			CallSitesResolved:      n,
@@ -2260,10 +2261,13 @@ func createBuiltinEmbedder(cfg *config.Config) embed.Embedder {
 	}
 	modelsDir := filepath.Join(homeDir, ".synapses", "models")
 	logutil.Info("synapses: memory embeddings via builtin nomic-embed-text-v1.5\n")
+	var e *embed.BuiltinEmbedder
 	if cfg.EmbedPoolSize > 0 {
-		return embed.NewBuiltinEmbedderWithPoolSize(modelsDir, cfg.EmbedPoolSize)
+		e = embed.NewBuiltinEmbedderWithPoolSize(modelsDir, cfg.EmbedPoolSize)
+	} else {
+		e = embed.NewBuiltinEmbedder(modelsDir)
 	}
-	return embed.NewBuiltinEmbedder(modelsDir)
+	return e
 }
 
 // detectEmbedMode probes localhost:11434 for a running Ollama instance.

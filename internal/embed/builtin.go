@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gomlx/go-huggingface/hub"
 	hugot "github.com/knights-analytics/hugot"
@@ -123,6 +124,9 @@ type BuiltinEmbedder struct {
 	// P8-11: optional callback for model download lifecycle events.
 	// eventType is "download_start" or "download_complete".
 	OnModelEvent func(eventType string)
+
+	// PoolContentions counts how many times Embed() blocked waiting for a pool slot.
+	PoolContentions atomic.Int64
 
 	// onnxFile is the selected ONNX model filename, set during ensureModel().
 	// GPU → "model.onnx" (fp32); CPU → "model_quantized.onnx".
@@ -532,14 +536,22 @@ func (b *BuiltinEmbedder) Embed(ctx context.Context, text string) ([]float32, er
 
 	// Acquire a pipeline slot from the pool (bounded concurrency).
 	// Respects context cancellation and embedder shutdown.
+	// Try non-blocking first to detect contention.
 	var slot *pipelineSlot
 	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-b.done:
-		return nil, fmt.Errorf("builtin embedder: closed")
 	case slot = <-pool:
-		// Got a slot — proceed with inference.
+		// Got a slot immediately — no contention.
+	default:
+		// All slots busy — record contention and block.
+		b.PoolContentions.Add(1)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-b.done:
+			return nil, fmt.Errorf("builtin embedder: closed")
+		case slot = <-pool:
+			// Got a slot after waiting.
+		}
 	}
 
 	// Guarantee slot return even if RunPipeline panics (e.g., corrupted

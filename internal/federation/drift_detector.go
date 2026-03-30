@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -23,6 +24,11 @@ type DriftDetector struct {
 	mu        sync.RWMutex
 	cache     map[string][]DriftAlert // alias → cached drift results (session-level)
 	cacheTime map[string]time.Time    // alias → when the cache entry was created
+
+	// Observability counters (atomic, lock-free reads).
+	CacheHits   atomic.Int64 // drift cache hits (skipped re-check)
+	CacheMisses atomic.Int64 // drift cache misses (ran full check)
+	AlertsFound atomic.Int64 // total drift alerts detected
 }
 
 func newDriftDetector(r *Resolver) *DriftDetector {
@@ -78,13 +84,16 @@ func (d *DriftDetector) CheckDrift(ctx context.Context, localStore *store.Store)
 			}
 			d.mu.Unlock()
 			if hasCached {
+				d.CacheHits.Add(1)
 				resultsMu.Lock()
 				allAlerts = append(allAlerts, cached...)
 				resultsMu.Unlock()
 				return nil
 			}
 
+			d.CacheMisses.Add(1)
 			alerts := d.checkDriftForEntry(qctx, e, localStore)
+			d.AlertsFound.Add(int64(len(alerts)))
 
 			d.mu.Lock()
 			d.cache[e.Alias] = alerts

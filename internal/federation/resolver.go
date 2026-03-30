@@ -646,6 +646,11 @@ func (r *Resolver) CheckDrift(ctx context.Context, localStore *store.Store) []Dr
 	return r.drift.CheckDrift(ctx, localStore)
 }
 
+// DriftCacheStats returns drift detector cache hit/miss/alert counters.
+func (r *Resolver) DriftCacheStats() (cacheHits, cacheMisses, alertsFound int64) {
+	return r.drift.CacheHits.Load(), r.drift.CacheMisses.Load(), r.drift.AlertsFound.Load()
+}
+
 // EntityExists delegates to CrossProjectSearch.
 func (r *Resolver) EntityExists(ctx context.Context, alias string, entityName string) bool {
 	return r.search.EntityExists(ctx, alias, entityName)

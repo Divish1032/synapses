@@ -22,6 +22,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -50,7 +51,8 @@ const (
 // ctx is the daemon lifecycle context — cancelled on daemon shutdown.
 // embedder and st must both be non-nil (callers should guard before calling).
 // g may be nil — in that case post-embed discovery is skipped.
-func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.Store, g *graph.Graph) {
+func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.Store, g *graph.Graph, pc *pulse.Client) {
+	start := time.Now()
 	ids, err := st.GetNodesWithoutEmbeddings(nodeEmbedBatchSize)
 	if err != nil {
 		logutil.Warn("synapses/watcher: node embed pass: list nodes: %v\n", err)
@@ -70,6 +72,7 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 
 	model := embedder.Model()
 	embedded := 0
+	embedErrors := 0
 
 	for _, nodeID := range ids {
 		// Respect daemon shutdown.
@@ -89,6 +92,7 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 		cancel()
 		if embedErr != nil {
 			logutil.Warn("synapses/watcher: node embed: embed %s: %v\n", nodeID, embedErr)
+			embedErrors++
 			continue
 		}
 		if len(vec) == 0 {
@@ -97,6 +101,7 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 
 		if upsertErr := st.UpsertEmbedding(nodeID, model, vec); upsertErr != nil {
 			logutil.Warn("synapses/watcher: node embed: upsert %s: %v\n", nodeID, upsertErr)
+			embedErrors++
 			continue
 		}
 		embedded++
@@ -113,6 +118,24 @@ func runNodeEmbedPass(ctx context.Context, embedder embed.Embedder, st *store.St
 		logutil.Info("synapses/watcher: node embed pass complete: %d nodes embedded\n", embedded)
 		// Rebuild the HNSW node index so new vectors are immediately searchable.
 		st.RebuildNodeHNSW()
+	}
+
+	// Emit pulse event for the node embed pass.
+	if pc != nil {
+		var poolContention int
+		if be, ok := embedder.(*embed.BuiltinEmbedder); ok {
+			poolContention = int(be.PoolContentions.Load())
+		}
+		pc.RecordEmbeddingEvent(pulse.EmbeddingEvent{
+			Trigger:             "node_embed_pass",
+			Count:               embedded,
+			Errors:              embedErrors,
+			DurationMs:          time.Since(start).Milliseconds(),
+			Model:               model,
+			Success:             embedErrors == 0,
+			StaleCount:          len(ids) - embedded - embedErrors,
+			EmbedPoolContention: poolContention,
+		})
 	}
 
 	// Post-embed discovery: run semantic linking passes now that HNSW is populated.

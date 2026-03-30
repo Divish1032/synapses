@@ -293,7 +293,7 @@ type GuardEvent struct {
 
 // MemoryOperationEvent tracks memory(action=search) hits/misses and memory writes.
 type MemoryOperationEvent struct {
-	Operation   string `json:"operation"` // "recall_hit" | "recall_miss" | "write" | "anchor_invalidated" | "cross_session_hit" | "invalidated_cascade"
+	Operation   string `json:"operation"` // "recall_hit" | "recall_miss" | "write" | "anchor_invalidated" | "cross_session_hit" | "invalidation_cascade"
 	Tier        string `json:"tier"`      // "episodic" | "entity" | "project"
 	Source      string `json:"source"`    // "manual" | "auto"
 	ResultCount int    `json:"result_count"`
@@ -363,6 +363,9 @@ type IndexEvent struct {
 	HeritageEdgesCreated int `json:"heritage_edges_created,omitempty"`
 	// P9-6: implements edges created during this index run.
 	ImplementsEdgesCreated int `json:"implements_edges_created,omitempty"`
+	// TotalRepoFiles is the total number of files in the repo (before parser
+	// filtering). Used with FilesIndexed to compute "% of codebase indexed".
+	TotalRepoFiles int `json:"total_repo_files,omitempty"`
 }
 
 // SearchEvent records a search tool call for analytics (Bug 57 / Task P4-8).

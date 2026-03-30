@@ -31,6 +31,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/logutil"
@@ -148,15 +149,17 @@ func (q *deferredQueue) add(t *brainTask) bool {
 //	HealthRed    → none (all tasks stay in queue)
 //
 // Expired tasks are silently removed regardless of health.
-func (q *deferredQueue) drain(health HealthLevel) []*brainTask {
+func (q *deferredQueue) drain(health HealthLevel) ([]*brainTask, int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	var run []*brainTask
 	var keep []*brainTask
 
+	expired := 0
 	for _, t := range q.tasks {
 		if t.isExpired() {
+			expired++
 			continue // silently drop expired tasks
 		}
 		switch health {
@@ -182,7 +185,7 @@ func (q *deferredQueue) drain(health HealthLevel) []*brainTask {
 	})
 
 	q.tasks = keep
-	return run
+	return run, expired
 }
 
 // size returns the current number of tasks in the queue.
@@ -221,6 +224,11 @@ type Scheduler struct {
 	// prevHealth tracks the last observed health level so drainLoop can detect
 	// Yellow/Red → Green transitions and trigger an immediate drain.
 	prevHealth HealthLevel
+
+	// Observability counters (atomic, lock-free reads).
+	drops      atomic.Int64 // tasks dropped due to full queue
+	ttlExpires atomic.Int64 // tasks expired via TTL
+	executions atomic.Int64 // tasks successfully executed
 }
 
 // NewScheduler creates a Scheduler. Call Start() before submitting tasks.
@@ -306,6 +314,7 @@ func (s *Scheduler) Submit(key string, priority TaskPriority, fn func()) {
 	}
 
 	if !s.queue.add(t) {
+		s.drops.Add(1)
 		return // queue full and nothing to evict; task dropped
 	}
 
@@ -349,6 +358,24 @@ func (s *Scheduler) ShouldDegrade() bool {
 // Intended for observability and testing.
 func (s *Scheduler) QueueSize() int {
 	return s.queue.size()
+}
+
+// SchedulerStats holds scheduler observability counters.
+type SchedulerStats struct {
+	QueueDepth int   `json:"queue_depth"`
+	Drops      int64 `json:"drops"`
+	TTLExpires int64 `json:"ttl_expires"`
+	Executions int64 `json:"executions"`
+}
+
+// Stats returns a snapshot of scheduler health counters.
+func (s *Scheduler) Stats() SchedulerStats {
+	return SchedulerStats{
+		QueueDepth: s.queue.size(),
+		Drops:      s.drops.Load(),
+		TTLExpires: s.ttlExpires.Load(),
+		Executions: s.executions.Load(),
+	}
 }
 
 // drainLoop is the single background goroutine. It wakes on an explicit signal
@@ -413,18 +440,22 @@ func (s *Scheduler) runEligible() {
 		// so that task closures use the correct OllamaClient tier.
 	}
 
-	tasks := s.queue.drain(health)
+	tasks, ttlExpired := s.queue.drain(health)
+	s.ttlExpires.Add(int64(ttlExpired))
 	for _, t := range tasks {
 		safeSchedulerRun(t.key, t.fn)
+		s.executions.Add(1)
 	}
 
 	// P2 piggyback: when we loaded a model for P1 tasks under Yellow health,
 	// the model is now resident. Drain P2 tasks immediately while the model is
 	// still warm — this avoids waiting for the next Green tick or keep_alive expiry.
 	if health == HealthYellow && len(tasks) > 0 && s.queue.size() > 0 {
-		piggyback := s.queue.drain(HealthGreen) // Green eligibility → includes P2
+		piggyback, ttlExpired2 := s.queue.drain(HealthGreen) // Green eligibility → includes P2
+		s.ttlExpires.Add(int64(ttlExpired2))
 		for _, t := range piggyback {
 			safeSchedulerRun(t.key, t.fn)
+			s.executions.Add(1)
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +32,11 @@ type subgraphCache struct {
 	entries  map[string]*cacheEntry
 	order    *list.List               // doubly-linked list for LRU; Back = most-recently-used
 	elements map[string]*list.Element // key → list element for O(1) lookup
+
+	// Observability counters (atomic, lock-free reads).
+	hits      atomic.Int64
+	misses    atomic.Int64
+	evictions atomic.Int64
 }
 
 func newSubgraphCache() *subgraphCache {
@@ -137,6 +143,7 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 	c.mu.RUnlock()
 
 	if !ok {
+		c.misses.Add(1)
 		return nil, false
 	}
 	if expired {
@@ -146,8 +153,10 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 		if e2, still := c.entries[key]; still && time.Now().After(e2.expiresAt) {
 			delete(c.entries, key)
 			c.removeFromOrder(key)
+			c.evictions.Add(1)
 		}
 		c.mu.Unlock()
+		c.misses.Add(1)
 		return nil, false
 	}
 	c.mu.Lock()
@@ -159,8 +168,10 @@ func (c *subgraphCache) get(rootID NodeID, cfg CarveConfig, fingerprint string) 
 	}
 	c.mu.Unlock()
 	if !still {
+		c.misses.Add(1)
 		return nil, false
 	}
+	c.hits.Add(1)
 	return e2.sub, true
 }
 
@@ -183,6 +194,7 @@ func (c *subgraphCache) put(rootID NodeID, cfg CarveConfig, fingerprint string, 
 			c.order.Remove(front)
 			delete(c.elements, lru)
 			delete(c.entries, lru)
+			c.evictions.Add(1)
 		}
 		elem := c.order.PushBack(key)
 		c.elements[key] = elem
@@ -243,6 +255,27 @@ func (c *subgraphCache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)
+}
+
+// CacheStats holds subgraph cache observability counters.
+type CacheStats struct {
+	Hits      int64
+	Misses    int64
+	Evictions int64
+	Size      int
+}
+
+// Stats returns a snapshot of cache hit/miss/eviction counters and current size.
+func (c *subgraphCache) Stats() CacheStats {
+	c.mu.RLock()
+	size := len(c.entries)
+	c.mu.RUnlock()
+	return CacheStats{
+		Hits:      c.hits.Load(),
+		Misses:    c.misses.Load(),
+		Evictions: c.evictions.Load(),
+		Size:      size,
+	}
 }
 
 // removeFromOrder removes key from the LRU list. O(1).
