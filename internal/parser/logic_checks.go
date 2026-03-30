@@ -94,7 +94,7 @@ func runGoLogicChecks(filePath string, src []byte) []LogicWarning {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "function_declaration", "method_declaration":
 			body := child.ChildByFieldName("body")
 			if body.IsNull() {
@@ -118,7 +118,7 @@ func runGoLogicChecks(filePath string, src []byte) []LogicWarning {
 func checkClosureCleanup(filePath string, body sitter.Node, src []byte) []LogicWarning {
 	var warnings []LogicWarning
 	walkASTNoFuncLit(body, func(n sitter.Node) {
-		if n.Type() != "func_literal" {
+		if nodeType(n) != "func_literal" {
 			return
 		}
 		innerBody := n.ChildByFieldName("body")
@@ -148,7 +148,7 @@ func checkFunctionBody(filePath string, body sitter.Node, src []byte) []LogicWar
 func checkZeroValueIdentifier(filePath string, body sitter.Node, src []byte) []LogicWarning {
 	var warnings []LogicWarning
 	walkAST(body, func(n sitter.Node) {
-		if n.Type() != "call_expression" {
+		if nodeType(n) != "call_expression" {
 			return
 		}
 		fnNode := n.ChildByFieldName("function")
@@ -162,7 +162,7 @@ func checkZeroValueIdentifier(filePath string, body sitter.Node, src []byte) []L
 		}
 		for j := uint32(0); j < argsNode.ChildCount(); j++ {
 			arg := argsNode.Child(j)
-			if !arg.IsNull() && arg.Type() == "int_literal" && nodeText(arg, src) == "0" {
+			if !arg.IsNull() && nodeType(arg) == "int_literal" && nodeText(arg, src) == "0" {
 				warnings = append(warnings, LogicWarning{
 					Check:    "zero_value_id",
 					File:     filePath,
@@ -199,7 +199,7 @@ func checkMissingCleanup(filePath string, body sitter.Node, src []byte) []LogicW
 
 	// Walk 1: assignments whose RHS contains an acquire call.
 	walkASTNoFuncLit(body, func(n sitter.Node) {
-		if n.Type() != "short_var_declaration" && n.Type() != "assignment_statement" {
+		if nodeType(n) != "short_var_declaration" && nodeType(n) != "assignment_statement" {
 			return
 		}
 		right := n.ChildByFieldName("right")
@@ -211,7 +211,7 @@ func checkMissingCleanup(filePath string, body sitter.Node, src []byte) []LogicW
 			if !foundCall.IsNull() {
 				return
 			}
-			if rn.Type() != "call_expression" {
+			if nodeType(rn) != "call_expression" {
 				return
 			}
 			fn := rn.ChildByFieldName("function")
@@ -240,7 +240,7 @@ func checkMissingCleanup(filePath string, body sitter.Node, src []byte) []LogicW
 	// Walk 2: bare call_expressions -- method-style acquires (mu.Lock()) and
 	// unassigned opens. Skips lines already captured in Walk 1.
 	walkASTNoFuncLit(body, func(n sitter.Node) {
-		if n.Type() != "call_expression" {
+		if nodeType(n) != "call_expression" {
 			return
 		}
 		fn := n.ChildByFieldName("function")
@@ -256,7 +256,7 @@ func checkMissingCleanup(filePath string, body sitter.Node, src []byte) []LogicW
 			return
 		}
 		varName := ""
-		if fn.Type() == "selector_expression" {
+		if nodeType(fn) == "selector_expression" {
 			if operand := fn.ChildByFieldName("operand"); !operand.IsNull() {
 				varName = nodeText(operand, src)
 			}
@@ -271,14 +271,14 @@ func checkMissingCleanup(filePath string, body sitter.Node, src []byte) []LogicW
 	varsCleaned := make(map[string]bool)
 	anyCleanupSeen := make(map[string]bool)
 	walkAST(body, func(n sitter.Node) {
-		if n.Type() != "call_expression" {
+		if nodeType(n) != "call_expression" {
 			return
 		}
 		fn := n.ChildByFieldName("function")
 		if fn.IsNull() {
 			return
 		}
-		if fn.Type() == "selector_expression" {
+		if nodeType(fn) == "selector_expression" {
 			operand := fn.ChildByFieldName("operand")
 			field := fn.ChildByFieldName("field")
 			if !operand.IsNull() && !field.IsNull() {
@@ -325,7 +325,7 @@ func checkMissingCleanup(filePath string, body sitter.Node, src []byte) []LogicW
 func checkPathExpansion(filePath string, body sitter.Node, src []byte) []LogicWarning {
 	var warnings []LogicWarning
 	walkAST(body, func(n sitter.Node) {
-		if n.Type() != "call_expression" {
+		if nodeType(n) != "call_expression" {
 			return
 		}
 		fnNode := n.ChildByFieldName("function")
@@ -342,7 +342,7 @@ func checkPathExpansion(filePath string, body sitter.Node, src []byte) []LogicWa
 			if arg.IsNull() {
 				continue
 			}
-			if arg.Type() == "interpreted_string_literal" || arg.Type() == "raw_string_literal" {
+			if nodeType(arg) == "interpreted_string_literal" || nodeType(arg) == "raw_string_literal" {
 				text := nodeText(arg, src)
 				if strings.Contains(text, "~/") || strings.Contains(text, "%USERPROFILE%") {
 					warnings = append(warnings, LogicWarning{
@@ -368,7 +368,7 @@ func checkNilMethodCall(filePath string, body sitter.Node, src []byte) []LogicWa
 		if n.IsNull() {
 			continue
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "short_var_declaration", "assignment_statement":
 			right := n.ChildByFieldName("right")
 			if right.IsNull() {
@@ -411,15 +411,15 @@ func checkNilMethodCall(filePath string, body sitter.Node, src []byte) []LogicWa
 
 	var warnings []LogicWarning
 	walkAST(body, func(n sitter.Node) {
-		if n.Type() != "call_expression" {
+		if nodeType(n) != "call_expression" {
 			return
 		}
 		fnNode := n.ChildByFieldName("function")
-		if fnNode.IsNull() || fnNode.Type() != "selector_expression" {
+		if fnNode.IsNull() || nodeType(fnNode) != "selector_expression" {
 			return
 		}
 		operand := fnNode.ChildByFieldName("operand")
-		if operand.IsNull() || operand.Type() != "identifier" {
+		if operand.IsNull() || nodeType(operand) != "identifier" {
 			return
 		}
 		varName := nodeText(operand, src)
@@ -451,12 +451,12 @@ func checkNilMethodCall(filePath string, body sitter.Node, src []byte) []LogicWa
 func checkConcurrentMapWrite(filePath string, body sitter.Node, src []byte) []LogicWarning {
 	var warnings []LogicWarning
 	walkAST(body, func(n sitter.Node) {
-		if n.Type() != "go_statement" {
+		if nodeType(n) != "go_statement" {
 			return
 		}
 		hasSyncPrimitive := false
 		walkAST(n, func(inner sitter.Node) {
-			if inner.Type() == "call_expression" {
+			if nodeType(inner) == "call_expression" {
 				fnNode := inner.ChildByFieldName("function")
 				if !fnNode.IsNull() {
 					callName := lastIdentifier(fnNode, src)
@@ -472,7 +472,7 @@ func checkConcurrentMapWrite(filePath string, body sitter.Node, src []byte) []Lo
 		}
 
 		walkAST(n, func(inner sitter.Node) {
-			if inner.Type() != "assignment_statement" {
+			if nodeType(inner) != "assignment_statement" {
 				return
 			}
 			left := inner.ChildByFieldName("left")
@@ -481,7 +481,7 @@ func checkConcurrentMapWrite(filePath string, body sitter.Node, src []byte) []Lo
 			}
 			hasMapWrite := false
 			walkAST(left, func(lhs sitter.Node) {
-				if lhs.Type() == "index_expression" && !isSliceIndex(lhs, src) {
+				if nodeType(lhs) == "index_expression" && !isSliceIndex(lhs, src) {
 					hasMapWrite = true
 				}
 			})
@@ -571,7 +571,7 @@ func walkASTNoFuncLit(n sitter.Node, visit func(sitter.Node)) {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "func_literal" {
+		if nodeType(child) == "func_literal" {
 			visit(child) // visit the closure node itself but do not recurse into it
 			continue
 		}
@@ -612,7 +612,7 @@ func looksLikeIntegerExpr(n sitter.Node, src []byte) bool {
 	if n.IsNull() {
 		return false
 	}
-	switch n.Type() {
+	switch nodeType(n) {
 	case "int_literal":
 		return true
 
@@ -667,7 +667,7 @@ func nodeText(n sitter.Node, src []byte) string {
 
 // lastIdentifier extracts the rightmost identifier from a function expression.
 func lastIdentifier(fnNode sitter.Node, src []byte) string {
-	switch fnNode.Type() {
+	switch nodeType(fnNode) {
 	case "selector_expression":
 		field := fnNode.ChildByFieldName("field")
 		if !field.IsNull() {

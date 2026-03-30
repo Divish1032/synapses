@@ -88,12 +88,12 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 	// First pass: create all nodes and record resource nodeIDs.
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		block := body.Child(i)
-		if block.IsNull() || block.Type() != "block" {
+		if block.IsNull() || nodeType(block) != "block" {
 			continue
 		}
 
 		blockTypeNode := block.Child(0)
-		if blockTypeNode.IsNull() || blockTypeNode.Type() != "identifier" {
+		if blockTypeNode.IsNull() || nodeType(blockTypeNode) != "identifier" {
 			continue
 		}
 		blockType := string(src[blockTypeNode.StartByte():blockTypeNode.EndByte()])
@@ -234,11 +234,11 @@ func (p *TerraformParser) Parse(g *graph.Graph, filePath string, src []byte) err
 			}
 			for j := uint32(0); j < bodyNode.ChildCount(); j++ {
 				attr := bodyNode.Child(j)
-				if attr.IsNull() || attr.Type() != "attribute" {
+				if attr.IsNull() || nodeType(attr) != "attribute" {
 					continue
 				}
 				keyNode := attr.Child(0)
-				if keyNode.IsNull() || keyNode.Type() != "identifier" {
+				if keyNode.IsNull() || nodeType(keyNode) != "identifier" {
 					continue
 				}
 				key := string(src[keyNode.StartByte():keyNode.EndByte()])
@@ -312,7 +312,7 @@ func (p *TerraformParser) collectAndEmitRefs(
 func tfFindChildNode(node sitter.Node, typ string) sitter.Node {
 	for i := uint32(0); i < node.ChildCount(); i++ {
 		child := node.Child(i)
-		if !child.IsNull() && child.Type() == typ {
+		if !child.IsNull() && nodeType(child) == typ {
 			return child
 		}
 	}
@@ -363,7 +363,7 @@ func tfWalkRefs(node sitter.Node, src []byte, refs map[string]bool) {
 		return
 	}
 
-	if node.Type() == "expression" {
+	if nodeType(node) == "expression" {
 		var varExpr sitter.Node
 		var getAttrs []sitter.Node
 
@@ -372,7 +372,7 @@ func tfWalkRefs(node sitter.Node, src []byte, refs map[string]bool) {
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "variable_expr":
 				varExpr = child
 			case "get_attr":
@@ -404,7 +404,7 @@ func tfWalkRefs(node sitter.Node, src []byte, refs map[string]bool) {
 func tfGetAttrNameNode(src []byte, getAttr sitter.Node) string {
 	for i := uint32(0); i < getAttr.ChildCount(); i++ {
 		child := getAttr.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			return string(src[child.StartByte():child.EndByte()])
 		}
 	}

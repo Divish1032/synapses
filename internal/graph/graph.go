@@ -129,6 +129,15 @@ func (g *Graph) Root() string {
 	return g.root
 }
 
+// PoolStats returns string interning statistics, or a zero value if the pool
+// has not been initialised (e.g. the graph was created via New, not loaded).
+func (g *Graph) PoolStats() PoolStats {
+	if g.pool == nil {
+		return PoolStats{}
+	}
+	return g.pool.Stats()
+}
+
 // SetRoot stores the absolute path of the repository root.
 func (g *Graph) SetRoot(root string) {
 	g.mu.Lock()
@@ -154,7 +163,7 @@ func (g *Graph) MakeNodeID(file, name string) NodeID {
 			relFile = strings.TrimPrefix(file, prefix)
 		}
 	}
-	return NodeID(fmt.Sprintf("%s::%s::%s", g.repoID, relFile, name))
+	return NodeID(g.repoID + "::" + relFile + "::" + name)
 }
 
 // AddNode inserts or replaces a node. If a node with the same ID already
@@ -165,9 +174,28 @@ func (g *Graph) AddNode(n *Node) {
 		n.StableID = generateStableID()
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.nodes[n.ID] = n
 	g.piCache = nil // invalidate ProjectIdentity cache
+	g.mu.Unlock()
+}
+
+// BulkAddNodes inserts multiple nodes in a single lock acquisition.
+// This amortises mutex overhead when a parser emits many nodes at once.
+func (g *Graph) BulkAddNodes(nodes []*Node) {
+	if len(nodes) == 0 {
+		return
+	}
+	for _, n := range nodes {
+		if n.StableID == "" {
+			n.StableID = generateStableID()
+		}
+	}
+	g.mu.Lock()
+	for _, n := range nodes {
+		g.nodes[n.ID] = n
+	}
+	g.piCache = nil
+	g.mu.Unlock()
 }
 
 // AddEdge inserts a directed edge. Both endpoint nodes must already exist;
@@ -176,22 +204,55 @@ func (g *Graph) AddNode(n *Node) {
 // repeated calls from incremental reindex or heuristic passes are idempotent.
 func (g *Graph) AddEdge(e *Edge) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if _, ok := g.nodes[e.From]; !ok {
+		g.mu.Unlock()
 		return
 	}
 	if _, ok := g.nodes[e.To]; !ok {
+		g.mu.Unlock()
 		return
 	}
 	// O(1) dedup: skip if this exact (From, To, Type) triple already exists.
 	ek := edgeKey{From: e.From, To: e.To, Type: e.Type}
 	if _, exists := g.edgeSet[ek]; exists {
+		g.mu.Unlock()
 		return
 	}
 	g.edgeSet[ek] = struct{}{}
 	g.outEdges[e.From] = append(g.outEdges[e.From], e)
 	g.inEdges[e.To] = append(g.inEdges[e.To], e)
 	g.piCache = nil // invalidate ProjectIdentity cache
+	g.mu.Unlock()
+}
+
+// BulkAddEdges inserts multiple edges in a single lock acquisition.
+// Edges whose endpoints are missing are silently skipped.
+func (g *Graph) BulkAddEdges(edges []*Edge) {
+	if len(edges) == 0 {
+		return
+	}
+	g.mu.Lock()
+	dirty := false
+	for _, e := range edges {
+		if _, ok := g.nodes[e.From]; !ok {
+			continue
+		}
+		if _, ok := g.nodes[e.To]; !ok {
+			continue
+		}
+		ek := edgeKey{From: e.From, To: e.To, Type: e.Type}
+		if _, exists := g.edgeSet[ek]; exists {
+			continue
+		}
+		g.edgeSet[ek] = struct{}{}
+		g.outEdges[e.From] = append(g.outEdges[e.From], e)
+		g.inEdges[e.To] = append(g.inEdges[e.To], e)
+		dirty = true
+	}
+	if dirty {
+		g.piCache = nil
+	}
+	g.mu.Unlock()
 }
 
 // RemoveEdge removes a single directed edge. No-op if the edge does not exist.
@@ -270,15 +331,14 @@ func (g *Graph) FindByName(name string) []*Node {
 	}
 
 	// Fallback: linear scan (during parsing before index is ready).
-	lower := strings.ToLower(name)
+	// Use EqualFold to avoid allocating a new lowercase string per node per call.
 	var results []*Node
 	for _, n := range g.nodes {
-		nodeLower := strings.ToLower(n.Name)
-		if nodeLower == lower {
+		if strings.EqualFold(n.Name, name) {
 			results = append(results, n)
 			continue
 		}
-		if dotPos := strings.LastIndex(nodeLower, "."); dotPos >= 0 && nodeLower[dotPos+1:] == lower {
+		if dotPos := strings.LastIndex(n.Name, "."); dotPos >= 0 && strings.EqualFold(n.Name[dotPos+1:], name) {
 			results = append(results, n)
 		}
 	}
@@ -621,14 +681,15 @@ func (g *Graph) DirectNeighbors(id NodeID) []NodeID {
 	for n := range seen {
 		result = append(result, n)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
 	return result
 }
 
 // AddCallSite records an unresolved call site for post-parse resolution.
 func (g *Graph) AddCallSite(cs CallSite) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.callSites = append(g.callSites, cs)
+	g.mu.Unlock()
 }
 
 // InvalidateCache discards all cached subgraph results. Call this after any
@@ -880,6 +941,30 @@ func (g *Graph) AllNodes() []*Node {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// IterateNodes calls fn for every node while holding the read lock.
+// Unlike AllNodes, it does not allocate a snapshot slice or sort.
+// The callback must NOT call any graph mutating methods (deadlock).
+func (g *Graph) IterateNodes(fn func(n *Node)) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, n := range g.nodes {
+		fn(n)
+	}
+}
+
+// IterateEdges calls fn for every edge while holding the read lock.
+// Unlike AllEdges, it does not allocate a snapshot slice or sort.
+// The callback must NOT call any graph mutating methods (deadlock).
+func (g *Graph) IterateEdges(fn func(e *Edge)) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, edges := range g.outEdges {
+		for _, e := range edges {
+			fn(e)
+		}
+	}
 }
 
 // FindByType returns all nodes of the given NodeType.

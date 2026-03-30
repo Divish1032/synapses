@@ -37,7 +37,7 @@ func extractGroovyDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_definition":
 			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -109,13 +109,13 @@ func (p *GroovyParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "groovy_package" {
+		if nodeType(n) == "groovy_package" {
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "qualified_name" {
+				if nodeType(child) == "qualified_name" {
 					pkgName := string(src[child.StartByte():child.EndByte()])
 					if pkgName != "" {
 						pkgID := g.MakeNodeID(pkgName, pkgName)
@@ -175,7 +175,7 @@ func (p *GroovyParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_definition":
 			nameNode := firstChildOfType(n, "identifier")
 			if nameNode.IsNull() {

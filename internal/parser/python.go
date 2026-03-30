@@ -21,7 +21,7 @@ func extractPythonDeclInfo(root sitter.Node, src []byte, lines []string) map[str
 		if n.IsNull() || depth > 8 {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_definition":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -69,7 +69,7 @@ func extractPythonDeclInfo(root sitter.Node, src []byte, lines []string) map[str
 				if inner.IsNull() {
 					continue
 				}
-				if inner.Type() == "function_definition" || inner.Type() == "class_definition" {
+				if nodeType(inner) == "function_definition" || nodeType(inner) == "class_definition" {
 					walk(inner, enclosingClass, depth+1)
 				}
 			}
@@ -247,10 +247,10 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 			return
 		}
 		// Only look at top-level: children of the module root.
-		if n.Type() == "expression_statement" {
+		if nodeType(n) == "expression_statement" {
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child.IsNull() || child.Type() != "assignment" {
+				if child.IsNull() || nodeType(child) != "assignment" {
 					continue
 				}
 				lhs := child.ChildByFieldName("left")
@@ -258,7 +258,7 @@ func (p *PythonParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 					continue
 				}
 				var name string
-				if lhs.Type() == "identifier" {
+				if nodeType(lhs) == "identifier" {
 					name = string(src[lhs.StartByte():lhs.EndByte()])
 				}
 				if name == "" || !isPythonAllCaps(name) {
@@ -380,7 +380,7 @@ func (p *PythonParser) extractFunctionsAndMethods(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_definition":
 			className := ""
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
@@ -399,7 +399,7 @@ func (p *PythonParser) extractFunctionsAndMethods(
 			if enclosingClass != "" {
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					assign := n.Child(i)
-					if assign.IsNull() || assign.Type() != "assignment" {
+					if assign.IsNull() || nodeType(assign) != "assignment" {
 						continue
 					}
 					// Must have a "type" child to be a type-annotated field.
@@ -438,7 +438,7 @@ func (p *PythonParser) extractFunctionsAndMethods(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "decorator" {
+				if nodeType(child) == "decorator" {
 					decText := strings.TrimPrefix(strings.TrimSpace(string(src[child.StartByte():child.EndByte()])), "@")
 					if idx := strings.IndexByte(decText, '('); idx >= 0 {
 						decText = decText[:idx]
@@ -451,9 +451,9 @@ func (p *PythonParser) extractFunctionsAndMethods(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "function_definition" {
+				if nodeType(child) == "function_definition" {
 					emitFunc(child, enclosingClass, decorators)
-				} else if child.Type() == "class_definition" {
+				} else if nodeType(child) == "class_definition" {
 					walk(child, enclosingClass)
 				}
 			}
@@ -495,7 +495,7 @@ func collectPythonCallSites(g *graph.Graph, lang *sitter.Language, root sitter.N
 			if fn.IsNull() {
 				return "", ""
 			}
-			switch fn.Type() {
+			switch nodeType(fn) {
 			case "identifier":
 				return "", string(src[fn.StartByte():fn.EndByte()])
 			case "attribute":
@@ -530,16 +530,16 @@ func bareRelImportWalk(g *graph.Graph, root sitter.Node, src []byte, filePath st
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "import_from_statement" {
+		if nodeType(n) == "import_from_statement" {
 			modName := n.ChildByFieldName("module_name")
-			if modName.IsNull() || modName.Type() != "relative_import" {
+			if modName.IsNull() || nodeType(modName) != "relative_import" {
 				return
 			}
 			// Check that the relative_import has NO dotted_name child
 			// (i.e., it's just dots like "." or "..").
 			hasDottedName := false
 			for i := uint32(0); i < modName.ChildCount(); i++ {
-				if modName.Child(i).Type() == "dotted_name" {
+				if nodeType(modName.Child(i)) == "dotted_name" {
 					hasDottedName = true
 					break
 				}
@@ -559,7 +559,7 @@ func bareRelImportWalk(g *graph.Graph, root sitter.Node, src []byte, filePath st
 				if nn.IsNull() {
 					return
 				}
-				if nn.Type() == "dotted_name" || nn.Type() == "identifier" {
+				if nodeType(nn) == "dotted_name" || nodeType(nn) == "identifier" {
 					importName := string(src[nn.StartByte():nn.EndByte()])
 					if importName == "" {
 						return
@@ -600,7 +600,7 @@ func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node,
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "assignment":
 			left := n.ChildByFieldName("left")
 			right := n.ChildByFieldName("right")
@@ -610,7 +610,7 @@ func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node,
 				goto recurse
 			}
 
-			if left.Type() == "identifier" {
+			if nodeType(left) == "identifier" {
 				varName := string(src[left.StartByte():left.EndByte()])
 				if varName == "self" || varName == "cls" {
 					goto recurse
@@ -626,9 +626,9 @@ func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node,
 				}
 
 				// Pattern 2: obj = TypeName(...) — constructor call
-				if !right.IsNull() && right.Type() == "call" {
+				if !right.IsNull() && nodeType(right) == "call" {
 					fn := right.ChildByFieldName("function")
-					if !fn.IsNull() && fn.Type() == "identifier" {
+					if !fn.IsNull() && nodeType(fn) == "identifier" {
 						typeName := string(src[fn.StartByte():fn.EndByte()])
 						// Only record if it looks like a class name (starts with uppercase).
 						if typeName != "" && typeName[0] >= 'A' && typeName[0] <= 'Z' {
@@ -637,22 +637,22 @@ func collectPythonVarTypes(g *graph.Graph, _ *sitter.Language, root sitter.Node,
 					}
 				}
 
-			} else if left.Type() == "attribute" {
+			} else if nodeType(left) == "attribute" {
 				// Pattern 3: self.attr = ClassName(...) — store "self.attr" → ClassName.
 				// The call-site extractor produces PkgAlias="self.attr" for self.attr.method(),
 				// so keying by the full attribute text enables cross-file resolution.
 				obj := left.ChildByFieldName("object")
-				if obj.IsNull() || obj.Type() != "identifier" {
+				if obj.IsNull() || nodeType(obj) != "identifier" {
 					goto recurse
 				}
 				if string(src[obj.StartByte():obj.EndByte()]) != "self" {
 					goto recurse
 				}
-				if right.IsNull() || right.Type() != "call" {
+				if right.IsNull() || nodeType(right) != "call" {
 					goto recurse
 				}
 				fn := right.ChildByFieldName("function")
-				if fn.IsNull() || fn.Type() != "identifier" {
+				if fn.IsNull() || nodeType(fn) != "identifier" {
 					goto recurse
 				}
 				typeName := string(src[fn.StartByte():fn.EndByte()])
@@ -690,7 +690,7 @@ func collectPythonParamTypes(g *graph.Graph, params sitter.Node, src []byte, fil
 		if param.IsNull() {
 			continue
 		}
-		if param.Type() != "typed_parameter" && param.Type() != "typed_default_parameter" {
+		if nodeType(param) != "typed_parameter" && nodeType(param) != "typed_default_parameter" {
 			continue
 		}
 		// The type annotation is in the "type" field.
@@ -708,7 +708,7 @@ func collectPythonParamTypes(g *graph.Graph, params sitter.Node, src []byte, fil
 			if child.IsNull() {
 				continue
 			}
-			if child.Type() == "identifier" {
+			if nodeType(child) == "identifier" {
 				varName := string(src[child.StartByte():child.EndByte()])
 				if varName != "self" && varName != "cls" && varName != "" {
 					g.AddVarType(filePath, varName, typeName)
@@ -742,7 +742,7 @@ func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			return string(src[child.StartByte():child.EndByte()])
 
@@ -792,7 +792,7 @@ func extractPythonTypeName(typeNode sitter.Node, src []byte) string {
 func extractGenericOuterName(genericNode sitter.Node, src []byte) string {
 	for i := uint32(0); i < genericNode.ChildCount(); i++ {
 		child := genericNode.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			return string(src[child.StartByte():child.EndByte()])
 		}
 	}
@@ -806,20 +806,20 @@ func extractGenericOuterName(genericNode sitter.Node, src []byte) string {
 func extractGenericNthType(genericNode sitter.Node, src []byte, idx int) string {
 	for i := uint32(0); i < genericNode.ChildCount(); i++ {
 		tp := genericNode.Child(i)
-		if tp.IsNull() || tp.Type() != "type_parameter" {
+		if tp.IsNull() || nodeType(tp) != "type_parameter" {
 			continue
 		}
 		count := 0
 		for j := uint32(0); j < tp.ChildCount(); j++ {
 			typeChild := tp.Child(j)
-			if typeChild.IsNull() || typeChild.Type() != "type" {
+			if typeChild.IsNull() || nodeType(typeChild) != "type" {
 				continue
 			}
 			if count == idx {
 				// Extract identifier from this type node.
 				for k := uint32(0); k < typeChild.ChildCount(); k++ {
 					id := typeChild.Child(k)
-					if id.IsNull() || id.Type() != "identifier" {
+					if id.IsNull() || nodeType(id) != "identifier" {
 						continue
 					}
 					name := string(src[id.StartByte():id.EndByte()])
@@ -840,17 +840,17 @@ func extractGenericNthType(genericNode sitter.Node, src []byte, idx int) string 
 func extractUnionInnerType(genericNode sitter.Node, src []byte) string {
 	for i := uint32(0); i < genericNode.ChildCount(); i++ {
 		tp := genericNode.Child(i)
-		if tp.IsNull() || tp.Type() != "type_parameter" {
+		if tp.IsNull() || nodeType(tp) != "type_parameter" {
 			continue
 		}
 		for j := uint32(0); j < tp.ChildCount(); j++ {
 			typeChild := tp.Child(j)
-			if typeChild.IsNull() || typeChild.Type() != "type" {
+			if typeChild.IsNull() || nodeType(typeChild) != "type" {
 				continue
 			}
 			for k := uint32(0); k < typeChild.ChildCount(); k++ {
 				id := typeChild.Child(k)
-				if id.IsNull() || id.Type() != "identifier" {
+				if id.IsNull() || nodeType(id) != "identifier" {
 					continue
 				}
 				name := string(src[id.StartByte():id.EndByte()])
@@ -874,7 +874,7 @@ func extractPEP604Type(binop sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			name := string(src[child.StartByte():child.EndByte()])
 			if name != "None" && name != "" && name[0] >= 'A' && name[0] <= 'Z' {

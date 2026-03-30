@@ -21,7 +21,7 @@ func isSolidityExported(n sitter.Node, src []byte) bool {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "visibility" {
+		if nodeType(child) == "visibility" {
 			vis := string(src[child.StartByte():child.EndByte()])
 			return vis == "public" || vis == "external"
 		}
@@ -41,7 +41,7 @@ func extractSolidityDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() || depth > 10 {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "contract_declaration", "interface_declaration", "library_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -262,7 +262,7 @@ func (p *SolidityParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "contract_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -593,7 +593,7 @@ func (p *SolidityParser) extractImport(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "string" || child.Type() == "string_literal" {
+		if nodeType(child) == "string" || nodeType(child) == "string_literal" {
 			raw := string(src[child.StartByte():child.EndByte()])
 			// Strip quotes.
 			importPath := strings.Trim(raw, "\"'")
@@ -612,13 +612,13 @@ func (p *SolidityParser) extractImport(
 			return
 		}
 		// Also handle source_import or import_clause containing a string.
-		if child.Type() == "source_import" || child.Type() == "import_clause" {
+		if nodeType(child) == "source_import" || nodeType(child) == "import_clause" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
 				if gc.IsNull() {
 					continue
 				}
-				if gc.Type() == "string" || gc.Type() == "string_literal" {
+				if nodeType(gc) == "string" || nodeType(gc) == "string_literal" {
 					raw := string(src[gc.StartByte():gc.EndByte()])
 					importPath := strings.Trim(raw, "\"'")
 					if importPath == "" {
@@ -655,14 +655,14 @@ func (p *SolidityParser) extractInheritance(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "inheritance_specifier" {
+		if nodeType(child) == "inheritance_specifier" {
 			// Walk inside to find user_defined_type or identifier nodes (base contract names).
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				base := child.Child(j)
 				if base.IsNull() {
 					continue
 				}
-				baseType := base.Type()
+				baseType := nodeType(base)
 				if baseType == "user_defined_type" || baseType == "identifier" {
 					baseName := string(src[base.StartByte():base.EndByte()])
 					if baseName == "" {
@@ -705,7 +705,7 @@ func collectSolidityCallSites(g *graph.Graph, root sitter.Node, src []byte, file
 			"call_expression": true,
 		},
 		NameExtractor: func(n sitter.Node, src []byte) string {
-			if n.Type() == "constructor_definition" {
+			if nodeType(n) == "constructor_definition" {
 				return "constructor"
 			}
 			nameNode := n.ChildByFieldName("name")
@@ -729,7 +729,7 @@ func collectSolidityCallSites(g *graph.Graph, root sitter.Node, src []byte, file
 			if fn.IsNull() {
 				return ""
 			}
-			switch fn.Type() {
+			switch nodeType(fn) {
 			case "identifier":
 				return string(src[fn.StartByte():fn.EndByte()])
 			case "member_expression", "member_access":
@@ -739,7 +739,7 @@ func collectSolidityCallSites(g *graph.Graph, root sitter.Node, src []byte, file
 				}
 				if fn.ChildCount() > 0 {
 					last := fn.Child(fn.ChildCount() - 1)
-					if !last.IsNull() && last.Type() == "identifier" {
+					if !last.IsNull() && nodeType(last) == "identifier" {
 						return string(src[last.StartByte():last.EndByte()])
 					}
 				}

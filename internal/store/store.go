@@ -536,7 +536,8 @@ type Store struct {
 	hnswNodeIndex       *hnsw.Graph[string]
 	hnswNodeMu          sync.RWMutex
 	hnswNodeRebuilding  bool               // true while async node rebuild is in progress
-	hnswNodePendingAdds []hnswPendingEntry // vectors queued during node rebuild
+	hnswNodePendingAdds    []hnswPendingEntry // vectors queued during node rebuild
+	hnswNodePendingDeletes []string           // node IDs deleted during node rebuild
 
 	// Sprint 15 #3: in-memory cache for per-edge learned weight multipliers.
 	//
@@ -1070,11 +1071,11 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 	// _pragma=journal_mode(WAL)       — enable WAL on every connection open.
 	// _pragma=busy_timeout(5000)      — wait up to 5 s on write contention.
 	// _pragma=synchronous(NORMAL)     — safe with WAL; 2x write throughput vs FULL.
-	// _pragma=cache_size(-65536)      — 64 MB page cache per connection (vs 2 MB default).
+	// _pragma=cache_size(-16384)      — 16 MB page cache per connection (sufficient for sequential batch inserts).
 	// _pragma=mmap_size(268435456)    — 256 MB memory-mapped I/O; OS shares pages across connections.
 	// _pragma=temp_store(MEMORY)      — temp tables/indices in memory, not disk.
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16384)" +
 		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -1179,7 +1180,7 @@ func openReadOnlySQLiteDB(path string) (*sql.DB, error) {
 	// share a WAL file with the primary MCP server.
 	// Performance pragmas: 64 MB page cache, 256 MB mmap, temp tables in memory.
 	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16384)" +
 		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -2241,7 +2242,11 @@ func (s *Store) reconcileOrphanedReferences() {
 
 	// batchDelete issues batched transactional IN-list DELETEs for a slice of
 	// string IDs, chunking at 500 per batch (SQLite variable limit safety).
+	allowedBatchTables := map[string]bool{"agent_watched_symbols": true}
 	batchDelete := func(table, column string, ids []string) int {
+		if !allowedBatchTables[table] {
+			return 0
+		}
 		const chunkSize = 500
 		n := 0
 		for i := 0; i < len(ids); i += chunkSize {
@@ -2448,10 +2453,15 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	primaryPrefix := g.RepoID() + "::"
 
 	// Insert nodes; count file nodes in the same pass (avoids a second full scan).
+	// Uses IterateNodes to avoid allocating a full snapshot slice.
 	fileCount := 0
-	for _, n := range g.AllNodes() {
+	var nodeInsertErr error
+	g.IterateNodes(func(n *graph.Node) {
+		if nodeInsertErr != nil {
+			return
+		}
 		if !strings.HasPrefix(string(n.ID), primaryPrefix) {
-			continue // skip linked-project node
+			return // skip linked-project node
 		}
 
 		// Promote doc/signature/line_count to first-class columns.
@@ -2463,13 +2473,23 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			lineCount = lc
 		}
 		// Remaining metadata (without promoted fields) goes into the JSON blob.
-		remaining := make(map[string]string, len(n.Metadata))
-		for k, v := range n.Metadata {
-			if k != "doc" && k != "signature" && k != "line_count" {
-				remaining[k] = v
+		// Avoid allocating a map when all fields are promoted (common case).
+		var meta []byte
+		if len(n.Metadata) > 0 {
+			remaining := make(map[string]string, len(n.Metadata))
+			for k, v := range n.Metadata {
+				if k != "doc" && k != "signature" && k != "line_count" {
+					remaining[k] = v
+				}
 			}
+			if len(remaining) > 0 {
+				meta, _ = json.Marshal(remaining)
+			} else {
+				meta = []byte("{}")
+			}
+		} else {
+			meta = []byte("{}")
 		}
-		meta, _ := json.Marshal(remaining)
 
 		exported := 0
 		if n.Exported {
@@ -2498,8 +2518,12 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			n.Name, n.Package, n.File, n.Line,
 			exported, string(meta), doc, sig, lineCount, n.StableID, prov, domain, prevSig,
 		); err != nil {
-			return fmt.Errorf("insert node %s: %w", n.ID, err)
+			nodeInsertErr = fmt.Errorf("insert node %s: %w", n.ID, err)
+			return
 		}
+	})
+	if nodeInsertErr != nil {
+		return nodeInsertErr
 	}
 
 	// Rebuild FTS index inside the same transaction so search is always consistent
@@ -2512,12 +2536,16 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		return fmt.Errorf("prepare fts stmt: %w", err)
 	}
 	defer ftsStmt.Close()
-	for _, n := range g.AllNodes() {
+	var ftsInsertErr error
+	g.IterateNodes(func(n *graph.Node) {
+		if ftsInsertErr != nil {
+			return
+		}
 		if !strings.HasPrefix(string(n.ID), primaryPrefix) {
-			continue
+			return
 		}
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
-			continue // not useful for search
+			return // not useful for search
 		}
 		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
@@ -2526,8 +2554,12 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			nlDesc = GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
 		}
 		if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), nlDesc, sig, doc); err != nil {
-			return fmt.Errorf("insert fts node %s: %w", n.ID, err)
+			ftsInsertErr = fmt.Errorf("insert fts node %s: %w", n.ID, err)
+			return
 		}
+	})
+	if ftsInsertErr != nil {
+		return ftsInsertErr
 	}
 
 	// Insert edges.
@@ -2540,14 +2572,22 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 	}
 	defer edgeStmt.Close()
 
-	for _, e := range g.AllEdges() {
+	var edgeInsertErr error
+	g.IterateEdges(func(e *graph.Edge) {
+		if edgeInsertErr != nil {
+			return
+		}
 		// Skip edges originating from linked-project nodes.
 		if !strings.HasPrefix(string(e.From), primaryPrefix) {
-			continue
+			return
 		}
 		if _, err := edgeStmt.Exec(string(e.From), string(e.To), string(e.Type)); err != nil {
-			return fmt.Errorf("insert edge %s→%s: %w", e.From, e.To, err)
+			edgeInsertErr = fmt.Errorf("insert edge %s→%s: %w", e.From, e.To, err)
+			return
 		}
+	})
+	if edgeInsertErr != nil {
+		return edgeInsertErr
 	}
 
 	// Persist metadata (lightweight stats so 'list' never needs to load the full graph).

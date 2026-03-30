@@ -50,7 +50,7 @@ func juliaExtractTypeHeadName(typeHead sitter.Node, src []byte) (name string, su
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			name = string(src[child.StartByte():child.EndByte()])
 			return name, ""
@@ -66,7 +66,7 @@ func juliaExtractTypeHeadName(typeHead sitter.Node, src []byte) (name string, su
 				if sub.IsNull() {
 					continue
 				}
-				switch sub.Type() {
+				switch nodeType(sub) {
 				case "identifier":
 					if name == "" {
 						name = string(src[sub.StartByte():sub.EndByte()])
@@ -92,7 +92,7 @@ func juliaExtractTypeHeadName(typeHead sitter.Node, src []byte) (name string, su
 func juliaFirstIdentifier(n sitter.Node, src []byte) string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			return string(src[child.StartByte():child.EndByte()])
 		}
 	}
@@ -112,7 +112,7 @@ func juliaExtractFuncName(sig sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "call_expression":
 			return juliaCallExprName(child, src)
 		case "typed_expression":
@@ -122,10 +122,10 @@ func juliaExtractFuncName(sig sitter.Node, src []byte) string {
 				if sub.IsNull() {
 					continue
 				}
-				if sub.Type() == "call_expression" {
+				if nodeType(sub) == "call_expression" {
 					return juliaCallExprName(sub, src)
 				}
-				if sub.Type() == "where_expression" {
+				if nodeType(sub) == "where_expression" {
 					if name := juliaExtractFromWhere(sub, src); name != "" {
 						return name
 					}
@@ -151,7 +151,7 @@ func juliaCallExprName(n sitter.Node, src []byte) string {
 		if sub.IsNull() {
 			continue
 		}
-		switch sub.Type() {
+		switch nodeType(sub) {
 		case "identifier":
 			return string(src[sub.StartByte():sub.EndByte()])
 		case "field_expression":
@@ -170,14 +170,14 @@ func juliaExtractFromWhere(n sitter.Node, src []byte) string {
 		if sub.IsNull() {
 			continue
 		}
-		if sub.Type() == "call_expression" {
+		if nodeType(sub) == "call_expression" {
 			return juliaCallExprName(sub, src)
 		}
-		if sub.Type() == "typed_expression" {
+		if nodeType(sub) == "typed_expression" {
 			// Recurse into typed_expression inside where.
 			for k := uint32(0); k < sub.ChildCount(); k++ {
 				sub2 := sub.Child(k)
-				if !sub2.IsNull() && sub2.Type() == "call_expression" {
+				if !sub2.IsNull() && nodeType(sub2) == "call_expression" {
 					return juliaCallExprName(sub2, src)
 				}
 			}
@@ -236,7 +236,7 @@ func extractJuliaBody(
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "module_definition":
 			extractJuliaModule(g, child, src, filePath, fileNodeID)
 
@@ -284,7 +284,7 @@ func extractJuliaModule(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "identifier" {
+		if nodeType(child) == "identifier" {
 			name = string(src[child.StartByte():child.EndByte()])
 			break
 		}
@@ -321,7 +321,7 @@ func extractJuliaStruct(
 	isMutable := false
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "mutable" {
+		if !child.IsNull() && nodeType(child) == "mutable" {
 			isMutable = true
 			break
 		}
@@ -331,7 +331,7 @@ func extractJuliaStruct(
 	typeHead := sitter.Node{}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "type_head" {
+		if !child.IsNull() && nodeType(child) == "type_head" {
 			typeHead = child
 			break
 		}
@@ -377,7 +377,7 @@ func extractJuliaAbstract(
 	typeHead := sitter.Node{}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "type_head" {
+		if !child.IsNull() && nodeType(child) == "type_head" {
 			typeHead = child
 			break
 		}
@@ -416,7 +416,7 @@ func extractJuliaFunction(
 	sig := sitter.Node{}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "signature" {
+		if !child.IsNull() && nodeType(child) == "signature" {
 			sig = child
 			break
 		}
@@ -454,7 +454,7 @@ func extractJuliaMacro(
 	sig := sitter.Node{}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "signature" {
+		if !child.IsNull() && nodeType(child) == "signature" {
 			sig = child
 			break
 		}
@@ -497,7 +497,7 @@ func extractJuliaConst(
 	// assignment → identifier + "=" + value
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "assignment" {
+		if child.IsNull() || nodeType(child) != "assignment" {
 			continue
 		}
 		// First identifier in assignment is the constant name.
@@ -506,7 +506,7 @@ func extractJuliaConst(
 			if sub.IsNull() {
 				continue
 			}
-			if sub.Type() == "identifier" {
+			if nodeType(sub) == "identifier" {
 				name := string(src[sub.StartByte():sub.EndByte()])
 				nodeID := g.MakeNodeID(filePath, name)
 				if g.GetNode(nodeID) != nil {
@@ -548,7 +548,7 @@ func extractJuliaShortFunc(
 	}
 
 	var name string
-	switch lhs.Type() {
+	switch nodeType(lhs) {
 	case "call_expression":
 		name = juliaCallExprName(lhs, src)
 	case "where_expression":
@@ -558,7 +558,7 @@ func extractJuliaShortFunc(
 		// f(x)::Int = expr
 		for i := uint32(0); i < lhs.ChildCount(); i++ {
 			sub := lhs.Child(i)
-			if !sub.IsNull() && sub.Type() == "call_expression" {
+			if !sub.IsNull() && nodeType(sub) == "call_expression" {
 				name = juliaCallExprName(sub, src)
 				break
 			}
@@ -604,7 +604,7 @@ func extractJuliaImport(
 			continue
 		}
 		var modName string
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			modName = string(src[child.StartByte():child.EndByte()])
 		case "selected_import":

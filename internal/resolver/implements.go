@@ -122,149 +122,166 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 	// RTA: when instantiation data is available, skip structs never constructed.
 	// For pure Go projects, GetInstantiatedTypes returns nil and this is a no-op.
 	instantiated := g.GetInstantiatedTypes()
-	nodes := g.AllNodes()
 
-	// 1. Collect interfaces with required method sets (from "methods" metadata).
+	// ── Single-pass node collection ─────────────────────────────────────
+	// Collect all required data in one IterateNodes pass instead of 3+
+	// separate AllNodes() calls (each of which allocates + sorts).
 	type ifaceInfo struct {
 		nodeID  graph.NodeID
 		methods map[string]bool
 	}
-	// Key: "pkg::IfaceName"
-	ifaces := make(map[string]ifaceInfo)
-	for _, n := range nodes {
-		if n.Type != graph.NodeInterface {
-			continue
-		}
-		methodsStr := n.Metadata["methods"]
-		if methodsStr == "" {
-			continue
-		}
-		required := make(map[string]bool)
-		for _, m := range strings.Split(methodsStr, ",") {
-			if m = strings.TrimSpace(m); m != "" {
-				required[m] = true
-			}
-		}
-		if len(required) > 0 {
-			ifaces[n.Package+"::"+n.Name] = ifaceInfo{nodeID: n.ID, methods: required}
-		}
-	}
-	if len(ifaces) == 0 {
-		return 0
-	}
 
-	// 2. Collect concrete method names per (pkg, receiverType) pair.
-	//    Method node names have the form "ReceiverType.MethodName".
-	//    Key: "pkg::ReceiverType" → set of method names
-	//    Skip methods belonging to heritage-tagged structs (nominal typing).
-	heritageStructs := make(map[string]bool)
-	structMethods := make(map[string]map[string]bool)
-	for _, n := range nodes {
-		if n.Type == graph.NodeStruct {
-			if n.Metadata["heritage_implements"] != "" || n.Metadata["heritage_extends"] != "" {
-				heritageStructs[n.Package+"::"+n.Name] = true
-			}
-		}
-		if n.Type != graph.NodeMethod {
-			continue
-		}
-		dot := strings.IndexByte(n.Name, '.')
-		if dot < 0 {
-			continue
-		}
-		key := n.Package + "::" + n.Name[:dot]
-		if structMethods[key] == nil {
-			structMethods[key] = make(map[string]bool)
-		}
-		structMethods[key][n.Name[dot+1:]] = true
-	}
+	// Interfaces grouped by package: pkg → ifaceName → ifaceInfo
+	ifacesByPkg := make(map[string]map[string]ifaceInfo)
 
-	// 3. Map "pkg::StructName" → NodeID for struct nodes.
-	structIDs := make(map[string]graph.NodeID)
-	for _, n := range nodes {
-		if n.Type == graph.NodeStruct {
-			structIDs[n.Package+"::"+n.Name] = n.ID
-		}
-	}
+	// Struct method sets grouped by package: pkg → structName → methodSet
+	structMethodsByPkg := make(map[string]map[string]map[string]bool)
 
-	// 4. Track edges added in this batch. Existing edges checked via g.HasEdge.
-	seen := make(map[string]bool)
+	// Struct node IDs grouped by package: pkg → structName → NodeID
+	structIDsByPkg := make(map[string]map[string]graph.NodeID)
 
-	// 5. Match structs against interfaces in the same package.
-	//    Skip structs with heritage metadata — they use nominal typing.
-	count := 0
-	for ifaceKey, iface := range ifaces {
-		sepIdx := strings.Index(ifaceKey, "::")
-		if sepIdx < 0 {
-			continue
-		}
-		pkg := ifaceKey[:sepIdx]
-		prefix := pkg + "::"
-		for structKey, methods := range structMethods {
-			if !strings.HasPrefix(structKey, prefix) {
-				continue
-			}
-			// Skip heritage-tagged structs — nominal typing, not structural.
-			if heritageStructs[structKey] {
-				continue
-			}
-			// RTA filter: skip structs never instantiated (only when data is available).
-			if len(instantiated) > 0 {
-				structName := structKey[len(prefix):]
-				if !instantiated[structName] {
-					continue
-				}
-			}
-			// All required interface methods must be present on the struct.
-			allPresent := true
-			for m := range iface.methods {
-				if !methods[m] {
-					allPresent = false
-					break
-				}
-			}
-			if !allPresent {
-				continue
-			}
-			sid, ok := structIDs[structKey]
-			if !ok {
-				continue
-			}
-			edgeKey := string(sid) + "->" + string(iface.nodeID)
-			if seen[edgeKey] || g.HasEdge(sid, iface.nodeID, graph.EdgeImplements) {
-				continue
-			}
-			seen[edgeKey] = true
-			g.AddEdge(&graph.Edge{
-				From: sid,
-				To:   iface.nodeID,
-				Type: graph.EdgeImplements,
-			})
-			count++
-		}
-	}
+	// Heritage-tagged structs (nominal typing): pkg → structName → true
+	heritageByPkg := make(map[string]map[string]bool)
 
-	// 6. Nominal typing: Java/TS "implements InterfaceName" / "extends ClassName".
-	//    For heritage-tagged structs, directly resolve the interface name to a node
-	//    and create IMPLEMENTS edges without structural matching.
+	// For nominal typing (step 6): interface name → NodeID
 	ifaceByName := make(map[string]graph.NodeID)
-	for _, n := range nodes {
-		if n.Type == graph.NodeInterface {
+
+	// Heritage structs needing nominal resolution: collected for step 6
+	type heritageStruct struct {
+		id       graph.NodeID
+		heritage string
+	}
+	var heritageStructs []heritageStruct
+
+	g.IterateNodes(func(n *graph.Node) {
+		switch n.Type {
+		case graph.NodeInterface:
+			// Collect for nominal lookup (step 6).
 			ifaceByName[n.Name] = n.ID
 			if dot := strings.LastIndexByte(n.Name, '.'); dot >= 0 {
 				ifaceByName[n.Name[dot+1:]] = n.ID
 			}
+			// Collect interfaces with required method sets.
+			methodsStr := n.Metadata["methods"]
+			if methodsStr == "" {
+				return
+			}
+			required := make(map[string]bool)
+			for _, m := range strings.Split(methodsStr, ",") {
+				if m = strings.TrimSpace(m); m != "" {
+					required[m] = true
+				}
+			}
+			if len(required) == 0 {
+				return
+			}
+			pkg := n.Package
+			if ifacesByPkg[pkg] == nil {
+				ifacesByPkg[pkg] = make(map[string]ifaceInfo)
+			}
+			ifacesByPkg[pkg][n.Name] = ifaceInfo{nodeID: n.ID, methods: required}
+
+		case graph.NodeStruct:
+			pkg := n.Package
+			// Track struct IDs by package.
+			if structIDsByPkg[pkg] == nil {
+				structIDsByPkg[pkg] = make(map[string]graph.NodeID)
+			}
+			structIDsByPkg[pkg][n.Name] = n.ID
+			// Track heritage-tagged structs.
+			if n.Metadata["heritage_implements"] != "" || n.Metadata["heritage_extends"] != "" {
+				if heritageByPkg[pkg] == nil {
+					heritageByPkg[pkg] = make(map[string]bool)
+				}
+				heritageByPkg[pkg][n.Name] = true
+			}
+			// Collect heritage structs for nominal resolution (step 6).
+			if hi := n.Metadata["heritage_implements"]; hi != "" {
+				heritageStructs = append(heritageStructs, heritageStruct{id: n.ID, heritage: hi})
+			}
+
+		case graph.NodeMethod:
+			dot := strings.IndexByte(n.Name, '.')
+			if dot < 0 {
+				return
+			}
+			pkg := n.Package
+			receiverType := n.Name[:dot]
+			methodName := n.Name[dot+1:]
+			if structMethodsByPkg[pkg] == nil {
+				structMethodsByPkg[pkg] = make(map[string]map[string]bool)
+			}
+			if structMethodsByPkg[pkg][receiverType] == nil {
+				structMethodsByPkg[pkg][receiverType] = make(map[string]bool)
+			}
+			structMethodsByPkg[pkg][receiverType][methodName] = true
+		}
+	})
+
+	if len(ifacesByPkg) == 0 {
+		return 0
+	}
+
+	// ── Structural matching: same-package interfaces vs structs ──────────
+	// For each package that has interfaces, match against structs in that
+	// same package. This is O(I_pkg × S_pkg) per package, which is O(n)
+	// overall since packages have bounded size.
+	seen := make(map[string]bool)
+	count := 0
+
+	for pkg, pkgIfaces := range ifacesByPkg {
+		pkgStructMethods := structMethodsByPkg[pkg]
+		if len(pkgStructMethods) == 0 {
+			continue
+		}
+		pkgStructIDs := structIDsByPkg[pkg]
+		pkgHeritage := heritageByPkg[pkg]
+
+		for _, iface := range pkgIfaces {
+			for structName, methods := range pkgStructMethods {
+				// Skip heritage-tagged structs — nominal typing, not structural.
+				if pkgHeritage[structName] {
+					continue
+				}
+				// RTA filter: skip structs never instantiated.
+				if len(instantiated) > 0 && !instantiated[structName] {
+					continue
+				}
+				// All required interface methods must be present on the struct.
+				allPresent := true
+				for m := range iface.methods {
+					if !methods[m] {
+						allPresent = false
+						break
+					}
+				}
+				if !allPresent {
+					continue
+				}
+				sid, ok := pkgStructIDs[structName]
+				if !ok {
+					continue
+				}
+				edgeKey := string(sid) + "->" + string(iface.nodeID)
+				if seen[edgeKey] || g.HasEdge(sid, iface.nodeID, graph.EdgeImplements) {
+					continue
+				}
+				seen[edgeKey] = true
+				g.AddEdge(&graph.Edge{
+					From: sid,
+					To:   iface.nodeID,
+					Type: graph.EdgeImplements,
+				})
+				count++
+			}
 		}
 	}
-	for _, n := range nodes {
-		if n.Type != graph.NodeStruct {
-			continue
-		}
-		heritage := n.Metadata["heritage_implements"]
-		if heritage == "" {
-			continue
-		}
-		for _, ifaceName := range strings.Split(heritage, ",") {
+
+	// ── Nominal typing: Java/TS "implements InterfaceName" ───────────────
+	// Heritage-tagged structs directly resolve interface names without
+	// structural matching.
+	for _, hs := range heritageStructs {
+		for _, ifaceName := range strings.Split(hs.heritage, ",") {
 			ifaceName = strings.TrimSpace(ifaceName)
 			if ifaceName == "" {
 				continue
@@ -278,12 +295,12 @@ func ResolveImplementsEdges(g *graph.Graph) int {
 			if !ok {
 				continue
 			}
-			edgeKey := string(n.ID) + "->" + string(ifaceID)
-			if seen[edgeKey] || g.HasEdge(n.ID, ifaceID, graph.EdgeImplements) {
+			edgeKey := string(hs.id) + "->" + string(ifaceID)
+			if seen[edgeKey] || g.HasEdge(hs.id, ifaceID, graph.EdgeImplements) {
 				continue
 			}
 			seen[edgeKey] = true
-			g.AddEdge(&graph.Edge{From: n.ID, To: ifaceID, Type: graph.EdgeImplements})
+			g.AddEdge(&graph.Edge{From: hs.id, To: ifaceID, Type: graph.EdgeImplements})
 			count++
 		}
 	}

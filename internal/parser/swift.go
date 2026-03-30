@@ -37,7 +37,7 @@ func extractSwiftDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_declaration":
 			if nameNode := firstChildOfType(n, "simple_identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -63,7 +63,7 @@ func extractSwiftDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 				// Walk body with class context.
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if !child.IsNull() && (child.Type() == "class_body" || child.Type() == "enum_class_body") {
+					if !child.IsNull() && (nodeType(child) == "class_body" || nodeType(child) == "enum_class_body") {
 						for j := uint32(0); j < child.ChildCount(); j++ {
 							walk(child.Child(j), name)
 						}
@@ -182,7 +182,7 @@ func (p *SwiftParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration":
 			name := extractSwiftTypeName(n, src)
 			if name == "" {
@@ -190,7 +190,7 @@ func (p *SwiftParser) extractAllDeclarations(
 			}
 			kind := swiftDeclKind(n, src)
 
-			nodeType := graph.NodeStruct
+			nType := graph.NodeStruct
 			meta := buildLangMeta(declInfo[name])
 			if meta == nil {
 				meta = make(map[string]string, 1)
@@ -202,7 +202,7 @@ func (p *SwiftParser) extractAllDeclarations(
 				// but walk body with the extended type as context.
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if !child.IsNull() && (child.Type() == "class_body" || child.Type() == "enum_class_body") {
+					if !child.IsNull() && (nodeType(child) == "class_body" || nodeType(child) == "enum_class_body") {
 						for j := uint32(0); j < child.ChildCount(); j++ {
 							walk(child.Child(j), name)
 						}
@@ -213,14 +213,14 @@ func (p *SwiftParser) extractAllDeclarations(
 
 			nodeID := g.MakeNodeID(filePath, name)
 			g.AddNode(&graph.Node{
-				ID: nodeID, Type: nodeType, Name: name, File: filePath,
+				ID: nodeID, Type: nType, Name: name, File: filePath,
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: meta,
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
 			// Walk body for methods.
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if !child.IsNull() && (child.Type() == "class_body" || child.Type() == "enum_class_body") {
+				if !child.IsNull() && (nodeType(child) == "class_body" || nodeType(child) == "enum_class_body") {
 					for j := uint32(0); j < child.ChildCount(); j++ {
 						walk(child.Child(j), name)
 					}
@@ -266,14 +266,14 @@ func (p *SwiftParser) extractAllDeclarations(
 			}
 			name := string(src[nameNode.StartByte():nameNode.EndByte()])
 			qualName := name
-			nodeType := graph.NodeFunction
+			nType := graph.NodeFunction
 			if enclosingClass != "" {
 				qualName = enclosingClass + "." + name
-				nodeType = graph.NodeMethod
+				nType = graph.NodeMethod
 			}
 			nodeID := g.MakeNodeID(filePath, qualName)
 			g.AddNode(&graph.Node{
-				ID: nodeID, Type: nodeType, Name: qualName, File: filePath,
+				ID: nodeID, Type: nType, Name: qualName, File: filePath,
 				Line: int(n.StartPoint().Row) + 1, Exported: isExported(name), Metadata: buildLangMeta(declInfo[qualName]),
 			})
 			g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
@@ -346,19 +346,19 @@ func (p *SwiftParser) extractAllDeclarations(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "pattern" || child.Type() == "value_binding_pattern" {
+				if nodeType(child) == "pattern" || nodeType(child) == "value_binding_pattern" {
 					// Dig into the pattern for the identifier
 					for j := uint32(0); j < child.ChildCount(); j++ {
 						c := child.Child(j)
 						if c.IsNull() {
 							continue
 						}
-						if c.Type() == "simple_identifier" || c.Type() == "identifier" {
+						if nodeType(c) == "simple_identifier" || nodeType(c) == "identifier" {
 							propName = string(src[c.StartByte():c.EndByte()])
 							break
 						}
 					}
-				} else if child.Type() == "simple_identifier" || child.Type() == "identifier" {
+				} else if nodeType(child) == "simple_identifier" || nodeType(child) == "identifier" {
 					propName = string(src[child.StartByte():child.EndByte()])
 				}
 				if propName != "" {

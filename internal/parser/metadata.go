@@ -54,7 +54,7 @@ func extractSigToBody(declNode sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "block" || child.Type() == "statement_block" {
+		if nodeType(child) == "block" || nodeType(child) == "statement_block" {
 			sig := string(src[declNode.StartByte():child.StartByte()])
 			return strings.TrimSpace(strings.Join(strings.Fields(sig), " "))
 		}
@@ -221,7 +221,7 @@ func extractSigToBodyMulti(declNode sitter.Node, src []byte, bodyTypes []string)
 		if child.IsNull() {
 			continue
 		}
-		if bodySet[child.Type()] {
+		if bodySet[nodeType(child)] {
 			sig := string(src[declNode.StartByte():child.StartByte()])
 			return strings.TrimSpace(strings.Join(strings.Fields(sig), " "))
 		}
@@ -252,7 +252,7 @@ func collectCallSitesWalk(
 		if n.IsNull() {
 			return
 		}
-		nt := n.Type()
+		nt := nodeType(n)
 
 		// Track class context.
 		if cfg.ClassTypes[nt] {
@@ -327,7 +327,7 @@ func extractTypeIdentifiers(n sitter.Node, src []byte) []string {
 		if child.IsNull() {
 			return
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "type_identifier":
 			name := string(src[child.StartByte():child.EndByte()])
 			if name != "" && !seen[name] {
@@ -383,7 +383,7 @@ func extractTypeIdentifiers(n sitter.Node, src []byte) []string {
 func firstChildOfType(n sitter.Node, typ string) sitter.Node {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == typ {
+		if !child.IsNull() && nodeType(child) == typ {
 			return child
 		}
 	}

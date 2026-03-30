@@ -21,7 +21,7 @@ func extractTSDeclInfo(root sitter.Node, src []byte, lines []string) map[string]
 		if n.IsNull() || depth > 8 {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_declaration", "function_expression", "function_signature":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -74,7 +74,7 @@ func extractTSDeclInfo(root sitter.Node, src []byte, lines []string) map[string]
 			nameNode := n.ChildByFieldName("name")
 			valueNode := n.ChildByFieldName("value")
 			if !nameNode.IsNull() && !valueNode.IsNull() {
-				vt := valueNode.Type()
+				vt := nodeType(valueNode)
 				if vt == "arrow_function" || vt == "function_expression" {
 					name := string(src[nameNode.StartByte():nameNode.EndByte()])
 					sl := int(n.StartPoint().Row) + 1
@@ -532,7 +532,7 @@ func (p *TypeScriptParser) extractClassMethods(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "export_statement":
 			// Exported decorated class: decorator sibling + class_declaration child.
 			var decs []string
@@ -542,12 +542,12 @@ func (p *TypeScriptParser) extractClassMethods(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "decorator" {
+				if nodeType(child) == "decorator" {
 					if name := tsDecoratorName(child, src); name != "" {
 						decs = append(decs, name)
 					}
 				}
-				if child.Type() == "class_declaration" || child.Type() == "abstract_class_declaration" {
+				if nodeType(child) == "class_declaration" || nodeType(child) == "abstract_class_declaration" {
 					if nameNode := child.ChildByFieldName("name"); !nameNode.IsNull() {
 						exportedClassName = string(src[nameNode.StartByte():nameNode.EndByte()])
 					}
@@ -574,7 +574,7 @@ func (p *TypeScriptParser) extractClassMethods(
 				var decs []string
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if !child.IsNull() && child.Type() == "decorator" {
+					if !child.IsNull() && nodeType(child) == "decorator" {
 						if name := tsDecoratorName(child, src); name != "" {
 							decs = append(decs, name)
 						}
@@ -621,7 +621,7 @@ func (p *TypeScriptParser) extractClassMethods(
 				break // already added (e.g. class + interface share a name)
 			}
 			meta := buildLangMeta(declInfo[qualName])
-			if n.Type() == "abstract_method_signature" {
+			if nodeType(n) == "abstract_method_signature" {
 				if meta == nil {
 					meta = make(map[string]string, 1)
 				}
@@ -698,18 +698,18 @@ func (p *TypeScriptParser) extractClassMethods(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "accessibility_modifier" {
+				if nodeType(child) == "accessibility_modifier" {
 					text := string(src[child.StartByte():child.EndByte()])
 					if text == "private" || text == "protected" {
 						fieldKind = text
 					}
 					break
 				}
-				if child.Type() == "readonly" {
+				if nodeType(child) == "readonly" {
 					fieldKind = "readonly"
 					break
 				}
-				if child.Type() == "property_identifier" {
+				if nodeType(child) == "property_identifier" {
 					break // no modifier
 				}
 			}
@@ -749,13 +749,13 @@ func collectTSInstantiatedTypes(g *graph.Graph, root sitter.Node, src []byte, fi
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "new_expression" {
+		if nodeType(n) == "new_expression" {
 			constructor := n.ChildByFieldName("constructor")
 			if !constructor.IsNull() {
 				// Extract the simple identifier — skip member_expression (e.g. ns.Foo)
 				// to avoid recording qualified names that won't match method receiver types.
 				var typeName string
-				switch constructor.Type() {
+				switch nodeType(constructor) {
 				case "identifier":
 					typeName = string(src[constructor.StartByte():constructor.EndByte()])
 				case "member_expression":
@@ -795,7 +795,7 @@ func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []by
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration", "abstract_class_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -818,7 +818,7 @@ func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []by
 			if !isTSBuiltin(className) {
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if child.IsNull() || child.Type() != "decorator" {
+					if child.IsNull() || nodeType(child) != "decorator" {
 						continue
 					}
 					decName := extractTSDecoratorName(child, src)
@@ -840,7 +840,7 @@ func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []by
 					if sib.Equal(n) {
 						break // stop scanning once we reach the class itself
 					}
-					if sib.Type() != "decorator" {
+					if nodeType(sib) != "decorator" {
 						continue
 					}
 					decName := extractTSDecoratorName(sib, src)
@@ -868,7 +868,7 @@ func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []by
 			isStatic := false
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if !child.IsNull() && child.Type() == "static" {
+				if !child.IsNull() && nodeType(child) == "static" {
 					isStatic = true
 					break
 				}
@@ -879,7 +879,7 @@ func collectTSDecoratorInstantiations(g *graph.Graph, root sitter.Node, src []by
 			// Find type_annotation child for return type.
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child.IsNull() || child.Type() != "type_annotation" {
+				if child.IsNull() || nodeType(child) != "type_annotation" {
 					continue
 				}
 				// type_annotation → ":" type — find type_identifier inside
@@ -906,12 +906,12 @@ func extractTSDecoratorName(decorator sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			return string(src[child.StartByte():child.EndByte()])
 		case "call_expression":
 			fn := child.ChildByFieldName("function")
-			if !fn.IsNull() && fn.Type() == "identifier" {
+			if !fn.IsNull() && nodeType(fn) == "identifier" {
 				return string(src[fn.StartByte():fn.EndByte()])
 			}
 		}
@@ -926,7 +926,7 @@ func extractTSTypeIdentifier(typeAnnotation sitter.Node, src []byte) string {
 		if n.IsNull() {
 			return ""
 		}
-		if n.Type() == "type_identifier" {
+		if nodeType(n) == "type_identifier" {
 			return string(src[n.StartByte():n.EndByte()])
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -957,7 +957,7 @@ func collectTSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 			"arrow_function":       true,
 			"function_expression":  true,
 		},
-		CallTypes: map[string]bool{"call_expression": true},
+		CallTypes: map[string]bool{"call_expression": true, "new_expression": true},
 		NameExtractor: func(n sitter.Node, src []byte) string {
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -978,7 +978,7 @@ func extractTSEnumMembers(g *graph.Graph, root sitter.Node, src []byte, filePath
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "enum_declaration" {
+		if nodeType(n) == "enum_declaration" {
 			// Get enum name.
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -989,7 +989,7 @@ func extractTSEnumMembers(g *graph.Graph, root sitter.Node, src []byte, filePath
 			// Walk enum_body for property_identifier children (the member names).
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				body := n.Child(i)
-				if body.IsNull() || body.Type() != "enum_body" {
+				if body.IsNull() || nodeType(body) != "enum_body" {
 					continue
 				}
 				for j := uint32(0); j < body.ChildCount(); j++ {
@@ -999,9 +999,9 @@ func extractTSEnumMembers(g *graph.Graph, root sitter.Node, src []byte, filePath
 					}
 					// Direct property_identifier (no value) or enum_assignment → property_identifier.
 					var nameNode sitter.Node
-					if member.Type() == "property_identifier" {
+					if nodeType(member) == "property_identifier" {
 						nameNode = member
-					} else if member.Type() == "enum_assignment" {
+					} else if nodeType(member) == "enum_assignment" {
 						nameNode = firstChildOfType(member, "property_identifier")
 					}
 					if nameNode.IsNull() {
@@ -1064,7 +1064,7 @@ func extractTSHeritage(g *graph.Graph, classNode sitter.Node, src []byte, filePa
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "class_heritage":
 			// class_heritage contains extends_clause and/or implements_clause.
 			for j := uint32(0); j < child.ChildCount(); j++ {
@@ -1072,7 +1072,7 @@ func extractTSHeritage(g *graph.Graph, classNode sitter.Node, src []byte, filePa
 				if hChild.IsNull() {
 					continue
 				}
-				switch hChild.Type() {
+				switch nodeType(hChild) {
 				case "extends_clause":
 					extendsNames = append(extendsNames, extractTypeIdentifiers(hChild, src)...)
 				case "implements_clause":

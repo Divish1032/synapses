@@ -80,7 +80,7 @@ func (p *BicepParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "decorators":
 			pendingDecorators = bicepExtractDecorators(child, src)
 
@@ -232,7 +232,7 @@ func (p *BicepParser) handleResource(
 
 	// Detect `existing` keyword.
 	for j := uint32(0); j < n.ChildCount(); j++ {
-		if c := n.Child(j); !c.IsNull() && c.Type() == "existing" {
+		if c := n.Child(j); !c.IsNull() && nodeType(c) == "existing" {
 			meta["existing"] = "true"
 			break
 		}
@@ -466,13 +466,13 @@ func bicepExtractDecorators(decoratorsNode sitter.Node, src []byte) []string {
 	var result []string
 	for i := uint32(0); i < decoratorsNode.ChildCount(); i++ {
 		child := decoratorsNode.Child(i)
-		if child.IsNull() || child.Type() != "decorator" {
+		if child.IsNull() || nodeType(child) != "decorator" {
 			continue
 		}
 		// decorator: @ + call_expression or identifier
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			gc := child.Child(j)
-			if gc.IsNull() || gc.Type() == "@" {
+			if gc.IsNull() || nodeType(gc) == "@" {
 				continue
 			}
 			result = append(result, strings.TrimSpace(childText(gc, src)))
@@ -497,11 +497,11 @@ func bicepExtractParamParts(n sitter.Node, src []byte) (name, typeStr, defaultVa
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "=" {
+		if nodeType(child) == "=" {
 			seenEq = true
 			continue
 		}
-		if seenEq && child.Type() != "param" {
+		if seenEq && nodeType(child) != "param" {
 			defaultVal = strings.TrimSpace(childText(child, src))
 			// Strip quotes from string defaults.
 			if len(defaultVal) >= 2 && defaultVal[0] == '\'' && defaultVal[len(defaultVal)-1] == '\'' {
@@ -526,7 +526,7 @@ func bicepExtractTypeStr(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "primitive_type" {
+		if nodeType(child) == "primitive_type" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
 				if !gc.IsNull() {
@@ -559,13 +559,13 @@ func bicepExtractResourceType(n sitter.Node, src []byte) (resourceType, apiVersi
 func bicepExtractStringValue(n sitter.Node, src []byte) string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "string" {
+		if child.IsNull() || nodeType(child) != "string" {
 			continue
 		}
 		// string: ' + string_content + '
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			gc := child.Child(j)
-			if !gc.IsNull() && gc.Type() == "string_content" {
+			if !gc.IsNull() && nodeType(gc) == "string_content" {
 				return childText(gc, src)
 			}
 		}
@@ -585,13 +585,13 @@ func bicepFindObjectBody(n sitter.Node, src []byte) sitter.Node {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "object" {
+		if nodeType(child) == "object" {
 			return child
 		}
-		if child.Type() == "if_statement" || child.Type() == "for_statement" {
+		if nodeType(child) == "if_statement" || nodeType(child) == "for_statement" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && gc.Type() == "object" {
+				if !gc.IsNull() && nodeType(gc) == "object" {
 					return gc
 				}
 			}
@@ -609,7 +609,7 @@ func bicepGetObjectProp(objNode sitter.Node, key string, src []byte) string {
 	}
 	for i := uint32(0); i < objNode.ChildCount(); i++ {
 		prop := objNode.Child(i)
-		if prop.IsNull() || prop.Type() != "object_property" {
+		if prop.IsNull() || nodeType(prop) != "object_property" {
 			continue
 		}
 		// First identifier child is the key.
@@ -624,7 +624,7 @@ func bicepGetObjectProp(objNode sitter.Node, key string, src []byte) string {
 			if child.IsNull() {
 				continue
 			}
-			if child.Type() == ":" {
+			if nodeType(child) == ":" {
 				seenColon = true
 				continue
 			}

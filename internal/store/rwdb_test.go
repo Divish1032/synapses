@@ -235,7 +235,7 @@ func TestRWDB_PerformancePragmas(t *testing.T) {
 
 	// Expected pragma values for the performance tuning.
 	// synchronous: 1 = NORMAL (vs 2 = FULL default).
-	// cache_size: -65536 (64 MB, negative = KiB).
+	// cache_size: -16384 (16 MB, negative = KiB — sufficient for sequential batch inserts).
 	// mmap_size: 268435456 (256 MB).
 	// temp_store: 2 = MEMORY (vs 0 = DEFAULT).
 	expectations := []struct {
@@ -243,7 +243,7 @@ func TestRWDB_PerformancePragmas(t *testing.T) {
 		want   string
 	}{
 		{"synchronous", "1"},
-		{"cache_size", "-65536"},
+		{"cache_size", "-16384"},
 		{"mmap_size", "268435456"},
 		{"temp_store", "2"},
 	}

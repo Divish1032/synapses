@@ -37,7 +37,7 @@ func extractPHPDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "method_declaration", "function_definition":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -150,7 +150,7 @@ func (p *PHPParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -165,7 +165,7 @@ func (p *PHPParser) extractAllDeclarations(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "class_modifier" || child.Type() == "abstract_modifier" {
+				if nodeType(child) == "class_modifier" || nodeType(child) == "abstract_modifier" {
 					text := string(src[child.StartByte():child.EndByte()])
 					if text == "abstract" || text == "final" {
 						if meta == nil {
@@ -176,7 +176,7 @@ func (p *PHPParser) extractAllDeclarations(
 					}
 				}
 				// Stop before the class name.
-				if child.Type() == "name" {
+				if nodeType(child) == "name" {
 					break
 				}
 			}
@@ -344,14 +344,14 @@ func (p *PHPParser) extractAllDeclarations(
 					if c.IsNull() {
 						continue
 					}
-					if c.Type() == "name" || c.Type() == "identifier" {
+					if nodeType(c) == "name" || nodeType(c) == "identifier" {
 						constName = string(src[c.StartByte():c.EndByte()])
 						break
 					}
 				}
 				if constName == "" {
 					// Try the element text if it's a simple identifier
-					if elem.Type() == "name" || elem.Type() == "identifier" {
+					if nodeType(elem) == "name" || nodeType(elem) == "identifier" {
 						constName = string(src[elem.StartByte():elem.EndByte()])
 					}
 				}
@@ -384,16 +384,16 @@ func (p *PHPParser) extractAllDeclarations(
 				if elem.IsNull() {
 					continue
 				}
-				if elem.Type() == "property_element" || elem.Type() == "variable_name" {
+				if nodeType(elem) == "property_element" || nodeType(elem) == "variable_name" {
 					// Variable name may be direct child or nested
 					var propName string
-					if elem.Type() == "variable_name" {
+					if nodeType(elem) == "variable_name" {
 						// Strip leading $
 						propName = strings.TrimPrefix(string(src[elem.StartByte():elem.EndByte()]), "$")
 					} else {
 						for m := uint32(0); m < elem.ChildCount(); m++ {
 							c := elem.Child(m)
-							if !c.IsNull() && c.Type() == "variable_name" {
+							if !c.IsNull() && nodeType(c) == "variable_name" {
 								propName = strings.TrimPrefix(string(src[c.StartByte():c.EndByte()]), "$")
 								break
 							}

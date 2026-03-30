@@ -20,7 +20,7 @@ func extractCDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_definition":
 			if name := extractCFuncName(n, src); name != "" {
 				sl := int(n.StartPoint().Row) + 1
@@ -57,19 +57,19 @@ func extractCFuncName(n sitter.Node, src []byte) string {
 		return ""
 	}
 	// function_declarator → declarator (identifier)
-	if declarator.Type() == "function_declarator" {
+	if nodeType(declarator) == "function_declarator" {
 		inner := declarator.ChildByFieldName("declarator")
-		if !inner.IsNull() && inner.Type() == "identifier" {
+		if !inner.IsNull() && nodeType(inner) == "identifier" {
 			return string(src[inner.StartByte():inner.EndByte()])
 		}
 		// Could be pointer_declarator wrapping function_declarator
-		if !inner.IsNull() && inner.Type() == "parenthesized_declarator" {
+		if !inner.IsNull() && nodeType(inner) == "parenthesized_declarator" {
 			for i := uint32(0); i < inner.ChildCount(); i++ {
 				child := inner.Child(i)
-				if !child.IsNull() && child.Type() == "pointer_declarator" {
+				if !child.IsNull() && nodeType(child) == "pointer_declarator" {
 					for j := uint32(0); j < child.ChildCount(); j++ {
 						grandchild := child.Child(j)
-						if !grandchild.IsNull() && grandchild.Type() == "identifier" {
+						if !grandchild.IsNull() && nodeType(grandchild) == "identifier" {
 							return string(src[grandchild.StartByte():grandchild.EndByte()])
 						}
 					}
@@ -90,12 +90,12 @@ func extractCIfdefGuard(n sitter.Node, src []byte) string {
 	}
 	cur := n.Parent()
 	for !cur.IsNull() {
-		switch cur.Type() {
+		switch nodeType(cur) {
 		case "preproc_ifdef":
 			// #ifdef FOO  — the condition identifier is the 2nd child.
 			for i := uint32(0); i < cur.ChildCount(); i++ {
 				child := cur.Child(i)
-				if !child.IsNull() && child.Type() == "identifier" {
+				if !child.IsNull() && nodeType(child) == "identifier" {
 					return string(src[child.StartByte():child.EndByte()])
 				}
 			}
@@ -103,7 +103,7 @@ func extractCIfdefGuard(n sitter.Node, src []byte) string {
 			// #if EXPR — grab the raw condition text.
 			for i := uint32(0); i < cur.ChildCount(); i++ {
 				child := cur.Child(i)
-				if !child.IsNull() && child.Type() == "preproc_expression" {
+				if !child.IsNull() && nodeType(child) == "preproc_expression" {
 					return string(src[child.StartByte():child.EndByte()])
 				}
 			}
@@ -119,18 +119,18 @@ func extractCIfdefGuard(n sitter.Node, src []byte) string {
 		case "preproc_else":
 			// #else branch — negate the parent preproc_ifdef/preproc_if condition.
 			if parent := cur.Parent(); !parent.IsNull() {
-				switch parent.Type() {
+				switch nodeType(parent) {
 				case "preproc_ifdef":
 					for i := uint32(0); i < parent.ChildCount(); i++ {
 						child := parent.Child(i)
-						if !child.IsNull() && child.Type() == "identifier" {
+						if !child.IsNull() && nodeType(child) == "identifier" {
 							return "!" + string(src[child.StartByte():child.EndByte()])
 						}
 					}
 				case "preproc_if":
 					for i := uint32(0); i < parent.ChildCount(); i++ {
 						child := parent.Child(i)
-						if !child.IsNull() && child.Type() == "preproc_expression" {
+						if !child.IsNull() && nodeType(child) == "preproc_expression" {
 							return "!(" + strings.TrimSpace(string(src[child.StartByte():child.EndByte()])) + ")"
 						}
 					}
@@ -140,7 +140,7 @@ func extractCIfdefGuard(n sitter.Node, src []byte) string {
 		case "preproc_elif":
 			for i := uint32(0); i < cur.ChildCount(); i++ {
 				child := cur.Child(i)
-				if !child.IsNull() && child.Type() == "preproc_expression" {
+				if !child.IsNull() && nodeType(child) == "preproc_expression" {
 					return string(src[child.StartByte():child.EndByte()])
 				}
 			}
@@ -386,7 +386,7 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "type_definition" {
+		if nodeType(n) == "type_definition" {
 			// The typedef name is the last type_identifier child (the alias).
 			var typedefName string
 			var startLine int
@@ -396,7 +396,7 @@ func (p *CParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				if child.IsNull() {
 					continue
 				}
-				switch child.Type() {
+				switch nodeType(child) {
 				case "struct_specifier":
 					// Anonymous struct iff no name field: typedef struct { ... } MyType;
 					if child.ChildByFieldName("name").IsNull() {
@@ -522,7 +522,7 @@ func collectCCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, src
 		},
 		CalleeExtractor: func(n sitter.Node, src []byte) string {
 			fn := n.ChildByFieldName("function")
-			if !fn.IsNull() && fn.Type() == "identifier" {
+			if !fn.IsNull() && nodeType(fn) == "identifier" {
 				return string(src[fn.StartByte():fn.EndByte()])
 			}
 			return ""

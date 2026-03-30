@@ -19,7 +19,7 @@ func extractCppDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_definition":
 			if name := extractCppFuncName(n, src); name != "" {
 				qualName := name
@@ -95,7 +95,7 @@ func extractNameFromDeclarator(n sitter.Node, src []byte) string {
 	if n.IsNull() {
 		return ""
 	}
-	switch n.Type() {
+	switch nodeType(n) {
 	case "identifier", "field_identifier", "destructor_name", "operator_name":
 		return string(src[n.StartByte():n.EndByte()])
 	case "qualified_identifier":
@@ -110,7 +110,7 @@ func extractNameFromDeclarator(n sitter.Node, src []byte) string {
 	case "reference_declarator", "pointer_declarator":
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if !child.IsNull() && child.Type() != "*" && child.Type() != "&" {
+			if !child.IsNull() && nodeType(child) != "*" && nodeType(child) != "&" {
 				if name := extractNameFromDeclarator(child, src); name != "" {
 					return name
 				}
@@ -130,9 +130,9 @@ func extractCppScopeQualifier(n sitter.Node, src []byte) string {
 	if declarator.IsNull() {
 		return ""
 	}
-	if declarator.Type() == "function_declarator" {
+	if nodeType(declarator) == "function_declarator" {
 		inner := declarator.ChildByFieldName("declarator")
-		if !inner.IsNull() && inner.Type() == "qualified_identifier" {
+		if !inner.IsNull() && nodeType(inner) == "qualified_identifier" {
 			scope := inner.ChildByFieldName("scope")
 			if !scope.IsNull() {
 				text := string(src[scope.StartByte():scope.EndByte()])
@@ -241,7 +241,7 @@ func (p *CppParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_definition":
 			name := extractCppFuncName(n, src)
 			if name == "" {
@@ -403,7 +403,7 @@ func (p *CppParser) extractAllDeclarations(
 			// Walk into the template's body to find the actual declaration.
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if !child.IsNull() && child.Type() != "template_parameter_list" {
+				if !child.IsNull() && nodeType(child) != "template_parameter_list" {
 					walk(child, enclosingClass)
 				}
 			}
@@ -412,7 +412,7 @@ func (p *CppParser) extractAllDeclarations(
 		case "declaration":
 			// Function prototypes: void foo(int x);
 			declarator := n.ChildByFieldName("declarator")
-			if !declarator.IsNull() && declarator.Type() == "function_declarator" {
+			if !declarator.IsNull() && nodeType(declarator) == "function_declarator" {
 				name := extractNameFromDeclarator(declarator, src)
 				if name != "" {
 					nodeID := g.MakeNodeID(filePath, name)
@@ -452,7 +452,7 @@ func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, s
 			"call_expression": true,
 		},
 		NameExtractor: func(n sitter.Node, src []byte) string {
-			switch n.Type() {
+			switch nodeType(n) {
 			case "class_specifier", "struct_specifier":
 				if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 					return string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -473,7 +473,7 @@ func collectCppCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, s
 			if fn.IsNull() {
 				return "", ""
 			}
-			switch fn.Type() {
+			switch nodeType(fn) {
 			case "identifier":
 				return "", string(src[fn.StartByte():fn.EndByte()])
 			case "field_expression":

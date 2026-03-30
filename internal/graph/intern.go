@@ -93,6 +93,30 @@ func (p *StringPool) Intern(s string) StringID {
 	return id
 }
 
+// PoolStats holds statistics about string interning effectiveness.
+type PoolStats struct {
+	UniqueStrings int // number of unique strings interned
+	GhostStrings  int // number of ghost (overflow) strings allocated
+	GhostNext     uint32
+}
+
+// Stats returns current pool statistics for diagnostics.
+func (p *StringPool) Stats() PoolStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	ghost := 0
+	for i := uint32(1); i < p.ghostNext && i < ReservedGhostRange; i++ {
+		if p.ghostCache[i] != "" {
+			ghost++
+		}
+	}
+	return PoolStats{
+		UniqueStrings: len(p.reverse),
+		GhostStrings:  ghost,
+		GhostNext:     p.ghostNext,
+	}
+}
+
 // Value looks up the string associated with the given StringID.
 // It handles both properly interned strings and transient "Ghost" strings.
 func (p *StringPool) Value(id StringID) string {
@@ -131,7 +155,7 @@ func (p *StringPool) internGhost(s string) StringID {
 		// so losing old mappings is acceptable — callers already treat them as
 		// best-effort. Start at 1 (0 is the empty-string sentinel).
 		if ghostWarnOnce.CompareAndSwap(0, 1) {
-			logutil.Warn("synapses: StringPool ghost range wrapped (%d entries); oldest ghost strings evicted\n", ReservedGhostRange)
+			logutil.Error("synapses: StringPool ghost range wrapped (%d entries); oldest ghost strings evicted — main pool exhausted at %d\n", ReservedGhostRange, MaxPoolSize)
 		}
 		id = 1
 	}

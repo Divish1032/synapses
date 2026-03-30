@@ -88,7 +88,7 @@ func (p *JsonnetParser) walkLocalBindChain(
 		return
 	}
 
-	switch n.Type() {
+	switch nodeType(n) {
 	case "document":
 		// document has a single child — the expression (usually a local_bind or object).
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -106,7 +106,7 @@ func (p *JsonnetParser) walkLocalBindChain(
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "bind":
 				p.handleBind(g, child, src, filePath, fileNodeID)
 			case "local_bind":
@@ -160,7 +160,7 @@ func (p *JsonnetParser) handleBind(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "=" {
+		if nodeType(child) == "=" {
 			foundEq = true
 			continue
 		}
@@ -168,7 +168,7 @@ func (p *JsonnetParser) handleBind(
 			continue
 		}
 		// This is the value node.
-		if child.Type() == "import" {
+		if nodeType(child) == "import" {
 			// local x = import 'path'
 			importPath := jsonnetExtractImportPath(child, src)
 			if importPath == "" {
@@ -185,7 +185,7 @@ func (p *JsonnetParser) handleBind(
 			// Check if this bind has params (i.e., local function).
 			hasParams := false
 			for j := uint32(0); j < bind.ChildCount(); j++ {
-				if bc := bind.Child(j); !bc.IsNull() && bc.Type() == "params" {
+				if bc := bind.Child(j); !bc.IsNull() && nodeType(bc) == "params" {
 					hasParams = true
 					break
 				}
@@ -236,7 +236,7 @@ func (p *JsonnetParser) extractObjectMembers(
 
 	for i := uint32(0); i < obj.ChildCount(); i++ {
 		member := obj.Child(i)
-		if member.IsNull() || member.Type() != "member" {
+		if member.IsNull() || nodeType(member) != "member" {
 			continue
 		}
 		// member can contain: objlocal (local helper), or field.
@@ -245,7 +245,7 @@ func (p *JsonnetParser) extractObjectMembers(
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "objlocal":
 				p.handleObjLocal(g, child, src, filePath, fileNodeID)
 			case "field":
@@ -325,7 +325,7 @@ func (p *JsonnetParser) handleField(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "params":
 			isFunction = true
 		case "::":
@@ -385,7 +385,7 @@ func (p *JsonnetParser) extractFunctionBody(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "params":
 			p.extractFunctionParams(g, child, src, filePath, fileNodeID)
 		case "object":
@@ -413,7 +413,7 @@ func (p *JsonnetParser) extractFunctionParams(
 			continue
 		}
 		// param nodes contain an id child.
-		if child.Type() == "param" {
+		if nodeType(child) == "param" {
 			idNode := firstChildOfType(child, "id")
 			if idNode.IsNull() {
 				continue
@@ -450,7 +450,7 @@ func jsonnetExtractImportPath(importNode sitter.Node, src []byte) string {
 	// string: string_start + string_content + string_end
 	for i := uint32(0); i < strNode.ChildCount(); i++ {
 		child := strNode.Child(i)
-		if !child.IsNull() && child.Type() == "string_content" {
+		if !child.IsNull() && nodeType(child) == "string_content" {
 			return childText(child, src)
 		}
 	}

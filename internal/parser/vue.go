@@ -94,7 +94,7 @@ func (p *VueParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "script_element":
 			scriptLang, scriptSetup, scriptContent, scriptStartLine = p.extractScriptInfo(child, src)
 
@@ -173,7 +173,7 @@ func (p *VueParser) extractScriptInfo(scriptElem sitter.Node, src []byte) (lang 
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "start_tag":
 			// Check for lang attribute.
 			langVal := vueGetAttribute(child, src, "lang")
@@ -205,7 +205,7 @@ func (p *VueParser) extractStyleInfo(styleElem sitter.Node, src []byte) (lang st
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "start_tag" {
+		if nodeType(child) == "start_tag" {
 			// Check for lang attribute.
 			langVal := vueGetAttribute(child, src, "lang")
 			if langVal != "" && langVal != "true" {
@@ -285,7 +285,7 @@ func (p *VueParser) parseScriptBlock(
 func vueGetAttribute(tag sitter.Node, src []byte, attrName string) string {
 	for i := uint32(0); i < tag.ChildCount(); i++ {
 		child := tag.Child(i)
-		if child.IsNull() || child.Type() != "attribute" {
+		if child.IsNull() || nodeType(child) != "attribute" {
 			continue
 		}
 
@@ -296,7 +296,7 @@ func vueGetAttribute(tag sitter.Node, src []byte, attrName string) string {
 			if gc.IsNull() {
 				continue
 			}
-			if gc.Type() == "attribute_name" {
+			if nodeType(gc) == "attribute_name" {
 				name := string(src[gc.StartByte():gc.EndByte()])
 				if name == attrName {
 					nameFound = true
@@ -313,14 +313,14 @@ func vueGetAttribute(tag sitter.Node, src []byte, attrName string) string {
 			if vc.IsNull() {
 				continue
 			}
-			if vc.Type() == "quoted_attribute_value" {
+			if nodeType(vc) == "quoted_attribute_value" {
 				txt := string(src[vc.StartByte():vc.EndByte()])
 				// Strip surrounding quotes.
 				txt = strings.Trim(txt, `"'`)
 				return txt
 			}
 			// Plain attribute value (unquoted).
-			if vc.Type() == "attribute_value" {
+			if nodeType(vc) == "attribute_value" {
 				return string(src[vc.StartByte():vc.EndByte()])
 			}
 		}

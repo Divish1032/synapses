@@ -39,7 +39,7 @@ func extractJSDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() || depth > 8 {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_declaration", "function_expression":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -83,7 +83,7 @@ func extractJSDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 			nameNode := n.ChildByFieldName("name")
 			valueNode := n.ChildByFieldName("value")
 			if !nameNode.IsNull() && !valueNode.IsNull() {
-				vt := valueNode.Type()
+				vt := nodeType(valueNode)
 				if vt == "arrow_function" || vt == "function_expression" {
 					name := string(src[nameNode.StartByte():nameNode.EndByte()])
 					sl := int(n.StartPoint().Row) + 1
@@ -459,7 +459,7 @@ func (p *JavaScriptParser) extractClassMethods(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration":
 			className := ""
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
@@ -531,11 +531,11 @@ func (p *JavaScriptParser) extractClassMethods(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "property_identifier" {
+				if nodeType(child) == "property_identifier" {
 					name = string(src[child.StartByte():child.EndByte()])
 					break
 				}
-				if child.Type() == "private_property_identifier" {
+				if nodeType(child) == "private_property_identifier" {
 					raw := string(src[child.StartByte():child.EndByte()])
 					name = strings.TrimPrefix(raw, "#")
 					isPrivate = true
@@ -593,7 +593,7 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 			"arrow_function":       true,
 			"function_expression":  true,
 		},
-		CallTypes: map[string]bool{"call_expression": true},
+		CallTypes: map[string]bool{"call_expression": true, "new_expression": true},
 		NameExtractor: func(n sitter.Node, src []byte) string {
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				return string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -611,11 +611,15 @@ func collectJSCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, sr
 // For obj.method(), alias="obj", callee="method".
 // For direct calls foo(), alias="", callee="foo".
 func jsAliasedCalleeExtractor(n sitter.Node, src []byte) (string, string) {
+	// new_expression uses "constructor" field; call_expression uses "function".
 	fn := n.ChildByFieldName("function")
+	if fn.IsNull() {
+		fn = n.ChildByFieldName("constructor")
+	}
 	if fn.IsNull() {
 		return "", ""
 	}
-	switch fn.Type() {
+	switch nodeType(fn) {
 	case "identifier":
 		return "", string(src[fn.StartByte():fn.EndByte()])
 	case "member_expression":
@@ -624,7 +628,7 @@ func jsAliasedCalleeExtractor(n sitter.Node, src []byte) (string, string) {
 		if !prop.IsNull() {
 			callee := string(src[prop.StartByte():prop.EndByte()])
 			if !obj.IsNull() {
-				switch obj.Type() {
+				switch nodeType(obj) {
 				case "identifier":
 					return string(src[obj.StartByte():obj.EndByte()]), callee
 				case "this":
@@ -661,7 +665,7 @@ func extractTSClassHeritage(g *graph.Graph, root sitter.Node, src []byte, filePa
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "class_declaration" {
+		if nodeType(n) == "class_declaration" {
 			extractSingleClassHeritage(g, n, src, filePath)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -691,14 +695,14 @@ func extractSingleClassHeritage(g *graph.Graph, classNode sitter.Node, src []byt
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "class_heritage":
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				clause := child.Child(j)
 				if clause.IsNull() {
 					continue
 				}
-				switch clause.Type() {
+				switch nodeType(clause) {
 				case "extends_clause":
 					extendsNames = append(extendsNames, extractTSTypeNames(clause, src)...)
 				case "implements_clause":
@@ -736,7 +740,7 @@ func extractTSTypeNames(clause sitter.Node, src []byte) []string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier", "type_identifier":
 			names = append(names, string(src[child.StartByte():child.EndByte()]))
 		case "generic_type":
@@ -747,7 +751,7 @@ func extractTSTypeNames(clause sitter.Node, src []byte) []string {
 				// Fallback: first identifier child.
 				for j := uint32(0); j < child.ChildCount(); j++ {
 					gc := child.Child(j)
-					if !gc.IsNull() && (gc.Type() == "identifier" || gc.Type() == "type_identifier") {
+					if !gc.IsNull() && (nodeType(gc) == "identifier" || nodeType(gc) == "type_identifier") {
 						names = append(names, string(src[gc.StartByte():gc.EndByte()]))
 						break
 					}

@@ -404,13 +404,13 @@ type jsonKVPair struct {
 // jsonExtractObjectPairs extracts all key-value pairs from a JSON object node.
 // The object grammar is: "{" pair* "}" where each pair is: string ":" value.
 func jsonExtractObjectPairs(obj sitter.Node, src []byte) []jsonKVPair {
-	if obj.IsNull() || obj.Type() != "object" {
+	if obj.IsNull() || nodeType(obj) != "object" {
 		return nil
 	}
 	var result []jsonKVPair
 	for i := uint32(0); i < obj.ChildCount(); i++ {
 		child := obj.Child(i)
-		if child.IsNull() || child.Type() != "pair" {
+		if child.IsNull() || nodeType(child) != "pair" {
 			continue
 		}
 		kv := jsonExtractPair(child, src)
@@ -434,7 +434,7 @@ func jsonExtractPair(pair sitter.Node, src []byte) jsonKVPair {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == ":" {
 			pastColon = true
 			continue
@@ -473,7 +473,7 @@ func jsonExtractStringContent(strNode sitter.Node, src []byte) string {
 	// Look for a string_content child.
 	for i := uint32(0); i < strNode.ChildCount(); i++ {
 		child := strNode.Child(i)
-		if !child.IsNull() && child.Type() == "string_content" {
+		if !child.IsNull() && nodeType(child) == "string_content" {
 			return childText(child, src)
 		}
 	}
@@ -494,12 +494,12 @@ func jsonFindRootObject(root sitter.Node) sitter.Node {
 	// The document node's first non-trivial child should be the object.
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if !child.IsNull() && child.Type() == "object" {
+		if !child.IsNull() && nodeType(child) == "object" {
 			return child
 		}
 	}
 	// If root itself is an object (some grammar variants).
-	if root.Type() == "object" {
+	if nodeType(root) == "object" {
 		return root
 	}
 	return sitter.Node{}
@@ -714,7 +714,7 @@ func jsonCollectOpenAPIRefs(node sitter.Node, src []byte, out []string) []string
 	if node.IsNull() {
 		return out
 	}
-	switch node.Type() {
+	switch nodeType(node) {
 	case "object":
 		for _, kv := range jsonExtractObjectPairs(node, src) {
 			if kv.key == "$ref" && kv.valueStr != "" {

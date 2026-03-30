@@ -66,7 +66,7 @@ func (p *MATLABParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "class_definition":
 			p.handleClass(g, child, src, filePath, fileNodeID)
 		case "function_definition":
@@ -93,7 +93,7 @@ func (p *MATLABParser) handleClass(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			if className == "" {
 				className = childText(child, src)
@@ -102,7 +102,7 @@ func (p *MATLABParser) handleClass(
 			// superclasses: < identifier (& identifier)*
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				sc := child.Child(j)
-				if !sc.IsNull() && sc.Type() == "property_name" {
+				if !sc.IsNull() && nodeType(sc) == "property_name" {
 					superclasses = append(superclasses, childText(sc, src))
 				}
 			}
@@ -172,7 +172,7 @@ func (p *MATLABParser) handleProperties(
 	isPrivate := false
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		attr := n.Child(i)
-		if attr.IsNull() || attr.Type() != "attributes" {
+		if attr.IsNull() || nodeType(attr) != "attributes" {
 			continue
 		}
 		attrText := strings.ToLower(childText(attr, src))
@@ -183,13 +183,13 @@ func (p *MATLABParser) handleProperties(
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "property" {
+		if child.IsNull() || nodeType(child) != "property" {
 			continue
 		}
 		propName := ""
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			pn := child.Child(j)
-			if !pn.IsNull() && pn.Type() == "identifier" {
+			if !pn.IsNull() && nodeType(pn) == "identifier" {
 				propName = childText(pn, src)
 				break
 			}
@@ -228,7 +228,7 @@ func (p *MATLABParser) handleMethods(
 	isStatic := false
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		attr := n.Child(i)
-		if attr.IsNull() || attr.Type() != "attributes" {
+		if attr.IsNull() || nodeType(attr) != "attributes" {
 			continue
 		}
 		if strings.Contains(strings.ToLower(childText(attr, src)), "static") {
@@ -238,7 +238,7 @@ func (p *MATLABParser) handleMethods(
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "function_definition" {
+		if child.IsNull() || nodeType(child) != "function_definition" {
 			continue
 		}
 		name := matlabFuncName(child, src)
@@ -317,7 +317,7 @@ func matlabFuncName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "function_output":
 			seenOutput = true
 		case "identifier":
@@ -329,7 +329,7 @@ func matlabFuncName(n sitter.Node, src []byte) string {
 	// Fallback: first identifier that isn't the keyword.
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			return childText(child, src)
 		}
 	}

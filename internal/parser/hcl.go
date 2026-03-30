@@ -74,7 +74,7 @@ func (p *HCLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "block":
 				p.handleBlock(g, child, src, filePath, fileNodeID, lines)
 			case "body":
@@ -110,7 +110,7 @@ func (p *HCLParser) handleBlock(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			identifiers = append(identifiers, childText(child, src))
 		case "string_lit":
@@ -282,7 +282,7 @@ func (p *HCLParser) extractLocals(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "attribute" {
+		if nodeType(child) == "attribute" {
 			// attribute: identifier "=" expression
 			ident := firstChildOfType(child, "identifier")
 			if ident.IsNull() {
@@ -368,7 +368,7 @@ func hclStripQuotes(s string) string {
 func hclFindAttribute(bodyNode sitter.Node, src []byte, key string) string {
 	for i := uint32(0); i < bodyNode.ChildCount(); i++ {
 		child := bodyNode.Child(i)
-		if child.IsNull() || child.Type() != "attribute" {
+		if child.IsNull() || nodeType(child) != "attribute" {
 			continue
 		}
 		ident := firstChildOfType(child, "identifier")
@@ -382,7 +382,7 @@ func hclFindAttribute(bodyNode sitter.Node, src []byte, key string) string {
 			if valChild.IsNull() {
 				continue
 			}
-			vt := valChild.Type()
+			vt := nodeType(valChild)
 			if vt == "identifier" || vt == "=" {
 				continue
 			}

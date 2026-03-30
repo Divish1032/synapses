@@ -100,7 +100,7 @@ func (p *GraphQLParser) walkDefinitions(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "object_type_definition":
 			p.extractObjectType(g, child, src, filePath, fileNodeID, "type", deferred)
 		case "input_object_type_definition":
@@ -194,12 +194,12 @@ func (p *GraphQLParser) extractEnumType(
 	var values []string
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "enum_values_definition" {
+		if child.IsNull() || nodeType(child) != "enum_values_definition" {
 			continue
 		}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			ev := child.Child(j)
-			if ev.IsNull() || ev.Type() != "enum_value_definition" {
+			if ev.IsNull() || nodeType(ev) != "enum_value_definition" {
 				continue
 			}
 			evName := graphqlNodeName(ev, src)
@@ -254,7 +254,7 @@ func (p *GraphQLParser) extractUnionType(
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "union_member_types":
 				collectMembers(child)
 			case "named_type":
@@ -266,7 +266,7 @@ func (p *GraphQLParser) extractUnionType(
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "union_member_types" {
+		if !child.IsNull() && nodeType(child) == "union_member_types" {
 			collectMembers(child)
 		}
 	}
@@ -334,7 +334,7 @@ func (p *GraphQLParser) extractSchemaDefinition(
 	// Grammar structure: root_operation_type_definition → operation_type + named_type
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "root_operation_type_definition" {
+		if child.IsNull() || nodeType(child) != "root_operation_type_definition" {
 			continue
 		}
 		var opName, typeName string
@@ -343,7 +343,7 @@ func (p *GraphQLParser) extractSchemaDefinition(
 			if gc.IsNull() {
 				continue
 			}
-			switch gc.Type() {
+			switch nodeType(gc) {
 			case "operation_type":
 				opName = strings.TrimSpace(string(src[gc.StartByte():gc.EndByte()]))
 			case "named_type":
@@ -443,7 +443,7 @@ func (p *GraphQLParser) extractFragment(
 	var fragmentOnType string
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "type_condition" {
+		if child.IsNull() || nodeType(child) != "type_condition" {
 			continue
 		}
 		typeName := graphqlExtractTypeName(child, src)
@@ -501,7 +501,7 @@ func (p *GraphQLParser) extractDirectiveDefinition(
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "directive_locations":
 				collectLocations(child)
 			case "directive_location":
@@ -514,7 +514,7 @@ func (p *GraphQLParser) extractDirectiveDefinition(
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "directive_locations" {
+		if !child.IsNull() && nodeType(child) == "directive_locations" {
 			collectLocations(child)
 		}
 	}
@@ -557,7 +557,7 @@ func (p *GraphQLParser) extractFields(
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct != "fields_definition" && ct != "input_fields_definition" {
 			continue
 		}
@@ -566,7 +566,7 @@ func (p *GraphQLParser) extractFields(
 			if field.IsNull() {
 				continue
 			}
-			ft := field.Type()
+			ft := nodeType(field)
 			if ft != "field_definition" && ft != "input_value_definition" {
 				continue
 			}
@@ -659,7 +659,7 @@ func (p *GraphQLParser) extractImplements(
 ) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "implements_interfaces" {
+		if child.IsNull() || nodeType(child) != "implements_interfaces" {
 			continue
 		}
 		p.collectImplementsInterfaces(g, child, src, filePath, nodeID)
@@ -677,7 +677,7 @@ func (p *GraphQLParser) collectImplementsInterfaces(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "implements_interfaces":
 			// Recurse into nested implements_interfaces (left-recursive grammar).
 			p.collectImplementsInterfaces(g, child, src, filePath, nodeID)
@@ -716,7 +716,7 @@ func graphqlNodeName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "name" {
 			return strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 		}
@@ -728,7 +728,7 @@ func graphqlNodeName(n sitter.Node, src []byte) string {
 			// Try direct name child.
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && gc.Type() == "name" {
+				if !gc.IsNull() && nodeType(gc) == "name" {
 					return strings.TrimSpace(string(src[gc.StartByte():gc.EndByte()]))
 				}
 			}
@@ -766,7 +766,7 @@ func graphqlExtractTypeName(n sitter.Node, src []byte) string {
 	if n.IsNull() {
 		return ""
 	}
-	switch n.Type() {
+	switch nodeType(n) {
 	case "named_type", "type_identifier":
 		return strings.TrimSpace(string(src[n.StartByte():n.EndByte()]))
 	case "type_condition":
@@ -824,7 +824,7 @@ func graphqlFieldType(n sitter.Node, src []byte) string {
 			continue
 		}
 		if pastColon {
-			ct := child.Type()
+			ct := nodeType(child)
 			if ct == "named_type" || ct == "list_type" || ct == "non_null_type" || ct == "type" {
 				return strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 			}

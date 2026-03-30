@@ -80,7 +80,7 @@ func (p *CMakeParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			return
 		}
 
-		if n.Type() == "normal_command" {
+		if nodeType(n) == "normal_command" {
 			p.handleCommand(g, n, src, filePath, fileNodeID, lines)
 		}
 
@@ -156,7 +156,7 @@ func (p *CMakeParser) extractArguments(n sitter.Node, src []byte) []string {
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "argument":
 			text := p.extractArgumentText(child, src)
 			if text != "" {

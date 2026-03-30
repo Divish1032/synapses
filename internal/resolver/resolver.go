@@ -56,6 +56,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 	// full-graph scans. Previously 3 separate passes; now 1 pass + edge lookups.
 	importMap, pkgIndex, dirBaseToPkg := buildLookupTables(g)
 	methodIndex := buildMethodIndex(pkgIndex) // derived from pkgIndex, no graph scan
+	nameIdx := buildPkgNameIndex(pkgIndex)    // O(1) name lookup per package
 
 	// RTA: collect which types are explicitly instantiated across the project.
 	// nil means no instantiation data (e.g. pure Go project) — CHA behavior used.
@@ -123,13 +124,13 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if ok {
 				if importPath, found := aliases[site.PkgAlias]; found {
 					shortPkg := path.Base(importPath)
-					targets = findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+					targets = findInPackage(nameIdx, shortPkg, site.FuncName, instantiated)
 					// Fallback: directory name may differ from Go package clause
 					// (e.g. directory "v2" but `package foo`). Use dirBaseToPkg
 					// to find the actual package name used in pkgIndex.
 					if len(targets) == 0 {
 						if actualPkg, ok := dirBaseToPkg[shortPkg]; ok {
-							targets = findInPackage(pkgIndex, actualPkg, site.FuncName, instantiated)
+							targets = findInPackage(nameIdx, actualPkg, site.FuncName, instantiated)
 						}
 					}
 				}
@@ -158,13 +159,41 @@ func ResolveCallEdges(g *graph.Graph) int {
 				}
 			}
 
-			// Fallback: alias was not an import or a typed var — treat as var.Method().
+			// Class-name resolution: if the alias looks like a type name (starts
+			// with an uppercase letter or contains "::" for Ruby/Rust), try it
+			// directly as a class name in the method index. This handles
+			// Retrofit.create(), Builder.use(), Rack::Handler.get() etc. without
+			// the imprecision of a package-wide suffix search.
+			if len(targets) == 0 && len(site.PkgAlias) > 0 {
+				first := site.PkgAlias[0]
+				isTypeName := (first >= 'A' && first <= 'Z') || strings.Contains(site.PkgAlias, "::")
+				if isTypeName {
+					// Build candidate type names: the full alias, and for Ruby "::"
+					// namespaces (Rack::Handler), the last segment (Handler).
+					tryNames := []string{site.PkgAlias}
+					if idx := strings.LastIndex(site.PkgAlias, "::"); idx >= 0 {
+						tryNames = append(tryNames, site.PkgAlias[idx+2:])
+					}
+					for _, typeName := range tryNames {
+						if id := findByTypedMethod(methodIndex, typeName, site.FuncName); id != "" {
+							targets = []graph.NodeID{id}
+							break
+						}
+						if id := findByInheritedMethod(methodIndex, inheritanceMap, typeName, site.FuncName, false); id != "" {
+							targets = []graph.NodeID{id}
+							break
+						}
+					}
+				}
+			}
+
+			// Fallback: alias was not an import, typed var, or class name — treat as var.Method().
 			// Search the caller's own package and all imported packages
 			// for a method matching ".FuncName" (e.g. Graph.CarveEgoGraph).
 			if len(targets) == 0 {
 				callerNode := g.GetNode(site.CallerID)
 				if callerNode != nil {
-					targets = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
+					targets = findInPackage(nameIdx, callerNode.Package, site.FuncName, instantiated)
 				}
 				if len(targets) == 0 {
 					if aliases, ok := importMap[site.CallerFile]; ok {
@@ -175,10 +204,10 @@ func ResolveCallEdges(g *graph.Graph) int {
 						sort.Strings(sortedPaths)
 						for _, importPath := range sortedPaths {
 							shortPkg := path.Base(importPath)
-							ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+							ids := findInPackage(nameIdx, shortPkg, site.FuncName, instantiated)
 							if len(ids) == 0 {
 								if actualPkg, ok2 := dirBaseToPkg[shortPkg]; ok2 {
-									ids = findInPackage(pkgIndex, actualPkg, site.FuncName, instantiated)
+									ids = findInPackage(nameIdx, actualPkg, site.FuncName, instantiated)
 								}
 							}
 							if len(ids) > 0 {
@@ -196,7 +225,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 			if callerNode == nil {
 				continue
 			}
-			targets = findInPackage(pkgIndex, callerNode.Package, site.FuncName, instantiated)
+			targets = findInPackage(nameIdx, callerNode.Package, site.FuncName, instantiated)
 
 			// 2. Fallback: search all packages imported by the caller's file.
 			//    This handles Python/TypeScript `from X import Y` style calls where
@@ -214,10 +243,10 @@ func ResolveCallEdges(g *graph.Graph) int {
 					sort.Strings(sortedPaths)
 					for _, importPath := range sortedPaths {
 						shortPkg := path.Base(importPath)
-						ids := findInPackage(pkgIndex, shortPkg, site.FuncName, instantiated)
+						ids := findInPackage(nameIdx, shortPkg, site.FuncName, instantiated)
 						if len(ids) == 0 {
 							if actualPkg, ok2 := dirBaseToPkg[shortPkg]; ok2 {
-								ids = findInPackage(pkgIndex, actualPkg, site.FuncName, instantiated)
+								ids = findInPackage(nameIdx, actualPkg, site.FuncName, instantiated)
 							}
 						}
 						if len(ids) > 0 {
@@ -337,17 +366,43 @@ func buildLookupTables(g *graph.Graph) (map[string]map[string]string, map[string
 //
 // The pkgIndex slice is pre-sorted by name (see buildLookupTables), guaranteeing
 // deterministic results across runs regardless of Go map iteration order.
-func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated map[string]bool) []graph.NodeID {
-	suffix := "." + name
-	candidates := idx[pkg]
+// pkgNameIndex maps pkg → funcSuffix → []*Node for O(1) name resolution.
+// For a node named "ReceiverType.MethodName", it's indexed under "MethodName".
+// For a plain function "Func", it's indexed under "Func".
+// Built once by buildPkgNameIndex, used by findInPackage.
+type pkgNameIndex map[string]map[string][]*graph.Node
+
+func buildPkgNameIndex(pkgIdx map[string][]*graph.Node) pkgNameIndex {
+	result := make(pkgNameIndex, len(pkgIdx))
+	for pkg, nodes := range pkgIdx {
+		nameMap := make(map[string][]*graph.Node)
+		for _, n := range nodes {
+			// Index by the function/method suffix: "Recv.Method" → "Method", "Func" → "Func"
+			key := n.Name
+			if dot := strings.LastIndexByte(n.Name, '.'); dot >= 0 {
+				key = n.Name[dot+1:]
+			}
+			nameMap[key] = append(nameMap[key], n)
+		}
+		result[pkg] = nameMap
+	}
+	return result
+}
+
+func findInPackage(nameIdx pkgNameIndex, pkg, name string, instantiated map[string]bool) []graph.NodeID {
+	pkgNames := nameIdx[pkg]
+	if len(pkgNames) == 0 {
+		return nil
+	}
+	candidates := pkgNames[name]
+	if len(candidates) == 0 {
+		return nil
+	}
 
 	var instantiatedMatches []graph.NodeID
 	var first graph.NodeID
 
 	for _, n := range candidates {
-		if n.Name != name && !strings.HasSuffix(n.Name, suffix) {
-			continue
-		}
 		if first == "" {
 			first = n.ID
 		}
@@ -360,7 +415,6 @@ func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated 
 				}
 			} else {
 				// Plain function (no receiver): not subject to RTA filtering.
-				// Use first match only — functions are uniquely named within a package.
 				if len(instantiatedMatches) == 0 {
 					instantiatedMatches = append(instantiatedMatches, n.ID)
 				}
@@ -372,16 +426,12 @@ func findInPackage(idx map[string][]*graph.Node, pkg, name string, instantiated 
 		if len(instantiatedMatches) > 0 {
 			return instantiatedMatches
 		}
-		// CHA fallback: no instantiated receiver found — return first match to
-		// avoid losing the edge entirely (better a false positive than a false
-		// negative for blast-radius analysis).
 		if first != "" {
 			return []graph.NodeID{first}
 		}
 		return nil
 	}
 
-	// CHA fast path: no instantiation data (pure Go project, etc.).
 	if first != "" {
 		return []graph.NodeID{first}
 	}

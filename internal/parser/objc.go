@@ -70,7 +70,7 @@ func (p *ObjCParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "preproc_include":
 			p.extractImport(g, child, src, filePath, fileNodeID)
 		case "class_interface":
@@ -99,7 +99,7 @@ func (p *ObjCParser) extractImport(g *graph.Graph, n sitter.Node, src []byte, fi
 			continue
 		}
 		var importPath string
-		switch child.Type() {
+		switch nodeType(child) {
 		case "system_lib_string":
 			// <Foundation/Foundation.h> — strip angle brackets
 			raw := string(src[child.StartByte():child.EndByte()])
@@ -108,7 +108,7 @@ func (p *ObjCParser) extractImport(g *graph.Graph, n sitter.Node, src []byte, fi
 			// "MyClass.h" — strip quotes, collect string_content children
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				sc := child.Child(j)
-				if !sc.IsNull() && sc.Type() == "string_content" {
+				if !sc.IsNull() && nodeType(sc) == "string_content" {
 					importPath = string(src[sc.StartByte():sc.EndByte()])
 					break
 				}
@@ -151,7 +151,7 @@ func (p *ObjCParser) extractClassInterface(g *graph.Graph, n sitter.Node, src []
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			if className == "" {
 				className = string(src[child.StartByte():child.EndByte()])
@@ -169,7 +169,7 @@ func (p *ObjCParser) extractClassInterface(g *graph.Graph, n sitter.Node, src []
 					continue
 				}
 				// tree-sitter wraps each in type_name → type_identifier
-				if pc.Type() == "type_name" {
+				if nodeType(pc) == "type_name" {
 					if ti := firstChildOfType(pc, "type_identifier"); !ti.IsNull() {
 						protocols = append(protocols, string(src[ti.StartByte():ti.EndByte()]))
 					}
@@ -186,7 +186,7 @@ func (p *ObjCParser) extractClassInterface(g *graph.Graph, n sitter.Node, src []
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			if !seenClassName {
 				seenClassName = true
@@ -234,7 +234,7 @@ func (p *ObjCParser) extractClassInterface(g *graph.Graph, n sitter.Node, src []
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "method_declaration":
 			p.extractMethod(g, child, src, filePath, fileNodeID, className)
 		case "property_declaration":
@@ -250,7 +250,7 @@ func (p *ObjCParser) extractProtocol(g *graph.Graph, n sitter.Node, src []byte, 
 	protocolName := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			protocolName = string(src[child.StartByte():child.EndByte()])
 			break
 		}
@@ -263,12 +263,12 @@ func (p *ObjCParser) extractProtocol(g *graph.Graph, n sitter.Node, src []byte, 
 	var parentProtocols []string
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "protocol_reference_list" {
+		if child.IsNull() || nodeType(child) != "protocol_reference_list" {
 			continue
 		}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			pc := child.Child(j)
-			if !pc.IsNull() && pc.Type() == "identifier" {
+			if !pc.IsNull() && nodeType(pc) == "identifier" {
 				parentProtocols = append(parentProtocols, string(src[pc.StartByte():pc.EndByte()]))
 			}
 		}
@@ -306,7 +306,7 @@ func (p *ObjCParser) extractProtocolMethods(g *graph.Graph, n sitter.Node, src [
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "method_declaration":
 			p.extractMethod(g, child, src, filePath, fileNodeID, protocolName)
 		case "property_declaration":
@@ -314,7 +314,7 @@ func (p *ObjCParser) extractProtocolMethods(g *graph.Graph, n sitter.Node, src [
 		default:
 			// Recurse into container nodes (e.g., qualified_protocol_interface_declaration,
 			// optional, required sections).
-			if child.ChildCount() > 0 && child.Type() != "identifier" && child.Type() != "protocol_reference_list" {
+			if child.ChildCount() > 0 && nodeType(child) != "identifier" && nodeType(child) != "protocol_reference_list" {
 				p.extractProtocolMethods(g, child, src, filePath, fileNodeID, protocolName)
 			}
 		}
@@ -365,11 +365,11 @@ func (p *ObjCParser) extractMethod(g *graph.Graph, n sitter.Node, src []byte, fi
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "+" {
+		if nodeType(child) == "+" {
 			scope = "class"
 			break
 		}
-		if child.Type() == "-" {
+		if nodeType(child) == "-" {
 			break
 		}
 	}
@@ -378,7 +378,7 @@ func (p *ObjCParser) extractMethod(g *graph.Graph, n sitter.Node, src []byte, fi
 	returnType := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "method_type" {
+		if child.IsNull() || nodeType(child) != "method_type" {
 			continue
 		}
 		// method_type contains (type_name) — get all text between parens.
@@ -406,7 +406,7 @@ func (p *ObjCParser) extractMethod(g *graph.Graph, n sitter.Node, src []byte, fi
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			pendingIdent = string(src[child.StartByte():child.EndByte()])
 		case "method_parameter":
@@ -477,7 +477,7 @@ func (p *ObjCParser) extractProperty(g *graph.Graph, n sitter.Node, src []byte, 
 	attrText := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "property_attributes_declaration" {
+		if !child.IsNull() && nodeType(child) == "property_attributes_declaration" {
 			attrText = string(src[child.StartByte():child.EndByte()])
 			break
 		}
@@ -489,7 +489,7 @@ func (p *ObjCParser) extractProperty(g *graph.Graph, n sitter.Node, src []byte, 
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "struct_declaration" {
+		if child.IsNull() || nodeType(child) != "struct_declaration" {
 			continue
 		}
 		// Extract type identifier.
@@ -499,7 +499,7 @@ func (p *ObjCParser) extractProperty(g *graph.Graph, n sitter.Node, src []byte, 
 		// Extract property name from struct_declarator.
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			sd := child.Child(j)
-			if sd.IsNull() || sd.Type() != "struct_declarator" {
+			if sd.IsNull() || nodeType(sd) != "struct_declarator" {
 				continue
 			}
 			// Name may be directly an identifier (no pointer) or nested in pointer_declarator.
@@ -554,7 +554,7 @@ func (p *ObjCParser) extractImplementation(g *graph.Graph, n sitter.Node, src []
 	className := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			className = string(src[child.StartByte():child.EndByte()])
 			break
 		}
@@ -584,7 +584,7 @@ func (p *ObjCParser) extractImplementation(g *graph.Graph, n sitter.Node, src []
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "method_definition":
 			p.extractMethodDef(g, child, src, filePath, fileNodeID, className)
 		case "function_definition":
@@ -603,11 +603,11 @@ func (p *ObjCParser) extractMethodDef(g *graph.Graph, n sitter.Node, src []byte,
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "+" {
+		if nodeType(child) == "+" {
 			scope = "class"
 			break
 		}
-		if child.Type() == "-" {
+		if nodeType(child) == "-" {
 			break
 		}
 	}
@@ -621,7 +621,7 @@ func (p *ObjCParser) extractMethodDef(g *graph.Graph, n sitter.Node, src []byte,
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			pendingIdent = string(src[child.StartByte():child.EndByte()])
 		case "keyword_argument_list":
@@ -677,11 +677,11 @@ func (p *ObjCParser) extractSelectorFromKeywordArgs(n sitter.Node, src []byte, p
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "keyword_declarator" {
+		if nodeType(child) == "keyword_declarator" {
 			// keyword_declarator contains: identifier ":" type identifier
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				kc := child.Child(j)
-				if !kc.IsNull() && kc.Type() == "identifier" {
+				if !kc.IsNull() && nodeType(kc) == "identifier" {
 					*parts = append(*parts, string(src[kc.StartByte():kc.EndByte()])+":")
 					break // first identifier is the keyword
 				}
@@ -698,7 +698,7 @@ func (p *ObjCParser) extractCFunction(g *graph.Graph, n sitter.Node, src []byte,
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "function_declarator" {
+		if nodeType(child) == "function_declarator" {
 			if ident := firstChildOfType(child, "identifier"); !ident.IsNull() {
 				name := string(src[ident.StartByte():ident.EndByte()])
 				funcNodeID := g.MakeNodeID(filePath, name)
@@ -727,7 +727,7 @@ func objcLastIdentifier(n sitter.Node, src []byte) string {
 		return ""
 	}
 	// If this node is an identifier, return it.
-	if n.Type() == "identifier" {
+	if nodeType(n) == "identifier" {
 		return string(src[n.StartByte():n.EndByte()])
 	}
 	// Recurse into children looking for nested pointer_declarator or identifier.
@@ -736,10 +736,10 @@ func objcLastIdentifier(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "identifier" {
+		if nodeType(child) == "identifier" {
 			return string(src[child.StartByte():child.EndByte()])
 		}
-		if child.Type() == "pointer_declarator" {
+		if nodeType(child) == "pointer_declarator" {
 			if name := objcLastIdentifier(child, src); name != "" {
 				return name
 			}

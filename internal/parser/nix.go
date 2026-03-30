@@ -90,7 +90,7 @@ func (p *NixParser) walkNode(
 		return
 	}
 
-	switch node.Type() {
+	switch nodeType(node) {
 	case "function_expression":
 		p.handleFunctionExpression(g, node, src, filePath, fileNodeID, lines)
 
@@ -161,7 +161,7 @@ func (p *NixParser) handleFunctionExpression(
 			if child.IsNull() {
 				continue
 			}
-			if child.Type() == "formal" {
+			if nodeType(child) == "formal" {
 				ident := firstChildOfType(child, "identifier")
 				if !ident.IsNull() {
 					name := childText(ident, src)
@@ -198,7 +198,7 @@ func (p *NixParser) handleFunctionExpression(
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "formals" || ct == "identifier" {
 			continue
 		}
@@ -224,7 +224,7 @@ func (p *NixParser) handleLetExpression(
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "binding_set":
 			p.extractBindings(g, child, src, filePath, fileNodeID, lines, "let")
 
@@ -255,7 +255,7 @@ func (p *NixParser) handleAttrsetExpression(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "binding_set":
 			p.extractBindings(g, child, src, filePath, fileNodeID, lines, "attr")
 
@@ -286,7 +286,7 @@ func (p *NixParser) extractBindings(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "binding":
 			p.extractSingleBinding(g, child, src, filePath, fileNodeID, lines, kind)
 		case "inherit":
@@ -342,7 +342,7 @@ func (p *NixParser) extractSingleBinding(
 	// This catches patterns like: pkg = import ./pkg.nix;
 	for i := uint32(0); i < node.ChildCount(); i++ {
 		child := node.Child(i)
-		if !child.IsNull() && child.Type() == "apply_expression" {
+		if !child.IsNull() && nodeType(child) == "apply_expression" {
 			p.handleApplyExpression(g, child, src, filePath, fileNodeID)
 		}
 	}
@@ -366,7 +366,7 @@ func (p *NixParser) handleInherit(
 			continue
 		}
 		// Extract each identifier in the inherit statement.
-		if child.Type() == "identifier" || child.Type() == "attr_identifier" {
+		if nodeType(child) == "identifier" || nodeType(child) == "attr_identifier" {
 			name := childText(child, src)
 			if name == "" {
 				continue
@@ -412,7 +412,7 @@ func (p *NixParser) handleApplyExpression(
 	isImport := false
 	var pathNode sitter.Node
 
-	switch first.Type() {
+	switch nodeType(first) {
 	case "variable_expression":
 		// Direct import: `import ./path.nix`
 		ident := firstChildOfType(first, "identifier")
@@ -462,7 +462,7 @@ func nixExtractBindingName(node sitter.Node, src []byte) string {
 			if child.IsNull() {
 				continue
 			}
-			if child.Type() == "identifier" || child.Type() == "attr_identifier" {
+			if nodeType(child) == "identifier" || nodeType(child) == "attr_identifier" {
 				text := childText(child, src)
 				if text != "" {
 					parts = append(parts, text)
@@ -494,7 +494,7 @@ func nixExtractImportPath(node sitter.Node, src []byte, filePath string) string 
 
 	text := strings.TrimSpace(childText(node, src))
 
-	switch node.Type() {
+	switch nodeType(node) {
 	case "path_expression", "path_fragment":
 		// Resolve relative paths against the file's directory.
 		if strings.HasPrefix(text, "./") || strings.HasPrefix(text, "../") {

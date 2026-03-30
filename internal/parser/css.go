@@ -71,7 +71,7 @@ func (p *CSSParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			return
 		}
 
-		switch n.Type() {
+		switch nodeType(n) {
 		case "import_statement":
 			extractCSSImport(g, n, src, filePath, fileNodeID)
 
@@ -114,7 +114,7 @@ func extractCSSRuleSet(g *graph.Graph, n sitter.Node, src []byte, filePath strin
 			continue
 		}
 		var name string
-		switch child.Type() {
+		switch nodeType(child) {
 		case "class_selector":
 			// Full text includes the leading dot: ".button"
 			name = strings.TrimSpace(childText(child, src))
@@ -156,7 +156,7 @@ func extractCSSImport(g *graph.Graph, n sitter.Node, src []byte, filePath string
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "string_value":
 			importPath = stripCSSQuotes(childText(child, src))
 		case "call_expression":
@@ -188,7 +188,7 @@ func extractCSSKeyframes(g *graph.Graph, n sitter.Node, src []byte, filePath str
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "keyframes_name", "plain_value", "identifier":
 			name = strings.TrimSpace(childText(child, src))
 		}
@@ -227,7 +227,7 @@ func extractCSSDeclaration(g *graph.Graph, n sitter.Node, src []byte, filePath s
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "property_name" {
+		if nodeType(child) == "property_name" {
 			propName = strings.TrimSpace(childText(child, src))
 			break
 		}
@@ -260,11 +260,11 @@ func extractCSSDeclaration(g *graph.Graph, n sitter.Node, src []byte, filePath s
 			if child.IsNull() {
 				continue
 			}
-			if child.Type() == ":" {
+			if nodeType(child) == ":" {
 				seenColon = true
 				continue
 			}
-			if seenColon && child.Type() == "plain_value" {
+			if seenColon && nodeType(child) == "plain_value" {
 				animName := strings.TrimSpace(childText(child, src))
 				if animName != "" && !isCSSKeyword(animName) {
 					kfID := g.MakeNodeID(filePath, animName)
@@ -292,7 +292,7 @@ func extractCSSVarRefs(g *graph.Graph, n sitter.Node, src []byte, filePath strin
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() != "call_expression" {
+		if nodeType(child) != "call_expression" {
 			continue
 		}
 		fnNode := firstChildOfType(child, "function_name")
@@ -331,7 +331,7 @@ func extractCSSAtRule(g *graph.Graph, n sitter.Node, src []byte, filePath string
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "at_keyword" {
+		if nodeType(child) == "at_keyword" {
 			atKeyword = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(childText(child, src)), "@"))
 			break
 		}
@@ -346,12 +346,12 @@ func extractCSSAtRule(g *graph.Graph, n sitter.Node, src []byte, filePath string
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() != "block" && child.Type() != "stylesheet" {
+		if nodeType(child) != "block" && nodeType(child) != "stylesheet" {
 			continue
 		}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			decl := child.Child(j)
-			if decl.IsNull() || decl.Type() != "declaration" {
+			if decl.IsNull() || nodeType(decl) != "declaration" {
 				continue
 			}
 			propName := ""
@@ -361,7 +361,7 @@ func extractCSSAtRule(g *graph.Graph, n sitter.Node, src []byte, filePath string
 				if dChild.IsNull() {
 					continue
 				}
-				switch dChild.Type() {
+				switch nodeType(dChild) {
 				case "property_name":
 					propName = strings.ToLower(strings.TrimSpace(childText(dChild, src)))
 				case "string_value", "plain_value":
@@ -428,10 +428,10 @@ func extractCSSURLArg(callNode sitter.Node, src []byte) string {
 			if child.IsNull() {
 				continue
 			}
-			if child.Type() == "string_value" {
+			if nodeType(child) == "string_value" {
 				return stripCSSQuotes(childText(child, src))
 			}
-			if child.Type() == "plain_value" {
+			if nodeType(child) == "plain_value" {
 				return strings.TrimSpace(childText(child, src))
 			}
 		}
@@ -442,10 +442,10 @@ func extractCSSURLArg(callNode sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "string_value" {
+		if nodeType(child) == "string_value" {
 			return stripCSSQuotes(childText(child, src))
 		}
-		if child.Type() == "plain_value" {
+		if nodeType(child) == "plain_value" {
 			return strings.TrimSpace(childText(child, src))
 		}
 	}

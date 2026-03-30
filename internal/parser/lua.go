@@ -176,7 +176,7 @@ func extractLuaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "function_declaration" {
+		if nodeType(n) == "function_declaration" {
 			sl := int(n.StartPoint().Row) + 1
 			// Try to extract function name from various children.
 			if dotIdx := firstChildOfType(n, "dot_index_expression"); !dotIdx.IsNull() {
@@ -246,7 +246,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "function_call" {
+		if nodeType(n) == "function_call" {
 			// Check if the callee identifier is "require".
 			isRequire := false
 			var reqPath string
@@ -255,18 +255,18 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "identifier" {
+				if nodeType(child) == "identifier" {
 					if string(src[child.StartByte():child.EndByte()]) == "require" {
 						isRequire = true
 					}
 				}
-				if child.Type() == "function_arguments" || child.Type() == "arguments" {
+				if nodeType(child) == "function_arguments" || nodeType(child) == "arguments" {
 					for j := uint32(0); j < child.ChildCount(); j++ {
 						arg := child.Child(j)
 						if arg.IsNull() {
 							continue
 						}
-						if arg.Type() == "string" {
+						if nodeType(arg) == "string" {
 							rawStr := string(src[arg.StartByte():arg.EndByte()])
 							reqPath = strings.Trim(rawStr, `"'`)
 						}
@@ -360,7 +360,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if n.IsNull() {
 			return
 		}
-		nt := n.Type()
+		nt := nodeType(n)
 		if nt == "assignment_statement" {
 			// Check if expression_list contains a function_definition.
 			exprList := firstChildOfType(n, "expression_list")
@@ -368,7 +368,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			if !exprList.IsNull() {
 				for i := uint32(0); i < exprList.ChildCount(); i++ {
 					c := exprList.Child(i)
-					if !c.IsNull() && c.Type() == "function_definition" {
+					if !c.IsNull() && nodeType(c) == "function_definition" {
 						hasFuncVal = true
 						break
 					}
@@ -382,7 +382,7 @@ func (p *LuaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 						if varNode.IsNull() {
 							continue
 						}
-						vt := varNode.Type()
+						vt := nodeType(varNode)
 						var qualName string
 						if vt == "dot_index_expression" || vt == "bracket_index_expression" {
 							qualName = extractLuaTableFieldName(varNode, src)
@@ -432,7 +432,7 @@ func extractLuaTableFieldName(varNode sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			text := strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 			if text != "" {
@@ -443,7 +443,7 @@ func extractLuaTableFieldName(varNode sitter.Node, src []byte) string {
 			// Extract the string_content child (strips quotes).
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				sc := child.Child(j)
-				if !sc.IsNull() && sc.Type() == "string_content" {
+				if !sc.IsNull() && nodeType(sc) == "string_content" {
 					parts = append(parts, string(src[sc.StartByte():sc.EndByte()]))
 					break
 				}

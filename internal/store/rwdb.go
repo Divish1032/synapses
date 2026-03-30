@@ -107,7 +107,7 @@ func newRWDB(path string, writerDB *sql.DB, maxReaders int) (*rwDB, error) {
 	// Performance pragmas match openSQLiteDB: synchronous(NORMAL), 64 MB cache,
 	// 256 MB mmap, temp tables in memory.
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=query_only(true)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16384)" +
 		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	readerDB, err := sql.Open("sqlite", dsn)
 	if err != nil {

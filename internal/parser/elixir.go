@@ -37,7 +37,7 @@ func extractElixirDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "call" {
+		if nodeType(n) == "call" {
 			targetNode := n.ChildByFieldName("target")
 			if !targetNode.IsNull() {
 				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])
@@ -470,7 +470,7 @@ func extractElixirStructFields(g *graph.Graph, root sitter.Node, src []byte, fil
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "call" {
+		if nodeType(n) == "call" {
 			targetNode := n.ChildByFieldName("target")
 			if targetNode.IsNull() {
 				targetNode = firstChildOfType(n, "identifier")
@@ -520,7 +520,7 @@ func extractStructFieldsFromArgs(g *graph.Graph, argsNode sitter.Node, src []byt
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "pair" {
+		if nodeType(n) == "pair" {
 			// First child is keyword (e.g. "name: ")
 			kw := firstChildOfType(n, "keyword")
 			if !kw.IsNull() {
@@ -561,7 +561,7 @@ func extractElixirGuards(g *graph.Graph, root sitter.Node, src []byte, filePath 
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "call" {
+		if nodeType(n) == "call" {
 			targetNode := n.ChildByFieldName("target")
 			if !targetNode.IsNull() {
 				keyword := string(src[targetNode.StartByte():targetNode.EndByte()])

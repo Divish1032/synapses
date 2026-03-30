@@ -21,7 +21,7 @@ func extractJavaDeclInfo(root sitter.Node, src []byte, lines []string) map[strin
 		if n.IsNull() || depth > 8 {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "method_declaration":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -109,7 +109,7 @@ func isJavaPublicNode(n sitter.Node, src []byte) bool {
 		// Try finding a "modifiers" node among children.
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if !child.IsNull() && child.Type() == "modifiers" {
+			if !child.IsNull() && nodeType(child) == "modifiers" {
 				modifiers = child
 				break
 			}
@@ -237,7 +237,7 @@ func (p *JavaParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -252,7 +252,7 @@ func (p *JavaParser) extractAllDeclarations(
 			if mods.IsNull() {
 				for k := uint32(0); k < n.ChildCount(); k++ {
 					child := n.Child(k)
-					if !child.IsNull() && child.Type() == "modifiers" {
+					if !child.IsNull() && nodeType(child) == "modifiers" {
 						mods = child
 						break
 					}
@@ -285,13 +285,13 @@ func (p *JavaParser) extractAllDeclarations(
 			// Extract permitted subclasses from "permits" clause.
 			for k := uint32(0); k < n.ChildCount(); k++ {
 				child := n.Child(k)
-				if child.IsNull() || child.Type() != "permits" {
+				if child.IsNull() || nodeType(child) != "permits" {
 					continue
 				}
 				if tl := firstChildOfType(child, "type_list"); !tl.IsNull() {
 					for j := uint32(0); j < tl.ChildCount(); j++ {
 						ti := tl.Child(j)
-						if ti.IsNull() || ti.Type() != "type_identifier" {
+						if ti.IsNull() || nodeType(ti) != "type_identifier" {
 							continue
 						}
 						subName := string(src[ti.StartByte():ti.EndByte()])
@@ -560,7 +560,7 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 		// AliasedCalleeExtractor extracts (object, method) for method_invocation nodes
 		// so the resolver can use the object name to narrow cross-file type resolution.
 		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
-			switch n.Type() {
+			switch nodeType(n) {
 			case "method_invocation":
 				nameNode := n.ChildByFieldName("name")
 				if nameNode.IsNull() {
@@ -570,7 +570,7 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 				objNode := n.ChildByFieldName("object")
 				var objName string
 				if !objNode.IsNull() {
-					switch objNode.Type() {
+					switch nodeType(objNode) {
 					case "identifier":
 						objName = string(src[objNode.StartByte():objNode.EndByte()])
 					case "this":
@@ -580,6 +580,22 @@ func collectJavaCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 					case "field_access":
 						// Chained: this.field.method() → alias="this.field"
 						objName = string(src[objNode.StartByte():objNode.EndByte()])
+					case "method_invocation":
+						// Chained/fluent call: builder.baseUrl(...).build()
+						// The receiver is the result of another call. Extract the
+						// innermost object name to provide a hint for resolution.
+						// Walk inward through nested method_invocations to find the root object.
+						inner := objNode
+						for nodeType(inner) == "method_invocation" {
+							if obj := inner.ChildByFieldName("object"); !obj.IsNull() {
+								inner = obj
+							} else {
+								break
+							}
+						}
+						if nodeType(inner) == "identifier" || nodeType(inner) == "this" || nodeType(inner) == "super" {
+							objName = string(src[inner.StartByte():inner.EndByte()])
+						}
 					}
 				} else {
 					// Bare method call like _readValue() inside a class method.
@@ -612,7 +628,7 @@ func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath 
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "field_declaration", "local_variable_declaration":
 			typeNode := n.ChildByFieldName("type")
 			if typeNode.IsNull() {
@@ -626,7 +642,7 @@ func collectJavaVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath 
 			// Walk declarators to get variable names.
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child.IsNull() || child.Type() != "variable_declarator" {
+				if child.IsNull() || nodeType(child) != "variable_declarator" {
 					continue
 				}
 				nameNode := child.ChildByFieldName("name")
@@ -663,7 +679,7 @@ func collectJavaFormalParamTypes(g *graph.Graph, params sitter.Node, src []byte,
 		if param.IsNull() {
 			continue
 		}
-		if param.Type() != "formal_parameter" && param.Type() != "spread_parameter" {
+		if nodeType(param) != "formal_parameter" && nodeType(param) != "spread_parameter" {
 			continue
 		}
 		typeNode := param.ChildByFieldName("type")
@@ -697,7 +713,7 @@ func collectJavaInstantiatedTypes(g *graph.Graph, root sitter.Node, src []byte, 
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "object_creation_expression" {
+		if nodeType(n) == "object_creation_expression" {
 			typeNode := n.ChildByFieldName("type")
 			if !typeNode.IsNull() {
 				typeName := extractJavaSimpleTypeName(typeNode, src)
@@ -737,7 +753,7 @@ func extractJavaModifierAnnotations(modifiers sitter.Node, src []byte) []string 
 			continue
 		}
 		// annotation or marker_annotation
-		if child.Type() == "annotation" || child.Type() == "marker_annotation" {
+		if nodeType(child) == "annotation" || nodeType(child) == "marker_annotation" {
 			nameNode := child.ChildByFieldName("name")
 			if nameNode.IsNull() {
 				// fallback: first identifier child
@@ -757,7 +773,7 @@ func javaHasModifier(n sitter.Node, src []byte, keyword string) bool {
 	if modifiers.IsNull() {
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if !child.IsNull() && child.Type() == "modifiers" {
+			if !child.IsNull() && nodeType(child) == "modifiers" {
 				modifiers = child
 				break
 			}
@@ -786,7 +802,7 @@ func collectJavaAnnotatedInstantiations(g *graph.Graph, root sitter.Node, src []
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -799,7 +815,7 @@ func collectJavaAnnotatedInstantiations(g *graph.Graph, root sitter.Node, src []
 			if modifiers.IsNull() {
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
-					if !child.IsNull() && child.Type() == "modifiers" {
+					if !child.IsNull() && nodeType(child) == "modifiers" {
 						modifiers = child
 						break
 					}
@@ -836,7 +852,7 @@ func collectJavaAnnotatedInstantiations(g *graph.Graph, root sitter.Node, src []
 			if !body.IsNull() {
 				for i := uint32(0); i < body.ChildCount(); i++ {
 					child := body.Child(i)
-					if !child.IsNull() && child.Type() == "enum_constant" {
+					if !child.IsNull() && nodeType(child) == "enum_constant" {
 						if !isJavaBuiltin(enumName) {
 							g.AddInstantiatedType(filePath, enumName)
 						}
@@ -870,7 +886,7 @@ func collectJavaAnnotatedInstantiations(g *graph.Graph, root sitter.Node, src []
 				if modifiers.IsNull() {
 					for i := uint32(0); i < n.ChildCount(); i++ {
 						child := n.Child(i)
-						if !child.IsNull() && child.Type() == "modifiers" {
+						if !child.IsNull() && nodeType(child) == "modifiers" {
 							modifiers = child
 							break
 						}
@@ -905,14 +921,14 @@ func extractJavaSimpleTypeName(typeNode sitter.Node, src []byte) string {
 	if typeNode.IsNull() {
 		return ""
 	}
-	switch typeNode.Type() {
+	switch nodeType(typeNode) {
 	case "type_identifier":
 		return string(src[typeNode.StartByte():typeNode.EndByte()])
 	case "generic_type":
 		// e.g. List<Repository> — take the base type identifier
 		for i := uint32(0); i < typeNode.ChildCount(); i++ {
 			child := typeNode.Child(i)
-			if !child.IsNull() && child.Type() == "type_identifier" {
+			if !child.IsNull() && nodeType(child) == "type_identifier" {
 				return string(src[child.StartByte():child.EndByte()])
 			}
 		}

@@ -69,7 +69,7 @@ func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "package_statement":
 			currentPkg = perlExtractPackageName(child, src)
 			if currentPkg == "" {
@@ -134,7 +134,7 @@ func (p *PerlParser) handleSubDecl(
 	name := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "bareword" {
+		if !child.IsNull() && nodeType(child) == "bareword" {
 			name = childText(child, src)
 			break
 		}
@@ -182,12 +182,12 @@ func (p *PerlParser) handleExprStmt(
 	// expression_statement → assignment_expression → variable_declaration
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "assignment_expression" {
+		if child.IsNull() || nodeType(child) != "assignment_expression" {
 			continue
 		}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			vd := child.Child(j)
-			if vd.IsNull() || vd.Type() != "variable_declaration" {
+			if vd.IsNull() || nodeType(vd) != "variable_declaration" {
 				continue
 			}
 			scope := ""
@@ -196,8 +196,8 @@ func (p *PerlParser) handleExprStmt(
 				if kw.IsNull() {
 					continue
 				}
-				if kw.Type() == "our" || kw.Type() == "my" {
-					scope = kw.Type()
+				if nodeType(kw) == "our" || nodeType(kw) == "my" {
+					scope = nodeType(kw)
 				}
 			}
 			if scope == "" {
@@ -235,7 +235,7 @@ func perlExtractPackageName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "package" {
+		if nodeType(child) == "package" {
 			count++
 			if count == 2 { // first is keyword, second is name
 				return childText(child, src)
@@ -249,7 +249,7 @@ func perlExtractPackageName(n sitter.Node, src []byte) string {
 func perlExtractUseName(n sitter.Node, src []byte) string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "package" {
+		if !child.IsNull() && nodeType(child) == "package" {
 			return childText(child, src)
 		}
 	}
@@ -263,12 +263,12 @@ func perlExtractVarName(vd sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		typ := child.Type()
+		typ := nodeType(child)
 		if typ == "scalar" || typ == "array" || typ == "hash" {
 			// Look for varname child.
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				vn := child.Child(j)
-				if !vn.IsNull() && vn.Type() == "varname" {
+				if !vn.IsNull() && nodeType(vn) == "varname" {
 					return childText(vn, src)
 				}
 			}

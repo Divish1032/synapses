@@ -38,7 +38,7 @@ func extractBashDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "function_definition" {
+		if nodeType(n) == "function_definition" {
 			name := extractBashFuncName(n, src)
 			if name != "" {
 				sl := int(n.StartPoint().Row) + 1
@@ -126,7 +126,7 @@ func (p *BashParser) extractFunctions(
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "function_definition" {
+		if nodeType(n) == "function_definition" {
 			name := extractBashFuncName(n, src)
 			if name != "" {
 				nodeID := g.MakeNodeID(filePath, name)
@@ -162,7 +162,7 @@ func (p *BashParser) extractSourceImports(
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "command" {
+		if nodeType(n) == "command" {
 			cmdName := extractBashCommandName(n, src)
 			if cmdName == "source" || cmdName == "." {
 				// Extract the file path argument (first argument after the command name).
@@ -203,7 +203,7 @@ func (p *BashParser) extractAliases(
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "command" {
+		if nodeType(n) == "command" {
 			cmdName := extractBashCommandName(n, src)
 			if cmdName == "alias" {
 				// Each argument after "alias" is a name=value assignment.
@@ -214,7 +214,7 @@ func (p *BashParser) extractAliases(
 						continue
 					}
 					// Skip the command_name node itself.
-					if child.Type() == "command_name" {
+					if nodeType(child) == "command_name" {
 						continue
 					}
 					// The alias argument can be a word like "ll='ls -la'"
@@ -276,7 +276,7 @@ func extractBashFirstArg(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "command_name" {
+		if nodeType(child) == "command_name" {
 			seenName = true
 			continue
 		}
@@ -305,7 +305,7 @@ func collectBashCallSites(
 			"command": true,
 		},
 		NameExtractor: func(n sitter.Node, s []byte) string {
-			if n.Type() == "function_definition" {
+			if nodeType(n) == "function_definition" {
 				return extractBashFuncName(n, s)
 			}
 			return ""

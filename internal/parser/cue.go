@@ -65,7 +65,7 @@ func (p *CUEParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "package_clause":
 			p.handlePackageClause(g, child, src, fileNodeID)
 
@@ -136,14 +136,14 @@ func (p *CUEParser) handleImportDecl(
 			if child.IsNull() {
 				continue
 			}
-			switch child.Type() {
+			switch nodeType(child) {
 			case "import_spec":
 				p.handleImportSpec(g, child, src, filePath, fileNodeID)
 			case "import_spec_list":
 				walkImports(child)
 			default:
 				// For single imports, the string might be a direct child.
-				if child.Type() == "string" || child.Type() == "simple_string_lit" {
+				if nodeType(child) == "string" || nodeType(child) == "simple_string_lit" {
 					importPath := cueStripQuotes(childText(child, src))
 					if importPath != "" {
 						p.addImportNode(g, importPath, filePath, fileNodeID)
@@ -311,7 +311,7 @@ func cueExtractFieldName(fieldNode sitter.Node, src []byte) string {
 			if child.IsNull() {
 				continue
 			}
-			ct := child.Type()
+			ct := nodeType(child)
 			if ct == "identifier" || ct == "string" || ct == "simple_string_lit" {
 				text := childText(child, src)
 				return cueStripQuotes(text)
@@ -326,7 +326,7 @@ func cueExtractFieldName(fieldNode sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		switch ct {
 		case "identifier":
 			text := childText(child, src)

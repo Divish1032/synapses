@@ -21,7 +21,7 @@ func extractRustDeclInfo(root sitter.Node, src []byte, lines []string) map[strin
 		if n.IsNull() || depth > 8 {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_item":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -96,7 +96,7 @@ func isRustPub(n sitter.Node, src []byte) bool {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "visibility_modifier" {
 			return true
 		}
@@ -235,7 +235,7 @@ func (p *RustParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_item":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -311,12 +311,12 @@ func (p *RustParser) extractAllDeclarations(
 			enumPub := isRustPub(n, src)
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				vl := n.Child(i)
-				if vl.IsNull() || vl.Type() != "enum_variant_list" {
+				if vl.IsNull() || nodeType(vl) != "enum_variant_list" {
 					continue
 				}
 				for j := uint32(0); j < vl.ChildCount(); j++ {
 					v := vl.Child(j)
-					if v.IsNull() || v.Type() != "enum_variant" {
+					if v.IsNull() || nodeType(v) != "enum_variant" {
 						continue
 					}
 					vNameNode := v.ChildByFieldName("name")
@@ -400,7 +400,7 @@ func (p *RustParser) extractAllDeclarations(
 				meta = make(map[string]string, 1)
 			}
 			kind := "const"
-			if n.Type() == "static_item" {
+			if nodeType(n) == "static_item" {
 				kind = "static"
 			}
 			meta["kind"] = kind
@@ -491,10 +491,16 @@ func collectRustCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 			"call_expression": true,
 		},
 		NameExtractor: func(n sitter.Node, src []byte) string {
-			if n.Type() == "impl_item" {
+			if nodeType(n) == "impl_item" {
 				// For impl blocks, the "class" name is the type being implemented.
+				// Strip generic parameters (e.g., "Bar<T>" → "Bar") so that node IDs
+				// match the struct declaration's name.
 				if typeNode := n.ChildByFieldName("type"); !typeNode.IsNull() {
-					return string(src[typeNode.StartByte():typeNode.EndByte()])
+					name := string(src[typeNode.StartByte():typeNode.EndByte()])
+					if idx := strings.IndexByte(name, '<'); idx > 0 {
+						name = name[:idx]
+					}
+					return name
 				}
 				return ""
 			}
@@ -508,7 +514,7 @@ func collectRustCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 			if fn.IsNull() {
 				return "", ""
 			}
-			switch fn.Type() {
+			switch nodeType(fn) {
 			case "identifier":
 				return "", string(src[fn.StartByte():fn.EndByte()])
 			case "field_expression":

@@ -37,7 +37,7 @@ func extractScalaDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_definition":
 			if nameNode := firstChildOfType(n, "identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -143,14 +143,14 @@ func (p *ScalaParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "package_clause" {
+		if nodeType(n) == "package_clause" {
 			// package_clause → package_identifier (full dotted name)
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "package_identifier" {
+				if nodeType(child) == "package_identifier" {
 					pkgName := string(src[child.StartByte():child.EndByte()])
 					if pkgName != "" {
 						pkgID := g.MakeNodeID(pkgName, pkgName)
@@ -201,7 +201,7 @@ func (p *ScalaParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_definition":
 			nameNode := firstChildOfType(n, "identifier")
 			if nameNode.IsNull() {
@@ -384,12 +384,12 @@ func (p *ScalaParser) extractAllDeclarations(
 			if body := firstChildOfType(n, "enum_body"); !body.IsNull() {
 				for i := uint32(0); i < body.ChildCount(); i++ {
 					caseDefs := body.Child(i)
-					if caseDefs.IsNull() || caseDefs.Type() != "enum_case_definitions" {
+					if caseDefs.IsNull() || nodeType(caseDefs) != "enum_case_definitions" {
 						continue
 					}
 					for j := uint32(0); j < caseDefs.ChildCount(); j++ {
 						sc := caseDefs.Child(j)
-						if sc.IsNull() || sc.Type() != "simple_enum_case" {
+						if sc.IsNull() || nodeType(sc) != "simple_enum_case" {
 							continue
 						}
 						caseNameNode := firstChildOfType(sc, "identifier")
@@ -425,7 +425,7 @@ func (p *ScalaParser) extractAllDeclarations(
 			nodeID := g.MakeNodeID(filePath, qualName)
 			meta := make(map[string]string, 1)
 			meta["kind"] = "val"
-			if n.Type() == "var_definition" {
+			if nodeType(n) == "var_definition" {
 				meta["kind"] = "var"
 			}
 			g.AddNode(&graph.Node{
@@ -461,7 +461,7 @@ func hasScalaModifier(n sitter.Node, src []byte, modifier string) bool {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "modifiers" {
+		if nodeType(child) == "modifiers" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				mod := child.Child(j)
 				if !mod.IsNull() && string(src[mod.StartByte():mod.EndByte()]) == modifier {
@@ -471,7 +471,7 @@ func hasScalaModifier(n sitter.Node, src []byte, modifier string) bool {
 			return false
 		}
 		// Stop before the def/val/class keyword.
-		if child.Type() == "identifier" || child.Type() == "def" || child.Type() == "class" {
+		if nodeType(child) == "identifier" || nodeType(child) == "def" || nodeType(child) == "class" {
 			break
 		}
 	}

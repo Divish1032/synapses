@@ -129,7 +129,7 @@ func (p *XMLParser) parsePom(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() != "element" {
+		if nodeType(child) != "element" {
 			continue
 		}
 		tagName := xmlElementTagName(child, src)
@@ -146,7 +146,7 @@ func (p *XMLParser) parsePom(
 			if !buildContent.IsNull() {
 				for j := uint32(0); j < buildContent.ChildCount(); j++ {
 					bc := buildContent.Child(j)
-					if bc.IsNull() || bc.Type() != "element" {
+					if bc.IsNull() || nodeType(bc) != "element" {
 						continue
 					}
 					switch xmlElementTagName(bc, src) {
@@ -174,7 +174,7 @@ func (p *XMLParser) parsePomDependencies(
 	}
 	for i := uint32(0); i < depsContent.ChildCount(); i++ {
 		child := depsContent.Child(i)
-		if child.IsNull() || child.Type() != "element" {
+		if child.IsNull() || nodeType(child) != "element" {
 			continue
 		}
 		if xmlElementTagName(child, src) != "dependency" {
@@ -229,7 +229,7 @@ func (p *XMLParser) parsePomPlugins(
 	}
 	for i := uint32(0); i < pluginsContent.ChildCount(); i++ {
 		child := pluginsContent.Child(i)
-		if child.IsNull() || child.Type() != "element" {
+		if child.IsNull() || nodeType(child) != "element" {
 			continue
 		}
 		if xmlElementTagName(child, src) != "plugin" {
@@ -268,7 +268,7 @@ func (p *XMLParser) parsePomModules(
 	}
 	for i := uint32(0); i < modulesContent.ChildCount(); i++ {
 		child := modulesContent.Child(i)
-		if child.IsNull() || child.Type() != "element" {
+		if child.IsNull() || nodeType(child) != "element" {
 			continue
 		}
 		if xmlElementTagName(child, src) != "module" {
@@ -305,7 +305,7 @@ func (p *XMLParser) parseAndroidManifest(
 		}
 		for i := uint32(0); i < contentNode.ChildCount(); i++ {
 			child := contentNode.Child(i)
-			if child.IsNull() || child.Type() != "element" {
+			if child.IsNull() || nodeType(child) != "element" {
 				continue
 			}
 			tagName := xmlElementTagName(child, src)
@@ -375,7 +375,7 @@ func (p *XMLParser) parseSpringContext(
 	}
 	for i := uint32(0); i < content.ChildCount(); i++ {
 		child := content.Child(i)
-		if child.IsNull() || child.Type() != "element" {
+		if child.IsNull() || nodeType(child) != "element" {
 			continue
 		}
 		tagName := xmlElementTagName(child, src)
@@ -450,7 +450,7 @@ func (p *XMLParser) parseGeneric(
 	seenTags := make(map[string]int) // tag → count for sampling
 	for i := uint32(0); i < content.ChildCount(); i++ {
 		child := content.Child(i)
-		if child.IsNull() || child.Type() != "element" {
+		if child.IsNull() || nodeType(child) != "element" {
 			continue
 		}
 		childTag := xmlElementTagName(child, src)
@@ -497,7 +497,7 @@ func (p *XMLParser) parseGeneric(
 			if !childContent.IsNull() {
 				for j := uint32(0); j < childContent.ChildCount(); j++ {
 					gc := childContent.Child(j)
-					if gc.IsNull() || gc.Type() != "element" {
+					if gc.IsNull() || nodeType(gc) != "element" {
 						continue
 					}
 					gcAttrs := xmlGetAttributes(gc, src)
@@ -557,7 +557,7 @@ func xmlCleanElementName(elem sitter.Node, tagName string, src []byte) string {
 func xmlFindFirstElement(docNode sitter.Node, src []byte) sitter.Node {
 	for i := uint32(0); i < docNode.ChildCount(); i++ {
 		child := docNode.Child(i)
-		if !child.IsNull() && child.Type() == "element" {
+		if !child.IsNull() && nodeType(child) == "element" {
 			return child
 		}
 	}
@@ -576,12 +576,12 @@ func xmlElementTagName(elemNode sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "STag" || ct == "EmptyElemTag" {
 			// Find Name child.
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && gc.Type() == "Name" {
+				if !gc.IsNull() && nodeType(gc) == "Name" {
 					return childText(gc, src)
 				}
 			}
@@ -597,7 +597,7 @@ func xmlGetContent(elemNode sitter.Node, src []byte) sitter.Node {
 	}
 	for i := uint32(0); i < elemNode.ChildCount(); i++ {
 		child := elemNode.Child(i)
-		if !child.IsNull() && child.Type() == "content" {
+		if !child.IsNull() && nodeType(child) == "content" {
 			return child
 		}
 	}
@@ -617,13 +617,13 @@ func xmlGetAttributes(elemNode sitter.Node, src []byte) map[string]string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct != "STag" && ct != "EmptyElemTag" {
 			continue
 		}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			attr := child.Child(j)
-			if attr.IsNull() || attr.Type() != "Attribute" {
+			if attr.IsNull() || nodeType(attr) != "Attribute" {
 				continue
 			}
 			var attrName, attrVal string
@@ -632,7 +632,7 @@ func xmlGetAttributes(elemNode sitter.Node, src []byte) map[string]string {
 				if ac.IsNull() {
 					continue
 				}
-				switch ac.Type() {
+				switch nodeType(ac) {
 				case "Name":
 					attrName = childText(ac, src)
 				case "AttValue":
@@ -684,7 +684,7 @@ func xmlFindDirectChildText(elemNode sitter.Node, tagName string, src []byte) st
 	}
 	for i := uint32(0); i < content.ChildCount(); i++ {
 		child := content.Child(i)
-		if child.IsNull() || child.Type() != "element" {
+		if child.IsNull() || nodeType(child) != "element" {
 			continue
 		}
 		if xmlElementTagName(child, src) == tagName {

@@ -148,7 +148,7 @@ func (p *StarlarkParser) Parse(g *graph.Graph, filePath string, src []byte) erro
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "function_definition":
 			p.handleFunctionDef(g, child, src, filePath, fileNodeID, lines)
 
@@ -225,7 +225,7 @@ func (p *StarlarkParser) handleExpressionStatement(
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "call":
 			callee := p.extractCalleeIdentifier(child, src)
 			if callee == "load" {
@@ -310,7 +310,7 @@ func (p *StarlarkParser) handleLoad(
 		}
 
 		// Direct string arguments.
-		if arg.Type() == "string" {
+		if nodeType(arg) == "string" {
 			text := p.unquoteString(arg, src)
 			if text != "" {
 				stringArgs = append(stringArgs, text)
@@ -322,12 +322,12 @@ func (p *StarlarkParser) handleLoad(
 		// We skip keyword arguments for load — they are alias mappings
 		// like symbol = "original_name", and we handle them by taking
 		// the key as the local name.
-		if arg.Type() == "keyword_argument" {
+		if nodeType(arg) == "keyword_argument" {
 			// For aliased loads like: load("...", my_alias = "go_binary")
 			// the key is the local alias, the value is the original symbol name.
 			// We create the import for the original symbol name.
 			valNode := p.findKeywordValue(arg, src)
-			if !valNode.IsNull() && valNode.Type() == "string" {
+			if !valNode.IsNull() && nodeType(valNode) == "string" {
 				text := p.unquoteString(valNode, src)
 				if text != "" {
 					stringArgs = append(stringArgs, text)
@@ -424,7 +424,7 @@ func (p *StarlarkParser) handleAssignment(
 func (p *StarlarkParser) extractIdentifierChild(n sitter.Node, src []byte) string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			return childText(child, src)
 		}
 	}
@@ -439,11 +439,11 @@ func (p *StarlarkParser) extractCalleeIdentifier(callNode sitter.Node, src []byt
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "identifier" {
+		if nodeType(child) == "identifier" {
 			return childText(child, src)
 		}
 		// For attribute access like foo.bar(...), extract the last identifier.
-		if child.Type() == "attribute" {
+		if nodeType(child) == "attribute" {
 			return p.extractAttributeName(child, src)
 		}
 	}
@@ -457,7 +457,7 @@ func (p *StarlarkParser) extractAttributeName(n sitter.Node, src []byte) string 
 	// We want the last identifier.
 	for i := int(n.ChildCount()) - 1; i >= 0; i-- {
 		child := n.Child(uint32(i))
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			return childText(child, src)
 		}
 	}
@@ -475,7 +475,7 @@ func (p *StarlarkParser) extractKeywordArgValue(callNode sitter.Node, src []byte
 
 	for i := uint32(0); i < argList.ChildCount(); i++ {
 		kwArg := argList.Child(i)
-		if kwArg.IsNull() || kwArg.Type() != "keyword_argument" {
+		if kwArg.IsNull() || nodeType(kwArg) != "keyword_argument" {
 			continue
 		}
 
@@ -490,7 +490,7 @@ func (p *StarlarkParser) extractKeywordArgValue(callNode sitter.Node, src []byte
 
 		// Find the value (string node).
 		valNode := p.findKeywordValue(kwArg, src)
-		if !valNode.IsNull() && valNode.Type() == "string" {
+		if !valNode.IsNull() && nodeType(valNode) == "string" {
 			return p.unquoteString(valNode, src)
 		}
 	}
@@ -513,7 +513,7 @@ func (p *StarlarkParser) findKeywordValue(kwArg sitter.Node, src []byte) sitter.
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "=" {
+		if nodeType(child) == "=" {
 			foundEquals = true
 			continue
 		}

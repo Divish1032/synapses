@@ -1,5 +1,6 @@
 .PHONY: build test lint clean install fmt vet completions \
-        run/index run/start run/status run/reset run/reset-all
+        run/index run/start run/status run/reset run/reset-all \
+        loadtest loadtest/generate
 
 BINARY     := synapses
 BUILD_DIR  := bin
@@ -121,6 +122,15 @@ run/reset: build
 ## run/reset-all: Remove ALL cached indexes
 run/reset-all: build
 	./$(BUILD_DIR)/$(BINARY) reset -all
+
+## loadtest: Run load test (small — Synapses repo, ~2 min)
+loadtest:
+	go test -tags loadtest -run TestLoadProfile_Small -v -count 1 -p 1 -parallel 1 -timeout 600s ./internal/loadtest/
+
+## loadtest/generate: Generate synthetic repos in /tmp for medium/large load tests
+loadtest/generate:
+	go run internal/loadtest/cmd/generate.go -files 10000 -out /tmp/synthetic_10k
+	go run internal/loadtest/cmd/generate.go -files 50000 -out /tmp/synthetic_50k
 
 ## help: Print this help message
 help:

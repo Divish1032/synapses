@@ -32,7 +32,7 @@ func (p *ZigParser) TSLanguageForFile(_ string) *sitter.Language { return p.lang
 func isZigPub(n sitter.Node) bool {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "pub" {
+		if !child.IsNull() && nodeType(child) == "pub" {
 			return true
 		}
 	}
@@ -49,7 +49,7 @@ func zigReturnType(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "parameters" {
 			sawParams = true
 			continue
@@ -85,7 +85,7 @@ func zigReturnType(n sitter.Node, src []byte) string {
 func zigParamsText(n sitter.Node, src []byte) string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "parameters" {
+		if !child.IsNull() && nodeType(child) == "parameters" {
 			text := strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 			if len(text) > 80 {
 				text = text[:80]
@@ -101,13 +101,13 @@ func zigEnumValues(enumDecl sitter.Node, src []byte) string {
 	var names []string
 	for i := uint32(0); i < enumDecl.ChildCount(); i++ {
 		child := enumDecl.Child(i)
-		if child.IsNull() || child.Type() != "container_field" {
+		if child.IsNull() || nodeType(child) != "container_field" {
 			continue
 		}
 		// The identifier is the first identifier child of container_field.
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			subchild := child.Child(j)
-			if !subchild.IsNull() && subchild.Type() == "identifier" {
+			if !subchild.IsNull() && nodeType(subchild) == "identifier" {
 				names = append(names, string(src[subchild.StartByte():subchild.EndByte()]))
 				break
 			}
@@ -125,7 +125,7 @@ func zigErrorSetValues(errorDecl sitter.Node, src []byte) string {
 	var names []string
 	for i := uint32(0); i < errorDecl.ChildCount(); i++ {
 		child := errorDecl.Child(i)
-		if child.IsNull() || child.Type() != "identifier" {
+		if child.IsNull() || nodeType(child) != "identifier" {
 			continue
 		}
 		names = append(names, string(src[child.StartByte():child.EndByte()]))
@@ -150,14 +150,14 @@ func extractZigStructMethods(
 ) {
 	for i := uint32(0); i < structDecl.ChildCount(); i++ {
 		child := structDecl.Child(i)
-		if child.IsNull() || child.Type() != "function_declaration" {
+		if child.IsNull() || nodeType(child) != "function_declaration" {
 			continue
 		}
 		// Get method name.
 		nameNode := sitter.Node{}
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			sub := child.Child(j)
-			if !sub.IsNull() && sub.Type() == "identifier" {
+			if !sub.IsNull() && nodeType(sub) == "identifier" {
 				nameNode = sub
 				break
 			}
@@ -225,13 +225,13 @@ func (p *ZigParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "function_declaration":
 			// Top-level function.
 			nameNode := sitter.Node{}
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				sub := child.Child(j)
-				if !sub.IsNull() && sub.Type() == "identifier" {
+				if !sub.IsNull() && nodeType(sub) == "identifier" {
 					nameNode = sub
 					break
 				}
@@ -273,7 +273,7 @@ func (p *ZigParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				if sub.IsNull() {
 					continue
 				}
-				if sub.Type() == "string" {
+				if nodeType(sub) == "string" {
 					raw := string(src[sub.StartByte():sub.EndByte()])
 					// Strip surrounding quotes.
 					testName = strings.Trim(raw, `"`)
@@ -318,10 +318,10 @@ func (p *ZigParser) extractZigVarDecl(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "pub" {
+		if nodeType(child) == "pub" {
 			isPub = true
 		}
-		if child.Type() == "identifier" {
+		if nodeType(child) == "identifier" {
 			nameNode = child
 			break
 		}
@@ -341,7 +341,7 @@ func (p *ZigParser) extractZigVarDecl(
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "=" {
 			sawEquals = true
 			continue
@@ -435,7 +435,7 @@ func (p *ZigParser) extractZigVarDecl(
 				if sub.IsNull() {
 					continue
 				}
-				st := sub.Type()
+				st := nodeType(sub)
 				// Try common string node type names across grammar versions.
 				if st == "string" || st == "string_literal" || st == "string_literal_single" {
 					raw := string(src[sub.StartByte():sub.EndByte()])

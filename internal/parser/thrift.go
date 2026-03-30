@@ -85,7 +85,7 @@ func (p *ThriftParser) Parse(g *graph.Graph, filePath string, src []byte) error 
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "namespace_declaration":
 			p.extractNamespace(g, child, src, filePath, fileNodeID)
 		case "typedef_definition":
@@ -136,7 +136,7 @@ func (p *ThriftParser) extractNamespace(g *graph.Graph, n sitter.Node, src []byt
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "namespace_scope":
 			lang = strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 			pastScope = true
@@ -197,7 +197,7 @@ func (p *ThriftParser) extractTypedef(g *graph.Graph, n sitter.Node, src []byte,
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "typedef_identifier":
 			newName = string(src[child.StartByte():child.EndByte()])
 		case "definition_type":
@@ -236,7 +236,7 @@ func (p *ThriftParser) extractEnum(g *graph.Graph, n sitter.Node, src []byte, fi
 	enumName := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			enumName = string(src[child.StartByte():child.EndByte()])
 			break
 		}
@@ -266,14 +266,14 @@ func (p *ThriftParser) extractEnum(g *graph.Graph, n sitter.Node, src []byte, fi
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "{" {
+		if nodeType(child) == "{" {
 			inBody = true
 			continue
 		}
-		if child.Type() == "}" {
+		if nodeType(child) == "}" {
 			break
 		}
-		if !inBody || child.Type() != "identifier" {
+		if !inBody || nodeType(child) != "identifier" {
 			continue
 		}
 		valueName := string(src[child.StartByte():child.EndByte()])
@@ -310,7 +310,7 @@ func (p *ThriftParser) extractStructLike(g *graph.Graph, n sitter.Node, src []by
 	structName := ""
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if !child.IsNull() && child.Type() == "identifier" {
+		if !child.IsNull() && nodeType(child) == "identifier" {
 			structName = string(src[child.StartByte():child.EndByte()])
 			break
 		}
@@ -334,7 +334,7 @@ func (p *ThriftParser) extractStructLike(g *graph.Graph, n sitter.Node, src []by
 	// Extract fields.
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "field" {
+		if child.IsNull() || nodeType(child) != "field" {
 			continue
 		}
 		p.extractField(g, child, src, filePath, fileNodeID, structNodeID, structName)
@@ -357,7 +357,7 @@ func (p *ThriftParser) extractField(g *graph.Graph, n sitter.Node, src []byte, f
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "field_id":
 			// [number][:] — the field tag number.
 			if num := firstChildOfType(child, "number"); !num.IsNull() {
@@ -420,7 +420,7 @@ func (p *ThriftParser) extractConst(g *graph.Graph, n sitter.Node, src []byte, f
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "definition_type":
 			constType = strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 		case "identifier":
@@ -472,7 +472,7 @@ func (p *ThriftParser) extractService(g *graph.Graph, n sitter.Node, src []byte,
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "identifier":
 			if serviceName == "" {
 				serviceName = string(src[child.StartByte():child.EndByte()])
@@ -524,7 +524,7 @@ func (p *ThriftParser) extractService(g *graph.Graph, n sitter.Node, src []byte,
 	// Extract function_definitions.
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.IsNull() || child.Type() != "function_definition" {
+		if child.IsNull() || nodeType(child) != "function_definition" {
 			continue
 		}
 		p.extractServiceFunction(g, child, src, filePath, fileNodeID, serviceNodeID, serviceName)
@@ -550,7 +550,7 @@ func (p *ThriftParser) extractServiceFunction(g *graph.Graph, n sitter.Node, src
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "function_modifier":
 			modifier = strings.TrimSpace(string(src[child.StartByte():child.EndByte()]))
 		case "type":
@@ -568,18 +568,18 @@ func (p *ThriftParser) extractServiceFunction(g *graph.Graph, n sitter.Node, src
 			// throws AST: [throws][parameters] — extract exception type names.
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				tc := child.Child(j)
-				if tc.IsNull() || tc.Type() != "parameters" {
+				if tc.IsNull() || nodeType(tc) != "parameters" {
 					continue
 				}
 				for k := uint32(0); k < tc.ChildCount(); k++ {
 					param := tc.Child(k)
-					if param.IsNull() || param.Type() != "parameter" {
+					if param.IsNull() || nodeType(param) != "parameter" {
 						continue
 					}
 					// parameter: [field_id][type][identifier]
 					for l := uint32(0); l < param.ChildCount(); l++ {
 						pc := param.Child(l)
-						if !pc.IsNull() && pc.Type() == "type" {
+						if !pc.IsNull() && nodeType(pc) == "type" {
 							throwsTypes = append(throwsTypes, strings.TrimSpace(string(src[pc.StartByte():pc.EndByte()])))
 						}
 					}
@@ -627,7 +627,7 @@ func (p *ThriftParser) extractInclude(g *graph.Graph, n sitter.Node, src []byte,
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "string" || child.Type() == "string_literal" {
+		if nodeType(child) == "string" || nodeType(child) == "string_literal" {
 			raw := string(src[child.StartByte():child.EndByte()])
 			// Strip quotes.
 			raw = strings.Trim(raw, `"'`)

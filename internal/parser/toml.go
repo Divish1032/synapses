@@ -81,7 +81,7 @@ func (p *TOMLParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "table":
 			p.handleTable(g, child, src, filePath, fileNodeID)
 		case "table_array_element":
@@ -129,7 +129,7 @@ func (p *TOMLParser) handleTable(
 	// Extract pair children inside the table body.
 	for i := uint32(0); i < node.ChildCount(); i++ {
 		child := node.Child(i)
-		if child.IsNull() || child.Type() != "pair" {
+		if child.IsNull() || nodeType(child) != "pair" {
 			continue
 		}
 		p.handlePairInSection(g, child, src, filePath, "table:"+sectionName, tableNodeID, isDep)
@@ -175,7 +175,7 @@ func (p *TOMLParser) handleTableArrayElement(
 	sectionKey := "array_table:" + arrayName + "@L" + tomlIntStr(startLine)
 	for i := uint32(0); i < node.ChildCount(); i++ {
 		child := node.Child(i)
-		if child.IsNull() || child.Type() != "pair" {
+		if child.IsNull() || nodeType(child) != "pair" {
 			continue
 		}
 		p.handlePairInSection(g, child, src, filePath, sectionKey, tableNodeID, false)
@@ -271,7 +271,7 @@ func tomlExtractTableName(node sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "bare_key":
 			return childText(child, src)
 		case "quoted_key":
@@ -291,7 +291,7 @@ func tomlExtractTableArrayName(node sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "bare_key":
 			return childText(child, src)
 		case "quoted_key":
@@ -311,7 +311,7 @@ func tomlExtractPairKey(node sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "bare_key":
 			return childText(child, src)
 		case "quoted_key":
@@ -333,7 +333,7 @@ func tomlExtractPairValue(node sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "bare_key" || ct == "quoted_key" || ct == "dotted_key" {
 			continue
 		}
@@ -380,7 +380,7 @@ func tomlExtractDottedKey(node sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "bare_key":
 			parts = append(parts, childText(child, src))
 		case "quoted_key":

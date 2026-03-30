@@ -84,7 +84,7 @@ func (p *MakefileParser) Parse(g *graph.Graph, filePath string, src []byte) erro
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "variable_assignment":
 			p.handleVariable(g, child, src, filePath, fileNodeID, lines)
 
@@ -108,7 +108,7 @@ func (p *MakefileParser) collectPhonyTargets(root sitter.Node, src []byte) map[s
 	phony := make(map[string]bool)
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if child.IsNull() || child.Type() != "rule" {
+		if child.IsNull() || nodeType(child) != "rule" {
 			continue
 		}
 
@@ -121,7 +121,7 @@ func (p *MakefileParser) collectPhonyTargets(root sitter.Node, src []byte) map[s
 		isPhony := false
 		for j := uint32(0); j < targetsNode.ChildCount(); j++ {
 			tc := targetsNode.Child(j)
-			if !tc.IsNull() && tc.Type() == "word" {
+			if !tc.IsNull() && nodeType(tc) == "word" {
 				name := strings.TrimSpace(childText(tc, src))
 				if name == ".PHONY" {
 					isPhony = true
@@ -141,7 +141,7 @@ func (p *MakefileParser) collectPhonyTargets(root sitter.Node, src []byte) map[s
 		}
 		for j := uint32(0); j < prereqsNode.ChildCount(); j++ {
 			pc := prereqsNode.Child(j)
-			if !pc.IsNull() && pc.Type() == "word" {
+			if !pc.IsNull() && nodeType(pc) == "word" {
 				name := strings.TrimSpace(childText(pc, src))
 				if name != "" {
 					phony[name] = true
@@ -216,7 +216,7 @@ func (p *MakefileParser) handleRule(
 	if !prereqsNode.IsNull() {
 		for j := uint32(0); j < prereqsNode.ChildCount(); j++ {
 			pc := prereqsNode.Child(j)
-			if !pc.IsNull() && pc.Type() == "word" {
+			if !pc.IsNull() && nodeType(pc) == "word" {
 				prereqName := strings.TrimSpace(childText(pc, src))
 				if prereqName != "" {
 					prereqs = append(prereqs, prereqName)
@@ -227,7 +227,7 @@ func (p *MakefileParser) handleRule(
 
 	for j := uint32(0); j < targetsNode.ChildCount(); j++ {
 		tc := targetsNode.Child(j)
-		if tc.IsNull() || tc.Type() != "word" {
+		if tc.IsNull() || nodeType(tc) != "word" {
 			continue
 		}
 		name := strings.TrimSpace(childText(tc, src))
@@ -301,7 +301,7 @@ func (p *MakefileParser) handleDefine(
 			seenDefine = true
 			continue
 		}
-		if seenDefine && child.Type() == "word" {
+		if seenDefine && nodeType(child) == "word" {
 			name = text
 			break
 		}

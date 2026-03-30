@@ -101,7 +101,7 @@ func (p *DockerfileParser) Parse(g *graph.Graph, filePath string, src []byte) er
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "from_instruction":
 			p.handleFrom(g, child, src, filePath, fileNodeID, lines, &stages, &currentStage)
 
@@ -165,7 +165,7 @@ func (p *DockerfileParser) handleFrom(
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "image_spec":
 			// image_spec contains image_name and optionally image_tag.
 			if nameNode := firstChildOfType(child, "image_name"); !nameNode.IsNull() {
@@ -261,7 +261,7 @@ func (p *DockerfileParser) handleCopy(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "param" {
+		if nodeType(child) == "param" {
 			paramText := strings.TrimSpace(childText(child, src))
 			if strings.HasPrefix(paramText, "--from=") {
 				fromStage = strings.TrimPrefix(paramText, "--from=")
@@ -374,7 +374,7 @@ func (p *DockerfileParser) handleEnv(
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "env_pair" {
+		if nodeType(child) == "env_pair" {
 			key := ""
 			if keyNode := firstChildOfType(child, "env_key"); !keyNode.IsNull() {
 				key = strings.TrimSpace(childText(keyNode, src))

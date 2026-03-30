@@ -43,7 +43,7 @@ func extractElmDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "type_annotation":
 			name, sig := extractElmTypeAnnotation(child, src)
 			if name != "" {
@@ -174,7 +174,7 @@ func extractElmTypeAnnotation(n sitter.Node, src []byte) (string, string) {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "lower_case_identifier" {
+		if nodeType(child) == "lower_case_identifier" {
 			name := string(src[child.StartByte():child.EndByte()])
 			return name, sig
 		}
@@ -277,7 +277,7 @@ func (p *ElmParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			continue
 		}
 
-		switch child.Type() {
+		switch nodeType(child) {
 		case "module_declaration":
 			moduleName := extractElmModuleName(child, src)
 			if moduleName != "" {

@@ -39,7 +39,7 @@ func extractRubyDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "method", "singleton_method":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -162,7 +162,7 @@ func (p *RubyParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -278,7 +278,7 @@ func (p *RubyParser) extractAllDeclarations(
 					continue
 				}
 				var attrName string
-				if arg.Type() == "simple_symbol" {
+				if nodeType(arg) == "simple_symbol" {
 					sym := string(src[arg.StartByte():arg.EndByte()])
 					attrName = strings.TrimPrefix(sym, ":")
 				}
@@ -331,10 +331,19 @@ func collectRubyCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node, 
 			callee := string(src[methodNode.StartByte():methodNode.EndByte()])
 			// Check for receiver: obj.method(args)
 			recvNode := n.ChildByFieldName("receiver")
-			if !recvNode.IsNull() && recvNode.Type() == "identifier" {
-				recv := string(src[recvNode.StartByte():recvNode.EndByte()])
-				if recv != "self" {
-					return recv, callee
+			if !recvNode.IsNull() {
+				switch nodeType(recvNode) {
+				case "identifier":
+					recv := string(src[recvNode.StartByte():recvNode.EndByte()])
+					if recv != "self" {
+						return recv, callee
+					}
+				case "constant":
+					// Class-qualified calls: Builder.use(), Logger.info()
+					return string(src[recvNode.StartByte():recvNode.EndByte()]), callee
+				case "scope_resolution":
+					// Namespaced constant calls: Rack::Handler.get(), ActiveRecord::Base.establish_connection()
+					return string(src[recvNode.StartByte():recvNode.EndByte()]), callee
 				}
 			}
 			return "", callee

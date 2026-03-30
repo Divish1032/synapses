@@ -86,7 +86,7 @@ func extractOCamlDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "value_specification":
 			// .mli interface: `val name : type`
 			name := extractOCamlValSpecName(n, src)
@@ -186,7 +186,7 @@ func (p *OCamlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "value_definition":
 			extractOCamlValueDef(g, n, src, filePath, fileNodeID, declInfo)
 			return
@@ -237,7 +237,7 @@ func extractOCamlLetNames(n sitter.Node, src []byte) []string {
 		if node.IsNull() {
 			return
 		}
-		nt := node.Type()
+		nt := nodeType(node)
 		// let_binding contains the actual name and body.
 		if nt == "let_binding" {
 			if nameNode := node.ChildByFieldName("pattern"); !nameNode.IsNull() {
@@ -253,7 +253,7 @@ func extractOCamlLetNames(n sitter.Node, src []byte) []string {
 					if child.IsNull() {
 						continue
 					}
-					ct := child.Type()
+					ct := nodeType(child)
 					if ct == "value_name" || ct == "value_pattern" {
 						name := childText(child, src)
 						if name != "" {
@@ -283,14 +283,14 @@ func extractOCamlPatternName(n sitter.Node, src []byte) string {
 	if n.IsNull() {
 		return ""
 	}
-	switch n.Type() {
+	switch nodeType(n) {
 	case "value_name", "value_pattern":
 		return childText(n, src)
 	case "parenthesized_pattern":
 		// Recurse into the inner pattern.
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if !child.IsNull() && child.Type() != "(" && child.Type() != ")" {
+			if !child.IsNull() && nodeType(child) != "(" && nodeType(child) != ")" {
 				return extractOCamlPatternName(child, src)
 			}
 		}
@@ -326,7 +326,7 @@ func extractOCamlIdentifiers(n sitter.Node, src []byte) []string {
 		if text == "and" {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if seenLet || isRec {
 			if ct == "value_name" || ct == "value_pattern" ||
 				(ct != "=" && ct != "let" && ct != "rec" && ct != "and" &&
@@ -349,7 +349,7 @@ func ocamlLetHasParams(n sitter.Node, src []byte) bool {
 		if node.IsNull() {
 			return false
 		}
-		if node.Type() == "let_binding" {
+		if nodeType(node) == "let_binding" {
 			// A function binding has parameter nodes after the name but before '='.
 			foundName := false
 			for i := uint32(0); i < node.ChildCount(); i++ {
@@ -358,7 +358,7 @@ func ocamlLetHasParams(n sitter.Node, src []byte) bool {
 					continue
 				}
 				text := childText(child, src)
-				ct := child.Type()
+				ct := nodeType(child)
 				if ct == "value_name" || ct == "value_pattern" {
 					foundName = true
 					continue
@@ -444,7 +444,7 @@ func extractOCamlValSpecName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "value_name" || ct == "value_pattern" {
 			return childText(child, src)
 		}
@@ -510,7 +510,7 @@ func extractOCamlTypeNames(n sitter.Node, src []byte) []string {
 		if node.IsNull() {
 			return
 		}
-		if node.Type() == "type_binding" {
+		if nodeType(node) == "type_binding" {
 			if nameNode := node.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := childText(nameNode, src)
 				if name != "" {
@@ -524,7 +524,7 @@ func extractOCamlTypeNames(n sitter.Node, src []byte) []string {
 				if child.IsNull() {
 					continue
 				}
-				ct := child.Type()
+				ct := nodeType(child)
 				if ct == "type_constructor_path" || ct == "type_constructor" {
 					name := childText(child, src)
 					if name != "" {
@@ -605,7 +605,7 @@ func extractOCamlModuleName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "module_name" || ct == "module_type_name" {
 			return childText(child, src)
 		}
@@ -613,7 +613,7 @@ func extractOCamlModuleName(n sitter.Node, src []byte) string {
 		if ct == "module_binding" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && gc.Type() == "module_name" {
+				if !gc.IsNull() && nodeType(gc) == "module_name" {
 					return childText(gc, src)
 				}
 			}
@@ -622,7 +622,7 @@ func extractOCamlModuleName(n sitter.Node, src []byte) string {
 		if ct == "module_type_binding" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && (gc.Type() == "module_type_name" || gc.Type() == "module_name") {
+				if !gc.IsNull() && (nodeType(gc) == "module_type_name" || nodeType(gc) == "module_name") {
 					return childText(gc, src)
 				}
 			}
@@ -695,14 +695,14 @@ func extractOCamlClassName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "class_name" {
 			return childText(child, src)
 		}
 		if ct == "class_binding" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && gc.Type() == "class_name" {
+				if !gc.IsNull() && nodeType(gc) == "class_name" {
 					return childText(gc, src)
 				}
 			}
@@ -752,7 +752,7 @@ func extractOCamlOpen(g *graph.Graph, n sitter.Node, src []byte, filePath string
 		if text == "open" || text == "!" {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "module_path" || ct == "module_name" || ct == "extended_module_path" ||
 			ct == "constructor_path" {
 			moduleName = text
@@ -797,7 +797,7 @@ func extractOCamlInclude(
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		// Skip the "include" keyword itself.
 		if ct == "include" {
 			continue
@@ -842,14 +842,14 @@ func extractOCamlExceptionName(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		ct := child.Type()
+		ct := nodeType(child)
 		if ct == "constructor_name" {
 			return childText(child, src)
 		}
 		if ct == "constructor_declaration" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				gc := child.Child(j)
-				if !gc.IsNull() && gc.Type() == "constructor_name" {
+				if !gc.IsNull() && nodeType(gc) == "constructor_name" {
 					return childText(gc, src)
 				}
 			}
@@ -894,7 +894,7 @@ func collectOCamlCallSites(g *graph.Graph, root sitter.Node, src []byte, filePat
 		if n.IsNull() {
 			return
 		}
-		if n.Type() == "application_expression" {
+		if nodeType(n) == "application_expression" {
 			// The first child of an application_expression is the function being called
 			// (a value_path containing a value_name, or a field_expression for method calls).
 			if n.ChildCount() > 0 {
@@ -902,13 +902,13 @@ func collectOCamlCallSites(g *graph.Graph, root sitter.Node, src []byte, filePat
 				if !funcNode.IsNull() {
 					// Prefer value_name grandchild (e.g. value_path > value_name).
 					var callee string
-					if funcNode.Type() == "value_path" || funcNode.Type() == "module_path" {
+					if nodeType(funcNode) == "value_path" || nodeType(funcNode) == "module_path" {
 						if vn := firstChildOfType(funcNode, "value_name"); !vn.IsNull() {
 							callee = strings.TrimSpace(childText(vn, src))
 						} else {
 							callee = strings.TrimSpace(childText(funcNode, src))
 						}
-					} else if funcNode.Type() == "value_name" {
+					} else if nodeType(funcNode) == "value_name" {
 						callee = strings.TrimSpace(childText(funcNode, src))
 					}
 					// Only record simple identifiers and qualified names as call sites.

@@ -37,7 +37,7 @@ func extractKotlinDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_declaration":
 			if nameNode := firstChildOfType(n, "simple_identifier"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -101,7 +101,7 @@ func isKotlinInterface(n sitter.Node, src []byte) bool {
 			return true
 		}
 		// Stop early if we hit the class name or body.
-		if child.Type() == "type_identifier" || child.Type() == "class_body" {
+		if nodeType(child) == "type_identifier" || nodeType(child) == "class_body" {
 			break
 		}
 	}
@@ -119,7 +119,7 @@ func isKotlinEnum(n sitter.Node, src []byte) bool {
 		if text == "enum" {
 			return true
 		}
-		if child.Type() == "type_identifier" || child.Type() == "class_body" {
+		if nodeType(child) == "type_identifier" || nodeType(child) == "class_body" {
 			break
 		}
 	}
@@ -137,7 +137,7 @@ func isKotlinData(n sitter.Node, src []byte) bool {
 		if text == "data" {
 			return true
 		}
-		if child.Type() == "type_identifier" || child.Type() == "class_body" {
+		if nodeType(child) == "type_identifier" || nodeType(child) == "class_body" {
 			break
 		}
 	}
@@ -155,7 +155,7 @@ func isKotlinSealed(n sitter.Node, src []byte) bool {
 		if text == "sealed" {
 			return true
 		}
-		if child.Type() == "type_identifier" || child.Type() == "class_body" {
+		if nodeType(child) == "type_identifier" || nodeType(child) == "class_body" {
 			break
 		}
 	}
@@ -179,7 +179,7 @@ func extractKotlinReceiverType(n sitter.Node, src []byte) string {
 		if child.IsNull() {
 			continue
 		}
-		switch child.Type() {
+		switch nodeType(child) {
 		case "receiver_type":
 			// New grammar: unwrap the receiver_type node.
 			return extractSimpleTypeName(child, src)
@@ -273,7 +273,7 @@ func (p *KotlinParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "class_declaration":
 			nameNode := firstChildOfType(n, "type_identifier")
 			if nameNode.IsNull() {
@@ -330,7 +330,7 @@ func (p *KotlinParser) extractAllDeclarations(
 			hasBinding := false
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if !child.IsNull() && child.Type() == "binding_pattern_kind" {
+				if !child.IsNull() && nodeType(child) == "binding_pattern_kind" {
 					hasBinding = true
 					break
 				}
@@ -355,7 +355,7 @@ func (p *KotlinParser) extractAllDeclarations(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "binding_pattern_kind" {
+				if nodeType(child) == "binding_pattern_kind" {
 					text := string(src[child.StartByte():child.EndByte()])
 					if text == "var" {
 						kind = "var"
@@ -564,12 +564,12 @@ func extractKotlinTypeName(n sitter.Node, src []byte) string {
 	if n.IsNull() {
 		return ""
 	}
-	switch n.Type() {
+	switch nodeType(n) {
 	case "nullable_type":
 		// Unwrap: String? → String, Repository? → Repository
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if !child.IsNull() && child.Type() == "user_type" {
+			if !child.IsNull() && nodeType(child) == "user_type" {
 				return extractKotlinTypeName(child, src)
 			}
 		}
@@ -593,7 +593,7 @@ func extractKotlinTypeName(n sitter.Node, src []byte) string {
 		// For type_reference or other wrappers, try to find user_type child
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
-			if !child.IsNull() && (child.Type() == "user_type" || child.Type() == "nullable_type") {
+			if !child.IsNull() && (nodeType(child) == "user_type" || nodeType(child) == "nullable_type") {
 				return extractKotlinTypeName(child, src)
 			}
 		}
@@ -611,12 +611,12 @@ func collectKotlinVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePat
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "function_declaration":
 			// Extract typed parameters from function_value_parameters
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
-				if child.IsNull() || child.Type() != "function_value_parameters" {
+				if child.IsNull() || nodeType(child) != "function_value_parameters" {
 					continue
 				}
 				for j := uint32(0); j < child.ChildCount(); j++ {
@@ -625,12 +625,12 @@ func collectKotlinVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePat
 						continue
 					}
 					// Grammar: function_value_parameters contains "parameter" children directly
-					if param.Type() != "parameter" && param.Type() != "function_value_parameter" {
+					if nodeType(param) != "parameter" && nodeType(param) != "function_value_parameter" {
 						continue
 					}
 					// If function_value_parameter, unwrap to parameter child
 					paramNode := param
-					if param.Type() == "function_value_parameter" {
+					if nodeType(param) == "function_value_parameter" {
 						if inner := firstChildOfType(param, "parameter"); !inner.IsNull() {
 							paramNode = inner
 						}
@@ -648,7 +648,7 @@ func collectKotlinVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePat
 						if tc.IsNull() {
 							continue
 						}
-						if tc.Type() == "user_type" || tc.Type() == "nullable_type" {
+						if nodeType(tc) == "user_type" || nodeType(tc) == "nullable_type" {
 							typeName = extractKotlinTypeName(tc, src)
 							break
 						}
@@ -674,7 +674,7 @@ func collectKotlinVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePat
 					if tc.IsNull() {
 						continue
 					}
-					if tc.Type() == "user_type" || tc.Type() == "nullable_type" {
+					if nodeType(tc) == "user_type" || nodeType(tc) == "nullable_type" {
 						typeName = extractKotlinTypeName(tc, src)
 						break
 					}
@@ -697,7 +697,7 @@ func collectKotlinVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePat
 				if tc.IsNull() {
 					continue
 				}
-				if tc.Type() == "user_type" || tc.Type() == "nullable_type" {
+				if nodeType(tc) == "user_type" || nodeType(tc) == "nullable_type" {
 					typeName = extractKotlinTypeName(tc, src)
 					break
 				}
@@ -742,7 +742,7 @@ func extractKotlinHeritage(n sitter.Node, src []byte, meta map[string]string) ma
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() != "delegation_specifier" && child.Type() != "delegation_specifier_list" {
+		if nodeType(child) != "delegation_specifier" && nodeType(child) != "delegation_specifier_list" {
 			continue
 		}
 		// extractTypeIdentifiers recursively walks the AST subtree for

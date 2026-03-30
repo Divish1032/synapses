@@ -37,7 +37,7 @@ func extractCSharpDeclInfo(root sitter.Node, src []byte) map[string]declMeta {
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "method_declaration":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
@@ -121,7 +121,7 @@ func isCSharpPublic(n sitter.Node, src []byte) bool {
 		if child.IsNull() {
 			continue
 		}
-		if child.Type() == "modifier" {
+		if nodeType(child) == "modifier" {
 			text := string(src[child.StartByte():child.EndByte()])
 			if text == "public" || text == "internal" {
 				return true
@@ -169,13 +169,13 @@ func isCSharpExtensionMethod(n sitter.Node, src []byte) bool {
 	// Find the first parameter child.
 	for i := uint32(0); i < paramList.ChildCount(); i++ {
 		child := paramList.Child(i)
-		if child.IsNull() || child.Type() != "parameter" {
+		if child.IsNull() || nodeType(child) != "parameter" {
 			continue
 		}
 		// Check if this parameter has a modifier child with value "this".
 		for j := uint32(0); j < child.ChildCount(); j++ {
 			mod := child.Child(j)
-			if !mod.IsNull() && mod.Type() == "modifier" &&
+			if !mod.IsNull() && nodeType(mod) == "modifier" &&
 				string(src[mod.StartByte():mod.EndByte()]) == "this" {
 				return true
 			}
@@ -256,7 +256,7 @@ func (p *CSharpParser) extractAllDeclarations(
 		if n.IsNull() {
 			return
 		}
-		switch n.Type() {
+		switch nodeType(n) {
 		case "namespace_declaration":
 			nameNode := n.ChildByFieldName("name")
 			if nameNode.IsNull() {
@@ -284,7 +284,7 @@ func (p *CSharpParser) extractAllDeclarations(
 				if child.IsNull() {
 					continue
 				}
-				if child.Type() == "modifier" {
+				if nodeType(child) == "modifier" {
 					text := string(src[child.StartByte():child.EndByte()])
 					if text == "abstract" || text == "sealed" {
 						if meta == nil {
@@ -496,12 +496,12 @@ func (p *CSharpParser) extractAllDeclarations(
 			}
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				vd := n.Child(i)
-				if vd.IsNull() || vd.Type() != "variable_declaration" {
+				if vd.IsNull() || nodeType(vd) != "variable_declaration" {
 					continue
 				}
 				for j := uint32(0); j < vd.ChildCount(); j++ {
 					declarator := vd.Child(j)
-					if declarator.IsNull() || declarator.Type() != "variable_declarator" {
+					if declarator.IsNull() || nodeType(declarator) != "variable_declarator" {
 						continue
 					}
 					nameNode := firstChildOfType(declarator, "identifier")
@@ -580,13 +580,13 @@ func collectCSharpCallSites(g *graph.Graph, _ *sitter.Language, root sitter.Node
 			return ""
 		},
 		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (alias, name string) {
-			switch n.Type() {
+			switch nodeType(n) {
 			case "invocation_expression":
 				fn := n.ChildByFieldName("function")
 				if fn.IsNull() {
 					return "", ""
 				}
-				switch fn.Type() {
+				switch nodeType(fn) {
 				case "identifier":
 					// Bare call inside a class — treat as implicit this.
 					return "this", string(src[fn.StartByte():fn.EndByte()])
