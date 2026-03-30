@@ -508,21 +508,20 @@ func TestAutoConfigureModels_ModeOptimal(t *testing.T) {
 	cfg.IntelligenceMode = config.ModeOptimal
 	cfg.AutoConfigureModels(0)
 
-	if cfg.ModelIngest != "synapses/sentry" {
-		t.Errorf("Optimal ModelIngest = %q, want synapses/sentry", cfg.ModelIngest)
+	if cfg.ModelIngest != "qwen3.5:0.8b" {
+		t.Errorf("Optimal ModelIngest = %q, want qwen3.5:0.8b", cfg.ModelIngest)
 	}
-	if cfg.ModelEnrich != "synapses/librarian" {
-		t.Errorf("Optimal ModelEnrich = %q, want synapses/librarian", cfg.ModelEnrich)
+	if cfg.ModelEnrich != "qwen3.5:2b" {
+		t.Errorf("Optimal ModelEnrich = %q, want qwen3.5:2b", cfg.ModelEnrich)
 	}
-	// Guardian shares Librarian in Optimal (no separate Critic slot).
-	if cfg.ModelGuardian != "synapses/librarian" {
-		t.Errorf("Optimal ModelGuardian = %q, want synapses/librarian (shares Librarian)", cfg.ModelGuardian)
+	if cfg.ModelGuardian != "qwen3.5:2b" {
+		t.Errorf("Optimal ModelGuardian = %q, want qwen3.5:2b", cfg.ModelGuardian)
 	}
-	if cfg.ModelOrchestrate != "synapses/navigator" {
-		t.Errorf("Optimal ModelOrchestrate = %q, want synapses/navigator", cfg.ModelOrchestrate)
+	if cfg.ModelOrchestrate != "qwen3.5:2b" {
+		t.Errorf("Optimal ModelOrchestrate = %q, want qwen3.5:2b", cfg.ModelOrchestrate)
 	}
-	if cfg.ModelArchivist != "synapses/archivist" {
-		t.Errorf("Optimal ModelArchivist = %q, want synapses/archivist", cfg.ModelArchivist)
+	if cfg.ModelArchivist != "qwen3.5:2b" {
+		t.Errorf("Optimal ModelArchivist = %q, want qwen3.5:2b", cfg.ModelArchivist)
 	}
 }
 
@@ -531,20 +530,20 @@ func TestAutoConfigureModels_ModeStandard(t *testing.T) {
 	cfg.IntelligenceMode = config.ModeStandard
 	cfg.AutoConfigureModels(0)
 
-	if cfg.ModelIngest != "synapses/sentry" {
-		t.Errorf("Standard ModelIngest = %q, want synapses/sentry", cfg.ModelIngest)
+	if cfg.ModelIngest != "qwen3.5:0.8b" {
+		t.Errorf("Standard ModelIngest = %q, want qwen3.5:0.8b", cfg.ModelIngest)
 	}
-	if cfg.ModelEnrich != "synapses/librarian" {
-		t.Errorf("Standard ModelEnrich = %q, want synapses/librarian", cfg.ModelEnrich)
+	if cfg.ModelEnrich != "qwen3.5:4b" {
+		t.Errorf("Standard ModelEnrich = %q, want qwen3.5:4b", cfg.ModelEnrich)
 	}
-	if cfg.ModelGuardian != "synapses/critic" {
-		t.Errorf("Standard ModelGuardian = %q, want synapses/critic", cfg.ModelGuardian)
+	if cfg.ModelGuardian != "qwen3.5:2b" {
+		t.Errorf("Standard ModelGuardian = %q, want qwen3.5:2b", cfg.ModelGuardian)
 	}
-	if cfg.ModelOrchestrate != "synapses/navigator" {
-		t.Errorf("Standard ModelOrchestrate = %q, want synapses/navigator", cfg.ModelOrchestrate)
+	if cfg.ModelOrchestrate != "qwen3.5:2b" {
+		t.Errorf("Standard ModelOrchestrate = %q, want qwen3.5:2b", cfg.ModelOrchestrate)
 	}
-	if cfg.ModelArchivist != "synapses/archivist" {
-		t.Errorf("Standard ModelArchivist = %q, want synapses/archivist", cfg.ModelArchivist)
+	if cfg.ModelArchivist != "qwen3.5:2b" {
+		t.Errorf("Standard ModelArchivist = %q, want qwen3.5:2b", cfg.ModelArchivist)
 	}
 }
 
@@ -553,21 +552,20 @@ func TestAutoConfigureModels_ModeFull(t *testing.T) {
 	cfg.IntelligenceMode = config.ModeFull
 	cfg.AutoConfigureModels(0)
 
-	// Full uses same model identities as Standard — difference is keep_alive only.
-	if cfg.ModelIngest != "synapses/sentry" {
-		t.Errorf("Full ModelIngest = %q, want synapses/sentry", cfg.ModelIngest)
+	if cfg.ModelIngest != "qwen3.5:0.8b" {
+		t.Errorf("Full ModelIngest = %q, want qwen3.5:0.8b", cfg.ModelIngest)
 	}
-	if cfg.ModelEnrich != "synapses/librarian" {
-		t.Errorf("Full ModelEnrich = %q, want synapses/librarian", cfg.ModelEnrich)
+	if cfg.ModelEnrich != "qwen3.5:4b" {
+		t.Errorf("Full ModelEnrich = %q, want qwen3.5:4b", cfg.ModelEnrich)
 	}
-	if cfg.ModelGuardian != "synapses/critic" {
-		t.Errorf("Full ModelGuardian = %q, want synapses/critic", cfg.ModelGuardian)
+	if cfg.ModelGuardian != "qwen3.5:4b" {
+		t.Errorf("Full ModelGuardian = %q, want qwen3.5:4b", cfg.ModelGuardian)
 	}
-	if cfg.ModelOrchestrate != "synapses/navigator" {
-		t.Errorf("Full ModelOrchestrate = %q, want synapses/navigator", cfg.ModelOrchestrate)
+	if cfg.ModelOrchestrate != "qwen3.5:4b" {
+		t.Errorf("Full ModelOrchestrate = %q, want qwen3.5:4b", cfg.ModelOrchestrate)
 	}
-	if cfg.ModelArchivist != "synapses/archivist" {
-		t.Errorf("Full ModelArchivist = %q, want synapses/archivist", cfg.ModelArchivist)
+	if cfg.ModelArchivist != "qwen3.5:4b" {
+		t.Errorf("Full ModelArchivist = %q, want qwen3.5:4b", cfg.ModelArchivist)
 	}
 }
 

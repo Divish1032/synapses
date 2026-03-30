@@ -2,14 +2,15 @@ package main
 
 // cmdBrainSetup implements "synapses brain setup".
 //
-// It is self-contained: Modelfile content is embedded as string constants so
-// the binary needs no external files. Calling sequence:
+// Calling sequence:
 //
 //  1. Ping Ollama — abort with a helpful message if unreachable.
-//  2. Pull base model (qwen3.5:2b for optimal, qwen3.5:4b for standard/full).
-//  3. Register all 5 synapses/* identities via `ollama create`.
-//  4. Smoke-test each identity (optional, --skip-smoke).
-//  5. Write/update ~/.synapses/brain.json with enabled:true and the chosen mode.
+//  2. Pull required models for the chosen mode (qwen3.5:0.8b, 2b, and/or 4b).
+//  3. Smoke-test the base model (optional, --skip-smoke).
+//  4. Write/update ~/.synapses/brain.json with enabled:true and the chosen mode.
+//
+// System prompts are passed per-request at inference time — no Ollama Modelfile
+// identity registration is needed.
 //
 // Usage:
 //
@@ -25,185 +26,19 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	brainconfig "github.com/SynapsesOS/synapses/internal/brain/config"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
-// ── Embedded Modelfile content ────────────────────────────────────────────────
-// Kept in sync with synapses-fine-distilling/quantization/Modelfile.* — if you
-// update those files, update these constants too.
-//
-// The FROM line uses a placeholder that is replaced at registration time with
-// the mode-appropriate base model (qwen3.5:2b for optimal, qwen3.5:4b for
-// standard/full). See baseModelForMode().
-const modelfileFromPlaceholder = "qwen3.5:2b"
-
-const modelfileSentry = `FROM qwen3.5:2b
-
-SYSTEM """You are the Synapses Sentry, a code entity summarizer for a code intelligence graph.
-
-Given a code entity (name, type, package, and source code), write a 2-3 sentence technical briefing covering: what it does, its role in the system, and any important patterns or concerns.
-
-Do not write code. Describe the entity in plain English sentences only.
-Output ONLY valid JSON with no other text: {"summary": "2-3 sentence briefing", "tags": ["domain_tag1", "domain_tag2"]}
-
-Tags should be 1-3 domain labels from: auth, http, db, cache, queue, config, util, test, cli, graph, store, parser, middleware, api, worker."""
-
-PARAMETER temperature 0.0
-PARAMETER stop <|im_end|>
-PARAMETER stop <|endoftext|>
-PARAMETER num_predict 256
-`
-
-const modelfileCritic = `FROM qwen3.5:2b
-
-SYSTEM """You are the Synapses Critic, an architectural rule violation explainer.
-
-Given an architectural rule violation (rule description, severity, source file, and what it imports/calls), explain the violation and suggest a concrete fix.
-
-Output ONLY valid JSON with no other text: {"explanation": "why this is a violation and what risk it creates", "fix": "specific actionable fix the developer should apply"}
-
-Example:
-Input: Rule: no-cross-layer-imports. Severity: error. File: internal/api/handler.go imports internal/store/sqlite.go
-Output: {"explanation": "The API handler directly imports the SQLite store implementation, bypassing the store interface. This creates tight coupling — changing the database requires modifying the API layer.", "fix": "Import the store.Store interface instead of the concrete sqlite implementation. Use dependency injection to pass the store to the handler."}
-
-Be direct and actionable. Reference actual file names and symbols from the input."""
-
-PARAMETER temperature 0.1
-PARAMETER stop <|im_end|>
-PARAMETER stop <|endoftext|>
-PARAMETER num_predict 512
-`
-
-const modelfileLibrarian = `FROM qwen3.5:2b
-
-SYSTEM """You are the Synapses Librarian, a code architecture analyst.
-
-Given a code graph slice (entity name, type, package, callers, callees, and relationships), analyze it for architectural patterns, risks, and insights.
-
-Output ONLY valid JSON — no explanation, no markdown:
-{"insight":"2-sentence architectural analysis","concerns":["concern1","concern2"]}
-
-Rules:
-- insight: identify the entity's role in the architecture (hub, gateway, utility, etc.) and its most important characteristic
-- concerns: list 0-3 specific risks (cyclic deps, missing error handling, god object, missing abstraction, etc.)
-- If no concerns, return an empty array: "concerns":[]
-- Be specific — reference actual entity names and relationships, not generic advice"""
-
-PARAMETER temperature 0.2
-PARAMETER stop <|im_end|>
-PARAMETER stop <|endoftext|>
-PARAMETER num_predict 512
-`
-
-const modelfileNavigator = `FROM qwen3.5:2b
-
-SYSTEM """You are the Synapses Navigator. You resolve multi-agent work scope conflicts.
-
-Input: A JSON description of agents with their active scopes, and the new agent requesting a scope.
-
-Output ONLY valid JSON — no explanation, no markdown:
-{"suggestion":"how to resolve the conflict or confirmation it is safe","alternative_scope":"a suggested non-overlapping scope for the new agent, or empty string if no conflict"}
-
-Rules:
-- If the new agent's scope overlaps with an active agent's scope, describe the conflict and suggest a narrower scope
-- If there is no real conflict (different packages, non-overlapping files), return: {"suggestion":"No conflict. Safe to proceed.","alternative_scope":""}
-- Be specific — reference actual package names and file paths from the input
-- alternative_scope should be a valid Go package path or file glob pattern"""
-
-PARAMETER temperature 0.1
-PARAMETER stop <|im_end|>
-PARAMETER stop <|endoftext|>
-PARAMETER num_predict 512
-`
-
-const modelfileArchivist = `FROM qwen3.5:2b
-
-SYSTEM """You are the Synapses Archivist. You synthesize agent session transcripts into persistent memories.
-
-Input: JSON with session_events (tool calls with results) and existing_memory (already saved entries).
-
-Output ONLY valid JSON — no explanation, no markdown:
-{"new_memories":[{"key":"short_snake_case_key","content":"what to remember in one sentence","entities":"EntityName1,EntityName2"}],"annotations":[{"node":"EntityName","note":"specific observation about this entity"}]}
-
-Note: entities is a comma-separated string, NOT an array.
-
-Rules:
-- Only save architectural discoveries, non-obvious relationships, or decisions that will matter in future sessions
-- If the session is trivial (single lookup, no architectural discovery, only routine tool calls), return: {"new_memories":[],"annotations":[]}
-- Never duplicate entries already present in existing_memory — check keys before adding
-- Keep each memory content to one concise sentence
-- Only annotate entities that were meaningfully analyzed, not just mentioned in passing
-- key must be short_snake_case (e.g., "auth_service_is_hub", "graph_new_entry_point")"""
-
-PARAMETER temperature 0.3
-PARAMETER stop <|im_end|>
-PARAMETER stop <|endoftext|>
-PARAMETER num_predict 1024
-`
-
-// ── Tier registry ─────────────────────────────────────────────────────────────
-
-type brainTierDef struct {
-	name    string // Ollama identity tag, e.g. "synapses/sentry"
-	label   string // human-readable tier label
-	role    string // one-line description shown during setup
-	content string // embedded Modelfile content
-}
-
-var brainTiers = []brainTierDef{
-	{
-		name:    "synapses/sentry",
-		label:   "T0 · Sentry",
-		role:    "Classifies code entities on every file save",
-		content: modelfileSentry,
-	},
-	{
-		name:    "synapses/critic",
-		label:   "T1 · Critic",
-		role:    "Explains rule violations and suggests fixes",
-		content: modelfileCritic,
-	},
-	{
-		name:    "synapses/librarian",
-		label:   "T2 · Librarian",
-		role:    "Analyzes architectural patterns in code graphs",
-		content: modelfileLibrarian,
-	},
-	{
-		name:    "synapses/navigator",
-		label:   "T3 · Navigator",
-		role:    "Resolves multi-agent work scope conflicts",
-		content: modelfileNavigator,
-	},
-	{
-		name:    "synapses/archivist",
-		label:   "Archivist",
-		role:    "Synthesizes session activity into persistent memories",
-		content: modelfileArchivist,
-	},
-}
-
-// baseModelForMode returns the raw Ollama model tag for the given intelligence
-// mode. Standard and Full use the 4B model (IFEval 89.8, Q4_K_M); Optimal
-// stays on 2B to fit 8 GB RAM budgets.
-func baseModelForMode(mode string) string {
-	switch mode {
-	case "standard", "full":
-		return "qwen3.5:4b"
-	default:
-		return "qwen3.5:2b"
-	}
-}
-
-// modelfileWithBase replaces the FROM placeholder in a Modelfile template with
-// the actual base model tag for the current mode.
-func modelfileWithBase(content, baseModel string) string {
-	return strings.Replace(content, "FROM "+modelfileFromPlaceholder, "FROM "+baseModel, 1)
+// modelsForMode returns the distinct Ollama model tags to pull for a given mode.
+func modelsForMode(mode string) []string {
+	cfg := brainconfig.BrainConfig{IntelligenceMode: brainconfig.IntelligenceMode(mode)}
+	cfg.AutoConfigureModels(0)
+	return cfg.ModelsRequired()
 }
 
 // ── Entry points ──────────────────────────────────────────────────────────────
@@ -215,14 +50,13 @@ func cmdBrain(args []string) error {
 		fmt.Println("  Usage: synapses brain <subcommand>")
 		fmt.Println()
 		fmt.Println("  Subcommands:")
-		fmt.Println("    setup     Configure Ollama + register AI tier identities")
-		fmt.Println("    register  Register a single AI tier identity (called by the Tauri app)")
+		fmt.Println("    setup     Configure Ollama + pull required models")
 		fmt.Println()
 		fmt.Println("  Flags for 'setup':")
 		fmt.Println("    --ollama <url>   Ollama base URL  (default: http://localhost:11434)")
 		fmt.Println("    --mode <mode>    Intelligence mode: optimal | standard | full  (default: standard)")
-		fmt.Println("    --skip-pull      Assume the base model is already downloaded")
-		fmt.Println("    --skip-smoke     Skip post-registration smoke tests")
+		fmt.Println("    --skip-pull      Assume models are already downloaded")
+		fmt.Println("    --skip-smoke     Skip post-setup smoke tests")
 		fmt.Println("    --no-color       Disable ANSI color codes (for GUI / non-terminal output)")
 		fmt.Println()
 		return nil
@@ -285,19 +119,22 @@ func cmdBrainSetup(args []string) error {
 		return "\033[1m" + s + "\033[0m"
 	}
 
-	baseModel := baseModelForMode(*mode)
+	models := modelsForMode(*mode)
 
 	fmt.Println()
 	fmt.Println("  Synapses Brain Setup")
 	fmt.Println("  ─────────────────────────────────────────")
 	fmt.Println()
-	fmt.Printf("  The brain runs on one shared model — %s.\n", baseModel)
-	fmt.Println("  Five AI personas are layered on top via Ollama Modelfiles (~1 KB each).")
-	fmt.Println("  All personas share the same weights in RAM — one download, five tiers.")
+	fmt.Printf("  Mode: %s — requires %d model(s): %s\n", *mode, len(models), strings.Join(models, ", "))
+	fmt.Println("  System prompts are passed per-request — no Modelfile registration needed.")
 	fmt.Println()
 
+	totalSteps := 3
+	step := 0
+
 	// ── Step 1: Ollama reachability ──────────────────────────────────────────
-	fmt.Print("  [1/4] Checking Ollama... ")
+	step++
+	fmt.Printf("  [%d/%d] Checking Ollama... ", step, totalSteps)
 	version, err := brainPingOllama(*ollamaURL, safeClient)
 	if err != nil {
 		fmt.Println()
@@ -315,78 +152,59 @@ func cmdBrainSetup(args []string) error {
 	fmt.Printf("%s  Ollama %s at %s\n", green("✓"), version, *ollamaURL)
 	fmt.Println()
 
-	// ── Step 2: Base model ───────────────────────────────────────────────────
-	fmt.Printf("  [2/4] Base model — %s\n", baseModel)
-	fmt.Println("        This is the foundation. All 5 AI tiers run on this one model.")
-	fmt.Println("        Ollama deduplicates weights — all tiers share the same weights in RAM.")
+	// ── Step 2: Pull required models ─────────────────────────────────────────
+	step++
+	fmt.Printf("  [%d/%d] Pulling required models...\n", step, totalSteps)
 	fmt.Println()
 
 	if *skipPull {
-		fmt.Println("        --skip-pull set, assuming already downloaded.")
+		fmt.Println("        --skip-pull set, assuming models are already downloaded.")
 	} else {
-		installed, err := brainIsModelInstalled(*ollamaURL, baseModel, safeClient)
-		if err != nil {
-			return fmt.Errorf("brain setup: check model: %w", err)
-		}
-		if installed {
-			fmt.Printf("        %s %s is already downloaded\n", green("✓"), baseModel)
-		} else {
-			fmt.Printf("        %s Downloading %s — this may take a few minutes...\n\n", yellow("↓"), baseModel)
-			if err := brainPullModel(*ollamaURL, baseModel, safeClient); err != nil {
-				return fmt.Errorf("brain setup: pull %s: %w", baseModel, err)
+		for _, modelTag := range models {
+			installed, checkErr := brainIsModelInstalled(*ollamaURL, modelTag, safeClient)
+			if checkErr != nil {
+				return fmt.Errorf("brain setup: check model %s: %w", modelTag, checkErr)
 			}
-			fmt.Printf("\n        %s %s downloaded\n", green("✓"), baseModel)
+			if installed {
+				fmt.Printf("        %s %s already downloaded\n", green("✓"), modelTag)
+			} else {
+				fmt.Printf("        %s Downloading %s...\n", yellow("↓"), modelTag)
+				if pullErr := brainPullModel(*ollamaURL, modelTag, safeClient); pullErr != nil {
+					return fmt.Errorf("brain setup: pull %s: %w", modelTag, pullErr)
+				}
+				fmt.Printf("        %s %s downloaded\n", green("✓"), modelTag)
+			}
 		}
 	}
 	fmt.Println()
 
-	// ── Step 3: Register identities ──────────────────────────────────────────
-	fmt.Println("  [3/4] Registering AI tier identities...")
-	fmt.Println()
-	fmt.Println("        Each identity is a ~1 KB Modelfile that gives the model a specialized")
-	fmt.Println("        role and JSON output schema. No extra download — just a config file.")
-	fmt.Println()
-	for _, tier := range brainTiers {
-		fmt.Printf("        %-24s  %s\n", tier.label, tier.role)
-		tierWithBase := tier
-		tierWithBase.content = modelfileWithBase(tier.content, baseModel)
-		if err := brainRegisterIdentity(tierWithBase); err != nil {
-			fmt.Printf("        %s  Failed to register %s: %v\n", red("✗"), tier.name, err)
-			return fmt.Errorf("brain setup: register %s: %w", tier.name, err)
-		}
-		fmt.Printf("        %s  %s registered\n", green("✓"), tier.name)
-	}
-	fmt.Println()
-
-	// ── Step 4: Smoke test ───────────────────────────────────────────────────
+	// ── Step 3: Smoke test ───────────────────────────────────────────────────
+	step++
 	if *skipSmoke {
-		fmt.Println("  [4/4] Smoke test skipped (--skip-smoke)")
+		fmt.Printf("  [%d/%d] Smoke test skipped (--skip-smoke)\n", step, totalSteps)
 	} else {
-		fmt.Println("  [4/4] Smoke test...")
+		fmt.Printf("  [%d/%d] Smoke test...\n", step, totalSteps)
 		fmt.Println()
 
-		// Test only the first identity (Sentry). All 5 identities share the same
-		// base weights — if Sentry responds correctly, all others will too.
-		// Testing all 5 would add ~100s on cold hardware with no extra signal.
-		warmOK, warmElapsed := brainSmokeWarmup(*ollamaURL, baseModel, smokeClient)
+		// Test the smallest model (0.8b) — if it responds, Ollama is working.
+		smokeModel := models[0] // qwen3.5:0.8b (always first — Sentry tier)
+		warmOK, _ := brainSmokeWarmup(*ollamaURL, smokeModel, smokeClient)
 		if !warmOK {
 			fmt.Printf("  %s  Model did not respond within 90 seconds.\n", yellow("!"))
-			fmt.Println("        The brain is configured correctly — the model will warm up on first use.")
+			fmt.Println("        The brain is configured correctly — models will warm up on first use.")
 			goto skipSmokeTests
 		}
-		_ = warmElapsed // elapsed printed live by brainSmokeWarmup's ticker
 
 		{
-			// brainTiers[0] is Sentry — the canonical representative identity.
-			fmt.Printf("        Sending test request to %s...", brainTiers[0].name)
-			ok, elapsed := brainSmokeTest(*ollamaURL, brainTiers[0].name, smokeClient)
+			fmt.Printf("        Sending test request to %s...", smokeModel)
+			ok, elapsed := brainSmokeTest(*ollamaURL, smokeModel, smokeClient)
 			if ok {
 				fmt.Printf(" %s (%s)\n", green("✓"), elapsed)
-				fmt.Printf("        %s  All 5 identities share the same weights — brain is working.\n", green("✓"))
+				fmt.Printf("        %s  Brain is working.\n", green("✓"))
 			} else {
 				fmt.Printf(" %s\n", red("✗"))
 				fmt.Println()
-				fmt.Printf("  %s  Smoke test failed — Modelfile registration may be incomplete.\n", yellow("✗"))
+				fmt.Printf("  %s  Smoke test failed.\n", yellow("✗"))
 				fmt.Println("        Try: synapses brain setup --skip-pull")
 			}
 		}
@@ -412,27 +230,6 @@ func cmdBrainSetup(args []string) error {
 	return nil
 }
 
-// cmdBrainRegister registers a single AI tier identity.
-// Called by the Tauri app via "synapses brain register <tier-name>".
-func cmdBrainRegister(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: synapses brain register <tier-name>\nKnown tiers: %s",
-			func() string {
-				names := make([]string, len(brainTiers))
-				for i, t := range brainTiers {
-					names[i] = t.name
-				}
-				return strings.Join(names, ", ")
-			}())
-	}
-	tierName := args[0]
-	for _, tier := range brainTiers {
-		if tier.name == tierName {
-			return brainRegisterIdentity(tier)
-		}
-	}
-	return fmt.Errorf("unknown tier %q — run 'synapses brain help' to see known tiers", tierName)
-}
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -537,62 +334,9 @@ func brainPullModel(baseURL, modelName string, client *http.Client) error {
 	return nil
 }
 
-// findOllamaBinary resolves the ollama executable path.
-// Tauri app bundles on macOS do not inherit the full shell PATH
-// (/usr/local/bin is excluded), so we probe common install locations
-// when exec.LookPath fails.
-func findOllamaBinary() (string, error) {
-	if p, err := exec.LookPath("ollama"); err == nil {
-		return p, nil
-	}
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		"/usr/local/bin/ollama",
-		"/opt/homebrew/bin/ollama",
-		filepath.Join(home, ".local/bin/ollama"),
-		"/usr/bin/ollama",
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c, nil
-		}
-	}
-	return "", fmt.Errorf(
-		"ollama not found in PATH or common install locations " +
-			"(/usr/local/bin, /opt/homebrew/bin, ~/.local/bin). " +
-			"Install from https://ollama.com",
-	)
-}
-
-// brainRegisterIdentity writes the Modelfile to a temp file and runs `ollama create`.
-func brainRegisterIdentity(tier brainTierDef) error {
-	tmp, err := os.CreateTemp("", "synapses-modelfile-*.txt")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(tier.content); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write modelfile: %w", err)
-	}
-	tmp.Close()
-
-	ollamaBin, err := findOllamaBinary()
-	if err != nil {
-		return err
-	}
-	createCtx, createCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer createCancel()
-	cmd := exec.CommandContext(createCtx, ollamaBin, "create", tier.name, "-f", tmp.Name())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ollama create: %w\n%s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
 
 // brainSmokeWarmup loads the base model into memory and keeps it resident for
-// 5 minutes so subsequent identity smoke tests run against warm weights.
+// 5 minutes so subsequent smoke tests run against warm weights.
 // It uses keep_alive=300 (seconds) so Ollama does not evict the model between tests.
 // Prints a live elapsed-seconds ticker so users know the process is not stuck.
 // Returns (ok, elapsed).
@@ -620,7 +364,7 @@ func brainSmokeWarmup(baseURL, modelName string, client *http.Client) (bool, str
 		"model":      modelName,
 		"stream":     false,
 		"prompt":     "hi",
-		"keep_alive": 300, // keep model loaded for 5 min so identity tests hit warm weights
+		"keep_alive": 300, // keep model loaded for 5 min so smoke tests hit warm weights
 		"options": map[string]interface{}{
 			"num_predict": 1,
 		},
@@ -645,11 +389,8 @@ func brainSmokeWarmup(baseURL, modelName string, client *http.Client) (bool, str
 	return resp.StatusCode == http.StatusOK, elapsed
 }
 
-// brainSmokeTest verifies the identity responds by waiting for the first
-// streamed token. Streaming means we only wait for time-to-first-token (~2-5s
-// on a warm model) rather than full generation time (60-90s on CPU), which
-// makes the test fast and reliable regardless of hardware speed.
-// Returns (ok, elapsed) — elapsed is time to first token.
+// brainSmokeTest verifies the model responds by waiting for the first streamed
+// token. Returns (ok, elapsed) — elapsed is time to first token.
 func brainSmokeTest(baseURL, modelName string, client *http.Client) (bool, string) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -725,20 +466,16 @@ func brainWriteConfig(ollamaURL, mode string) (string, error) {
 	existing["ollama_url"] = ollamaURL
 	existing["intelligence_mode"] = mode
 
-	// Write explicit tier model assignments so the daemon uses the registered
-	// synapses/* personas and not the raw "qwen3.5:2b" base model.
-	// Without these, applyDefaults() falls back to DefaultConfig values and the
-	// personas are never called even though they were registered in Ollama.
-	existing["model_ingest"] = "synapses/sentry"
-	existing["model_enrich"] = "synapses/librarian"
-	existing["model_orchestrate"] = "synapses/navigator"
-	existing["model_archivist"] = "synapses/archivist"
-	// Guardian depends on mode: Optimal reuses Librarian, Standard/Full uses Critic.
-	if mode == "optimal" {
-		existing["model_guardian"] = "synapses/librarian"
-	} else {
-		existing["model_guardian"] = "synapses/critic"
-	}
+	// Write per-tier model assignments (raw Ollama tags, no identity models).
+	// AutoConfigureModels will re-derive these at runtime, but writing them
+	// explicitly makes brain.json self-documenting and allows manual overrides.
+	cfg := brainconfig.BrainConfig{IntelligenceMode: brainconfig.IntelligenceMode(mode)}
+	cfg.AutoConfigureModels(0)
+	existing["model_ingest"] = cfg.ModelIngest
+	existing["model_enrich"] = cfg.ModelEnrich
+	existing["model_guardian"] = cfg.ModelGuardian
+	existing["model_orchestrate"] = cfg.ModelOrchestrate
+	existing["model_archivist"] = cfg.ModelArchivist
 
 	out, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {

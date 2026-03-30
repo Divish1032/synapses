@@ -417,31 +417,34 @@ func TestToBrainConfig_StandardMode_AutoConfiguresIdentities(t *testing.T) {
 		OllamaURL:        "http://localhost:11434",
 	}
 	got := bc.ToBrainConfig()
-	if got.ModelIngest != "synapses/sentry" {
-		t.Errorf("ModelIngest = %q, want synapses/sentry", got.ModelIngest)
+	if got.ModelIngest != "qwen3.5:0.8b" {
+		t.Errorf("ModelIngest = %q, want qwen3.5:0.8b", got.ModelIngest)
 	}
-	if got.ModelGuardian != "synapses/critic" {
-		t.Errorf("ModelGuardian = %q, want synapses/critic", got.ModelGuardian)
+	if got.ModelGuardian != "qwen3.5:2b" {
+		t.Errorf("ModelGuardian = %q, want qwen3.5:2b", got.ModelGuardian)
 	}
-	if got.ModelEnrich != "synapses/librarian" {
-		t.Errorf("ModelEnrich = %q, want synapses/librarian", got.ModelEnrich)
+	if got.ModelEnrich != "qwen3.5:4b" {
+		t.Errorf("ModelEnrich = %q, want qwen3.5:4b", got.ModelEnrich)
 	}
-	if got.ModelOrchestrate != "synapses/navigator" {
-		t.Errorf("ModelOrchestrate = %q, want synapses/navigator", got.ModelOrchestrate)
+	if got.ModelOrchestrate != "qwen3.5:2b" {
+		t.Errorf("ModelOrchestrate = %q, want qwen3.5:2b", got.ModelOrchestrate)
 	}
-	if got.ModelArchivist != "synapses/archivist" {
-		t.Errorf("ModelArchivist = %q, want synapses/archivist", got.ModelArchivist)
+	if got.ModelArchivist != "qwen3.5:2b" {
+		t.Errorf("ModelArchivist = %q, want qwen3.5:2b", got.ModelArchivist)
 	}
 }
 
-func TestToBrainConfig_OptimalMode_GuardianSharesLibrarian(t *testing.T) {
+func TestToBrainConfig_OptimalMode_AllTiers2b(t *testing.T) {
 	bc := config.BrainConfig{
 		Enabled:          true,
 		IntelligenceMode: "optimal",
 	}
 	got := bc.ToBrainConfig()
-	if got.ModelGuardian != "synapses/librarian" {
-		t.Errorf("ModelGuardian = %q, want synapses/librarian (shared in optimal)", got.ModelGuardian)
+	if got.ModelGuardian != "qwen3.5:2b" {
+		t.Errorf("ModelGuardian = %q, want qwen3.5:2b", got.ModelGuardian)
+	}
+	if got.ModelIngest != "qwen3.5:0.8b" {
+		t.Errorf("ModelIngest = %q, want qwen3.5:0.8b", got.ModelIngest)
 	}
 }
 

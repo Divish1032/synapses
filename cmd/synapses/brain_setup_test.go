@@ -133,27 +133,6 @@ func TestCmdBrainSetup_WithMockOllama(t *testing.T) {
 	_ = err
 }
 
-// --- Tests for cmdBrainRegister ---
-
-func TestCmdBrainRegister_NoArgs(t *testing.T) {
-	err := cmdBrainRegister([]string{})
-	if err == nil {
-		t.Error("expected error when no tier name provided")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestCmdBrainRegister_UnknownTier(t *testing.T) {
-	err := cmdBrainRegister([]string{"unknown-tier"})
-	if err == nil {
-		t.Error("expected error for unknown tier")
-	}
-	if !strings.Contains(err.Error(), "unknown tier") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
 // --- Tests for brainPingOllama ---
 
@@ -302,19 +281,6 @@ func TestBrainSmokeTest_InvalidResponse(t *testing.T) {
 	}
 }
 
-// --- Tests for findOllamaBinary ---
-
-func TestFindOllamaBinary_ReturnsStringOrError(t *testing.T) {
-	// This test verifies the function can search PATH
-	// It may or may not find ollama depending on system setup
-	path, err := findOllamaBinary()
-	// Just verify it doesn't panic
-	_ = path
-	_ = err
-	// ollama may or may not be in PATH
-	t.Log("findOllamaBinary completed successfully")
-}
-
 // --- Tests for brainWriteConfig ---
 
 func TestBrainWriteConfig_WritesFile(t *testing.T) {
@@ -345,93 +311,30 @@ func TestBrainWriteConfig_InvalidMode(t *testing.T) {
 	_ = err
 }
 
-// --- Tests for brainRegisterIdentity ---
+// --- Tests for modelsForMode ---
 
-func TestBrainRegisterIdentity_ValidTier(t *testing.T) {
-	if len(brainTiers) == 0 {
-		t.Skip("no brain tiers configured")
-	}
-
-	server := mockOllamaServer(t, nil)
-	defer server.Close()
-
-	// This would require mocking the HTTP requests made by brainRegisterIdentity
-	// For now, we test the structure exists
-	tier := brainTiers[0]
-	if tier.name == "" {
-		t.Error("expected tier to have a name")
-	}
-	if tier.content == "" {
-		t.Error("expected tier to have content")
-	}
-}
-
-// --- Tests for brainTiers structure ---
-
-func TestBrainTiers_AllConfigured(t *testing.T) {
-	if len(brainTiers) == 0 {
-		t.Error("expected brainTiers to be configured")
-	}
-
-	expectedTiers := []string{"sentry", "critic", "librarian", "navigator", "archivist"}
-	if len(brainTiers) != len(expectedTiers) {
-		t.Errorf("expected %d tiers, got %d", len(expectedTiers), len(brainTiers))
-	}
-
-	for i, tier := range brainTiers {
-		if tier.name == "" {
-			t.Errorf("tier %d has empty name", i)
-		}
-		if tier.label == "" {
-			t.Errorf("tier %d has empty label", i)
-		}
-		if tier.content == "" {
-			t.Errorf("tier %d has empty content", i)
-		}
-		if !strings.Contains(tier.content, "FROM qwen3.5:2b") {
-			t.Errorf("tier %d content doesn't have proper FROM", i)
-		}
-	}
-}
-
-// --- Tests for baseModelForMode ---
-
-func TestBaseModelForMode(t *testing.T) {
+func TestModelsForMode(t *testing.T) {
 	cases := []struct {
-		mode string
-		want string
+		mode     string
+		contains []string
 	}{
-		{"optimal", "qwen3.5:2b"},
-		{"standard", "qwen3.5:4b"},
-		{"full", "qwen3.5:4b"},
-		{"", "qwen3.5:2b"}, // unknown defaults to 2b
+		{"optimal", []string{"qwen3.5:0.8b", "qwen3.5:2b"}},
+		{"standard", []string{"qwen3.5:0.8b", "qwen3.5:2b", "qwen3.5:4b"}},
+		{"full", []string{"qwen3.5:0.8b", "qwen3.5:4b"}},
 	}
 	for _, tc := range cases {
-		got := baseModelForMode(tc.mode)
-		if got != tc.want {
-			t.Errorf("baseModelForMode(%q) = %q, want %q", tc.mode, got, tc.want)
-		}
-	}
-}
-
-// --- Tests for modelfileWithBase ---
-
-func TestModelfileWithBase(t *testing.T) {
-	content := modelfileSentry // has FROM qwen3.5:2b
-	result := modelfileWithBase(content, "qwen3.5:4b")
-	if !strings.Contains(result, "FROM qwen3.5:4b") {
-		t.Error("expected FROM line to be replaced with qwen3.5:4b")
-	}
-	if strings.Contains(result, "FROM qwen3.5:2b") {
-		t.Error("expected original FROM qwen3.5:2b to be replaced")
-	}
-}
-
-func TestModelfileWithBase_AllTiers(t *testing.T) {
-	for i, tier := range brainTiers {
-		result := modelfileWithBase(tier.content, "qwen3.5:4b")
-		if !strings.Contains(result, "FROM qwen3.5:4b") {
-			t.Errorf("tier %d (%s): FROM not replaced", i, tier.name)
+		models := modelsForMode(tc.mode)
+		for _, want := range tc.contains {
+			found := false
+			for _, m := range models {
+				if m == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("modelsForMode(%q) missing %q, got %v", tc.mode, want, models)
+			}
 		}
 	}
 }

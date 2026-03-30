@@ -30,18 +30,16 @@ import (
 
 // Model RAM requirements (model size + 1 GB safety buffer).
 const (
-	// model2BRAMRequired is the minimum free RAM needed before loading a ~1.5 GB
-	// 2B model: 1.5 GB model + 1 GB safety buffer = 2.5 GB.
-	// Expressed as integer bytes: 2684354560 = 2.5 * 1024^3
+	// model08BRAMRequired: ~0.5 GB model + 0.5 GB safety = 1 GB.
+	model08BRAMRequired int64 = 1073741824
+
+	// model2BRAMRequired: ~1.5 GB model + 1 GB safety = 2.5 GB.
 	model2BRAMRequired int64 = 2684354560
 
-	// model4BRAMRequired is the minimum free RAM needed before loading a ~3.7 GB
-	// 4B model: 3.7 GB model + 1 GB safety buffer = 4.7 GB.
-	// Expressed as integer bytes: 5047730790 ≈ 4.7 * 1024^3
+	// model4BRAMRequired: ~3.7 GB model + 1 GB safety = 4.7 GB.
 	model4BRAMRequired int64 = 5047730790
 
 	// modelManagerWarmupTimeout is the HTTP timeout for the warmup request.
-	// Long enough for Ollama to load a cold model (~10s on an SSD).
 	modelManagerWarmupTimeout = 30 * time.Second
 )
 
@@ -76,10 +74,7 @@ type ModelManager struct {
 // share the same system-state snapshot. Pass nil to disable RAM gating
 // (useful in unit tests without a live system monitor).
 func NewModelManager(pulse *SystemPulse, cfg brainconfig.BrainConfig) *ModelManager {
-	// Use BaseModelTag() for the raw Ollama model tag (e.g. "qwen3.5:4b"),
-	// not the identity name ("synapses/sentry"). Identity names don't encode
-	// model size, so is4BModel("synapses/sentry") returns false — but the
-	// underlying weights may be 4B and need 3.7 GB of RAM.
+	// Use BaseModelTag() for the heaviest model in this mode (e.g. "qwen3.5:4b").
 	primary := cfg.BaseModelTag()
 
 	fallback := ""
@@ -188,12 +183,23 @@ func (m *ModelManager) warmUp(ctx context.Context, model string) {
 }
 
 // modelRAMRequired returns the minimum free RAM (bytes) needed to load model,
-// including a 1 GB safety buffer.
+// including a safety buffer.
 func modelRAMRequired(model string) int64 {
 	if is4BModel(model) {
 		return model4BRAMRequired
 	}
+	if is08BModel(model) {
+		return model08BRAMRequired
+	}
 	return model2BRAMRequired
+}
+
+// is08BModel returns true when the model is a ~0.5 GB 0.8B model.
+func is08BModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, ":0.8b") ||
+		strings.Contains(lower, "-0.8b") ||
+		strings.Contains(lower, "_0.8b")
 }
 
 // is4BModel returns true when the model name corresponds to a ~3.7 GB 4B model.
@@ -207,14 +213,11 @@ func is4BModel(model string) bool {
 }
 
 // fallback2BFor returns the 2B variant model name for a 4B model.
-// For synapses/* named models it keeps the namespace; for raw names it
-// substitutes "4b" → "2b". Returns "qwen3.5:2b" as the universal fallback.
+// Substitutes "4b" → "2b". Returns "qwen3.5:2b" as the universal fallback.
 func fallback2BFor(model string) string {
-	// Raw Ollama tag like "qwen3.5:4b" → "qwen3.5:2b"
 	if replaced := strings.ReplaceAll(model, ":4b", ":2b"); replaced != model {
 		return replaced
 	}
-	// Suffix patterns like "model-4b-instruct" → substitute 4b→2b
 	lower := strings.ToLower(model)
 	if idx := strings.Index(lower, "4b"); idx >= 0 {
 		return model[:idx] + "2b" + model[idx+2:]

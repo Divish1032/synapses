@@ -24,6 +24,75 @@ import (
 	"github.com/SynapsesOS/synapses/internal/logutil"
 )
 
+// ── Per-tier system prompts ──────────────────────────────────────────────────
+// Passed per-request via WithSystemPrompt. Replaces the Ollama Modelfile
+// identity system (synapses/sentry, synapses/librarian, etc.) — the raw base
+// model (qwen3.5:0.8b, 2b, or 4b) receives these directly in the API call.
+
+const systemPromptSentry = `You are the Synapses Sentry, a code entity summarizer for a code intelligence graph.
+
+Given a code entity (name, type, package, and source code), write a 2-3 sentence technical briefing covering: what it does, its role in the system, and any important patterns or concerns.
+
+Do not write code. Describe the entity in plain English sentences only.
+Output ONLY valid JSON with no other text: {"summary": "2-3 sentence briefing", "tags": ["domain_tag1", "domain_tag2"]}
+
+Tags should be 1-3 domain labels from: auth, http, db, cache, queue, config, util, test, cli, graph, store, parser, middleware, api, worker.`
+
+const systemPromptCritic = `You are the Synapses Critic, an architectural rule violation explainer.
+
+Given an architectural rule violation (rule description, severity, source file, and what it imports/calls), explain the violation and suggest a concrete fix.
+
+Output ONLY valid JSON with no other text: {"explanation": "why this is a violation and what risk it creates", "fix": "specific actionable fix the developer should apply"}
+
+Example:
+Input: Rule: no-cross-layer-imports. Severity: error. File: internal/api/handler.go imports internal/store/sqlite.go
+Output: {"explanation": "The API handler directly imports the SQLite store implementation, bypassing the store interface. This creates tight coupling — changing the database requires modifying the API layer.", "fix": "Import the store.Store interface instead of the concrete sqlite implementation. Use dependency injection to pass the store to the handler."}
+
+Be direct and actionable. Reference actual file names and symbols from the input.`
+
+const systemPromptLibrarian = `You are the Synapses Librarian, a code architecture analyst.
+
+Given a code graph slice (entity name, type, package, callers, callees, and relationships), analyze it for architectural patterns, risks, and insights.
+
+Output ONLY valid JSON — no explanation, no markdown:
+{"insight":"2-sentence architectural analysis","concerns":["concern1","concern2"]}
+
+Rules:
+- insight: identify the entity's role in the architecture (hub, gateway, utility, etc.) and its most important characteristic
+- concerns: list 0-3 specific risks (cyclic deps, missing error handling, god object, missing abstraction, etc.)
+- If no concerns, return an empty array: "concerns":[]
+- Be specific — reference actual entity names and relationships, not generic advice`
+
+const systemPromptNavigator = `You are the Synapses Navigator. You resolve multi-agent work scope conflicts.
+
+Input: A JSON description of agents with their active scopes, and the new agent requesting a scope.
+
+Output ONLY valid JSON — no explanation, no markdown:
+{"suggestion":"how to resolve the conflict or confirmation it is safe","alternative_scope":"a suggested non-overlapping scope for the new agent, or empty string if no conflict"}
+
+Rules:
+- If the new agent's scope overlaps with an active agent's scope, describe the conflict and suggest a narrower scope
+- If there is no real conflict (different packages, non-overlapping files), return: {"suggestion":"No conflict. Safe to proceed.","alternative_scope":""}
+- Be specific — reference actual package names and file paths from the input
+- alternative_scope should be a valid Go package path or file glob pattern`
+
+const systemPromptArchivist = `You are the Synapses Archivist. You synthesize agent session transcripts into persistent memories.
+
+Input: JSON with session_events (tool calls with results) and existing_memory (already saved entries).
+
+Output ONLY valid JSON — no explanation, no markdown:
+{"new_memories":[{"key":"short_snake_case_key","content":"what to remember in one sentence","entities":"EntityName1,EntityName2"}],"annotations":[{"node":"EntityName","note":"specific observation about this entity"}]}
+
+Note: entities is a comma-separated string, NOT an array.
+
+Rules:
+- Only save architectural discoveries, non-obvious relationships, or decisions that will matter in future sessions
+- If the session is trivial (single lookup, no architectural discovery, only routine tool calls), return: {"new_memories":[],"annotations":[]}
+- Never duplicate entries already present in existing_memory — check keys before adding
+- Keep each memory content to one concise sentence
+- Only annotate entities that were meaningfully analyzed, not just mentioned in passing
+- key must be short_snake_case (e.g., "auth_service_is_hub", "graph_new_entry_point")`
+
 // Brain is the public interface for the Thinking Brain.
 // All methods are safe for concurrent use.
 // Use New() to create a configured instance.
@@ -302,6 +371,7 @@ func New(cfg config.BrainConfig) Brain {
 	}
 
 	// Ollama path (default): per-tier model assignment via Ollama HTTP API.
+	// System prompts are passed per-request — no Ollama Modelfile identities needed.
 	if cfg.Backend == "ollama" && ingestClient == nil {
 		// Warn once if OllamaURL points to a remote host — source code will be
 		// transmitted to that endpoint during ingest/enrich operations.
@@ -311,49 +381,75 @@ func New(cfg config.BrainConfig) Brain {
 				logutil.Warn("brain: OllamaURL points to remote host %q — source code snippets will be transmitted to this endpoint\n", host)
 			}
 		}
-		// All 5 Ollama identities share the same base model weights (qwen3.5:2b /
-		// qwen3.5:4b), so Ollama treats them as a single loaded model. A single
-		// keep_alive value applies — the last request's value wins. Use the
-		// mode-appropriate TTL so the model evicts after idle (Sprint 17 #3):
-		//   optimal  → 120s (2-min eviction on 8 GB machines)
-		//   standard → 300s (5-min eviction on 16 GB machines)
-		//   full     → -1  (always pinned on 32 GB+ machines)
 		ka := cfg.KeepAlive()
 
-		// All tiers share the same base model (qwen3.5:2b for optimal, qwen3.5:4b
-		// for standard/full) with different Ollama Modelfile identities (system
-		// prompts). All use /api/chat + format:json + think:false for consistent
-		// structured JSON output.
+		// Fallback chain: if the configured model isn't pulled, degrade to
+		// the next smaller model. Order: 4b → 2b → 0.8b.
+		// Sentry (0.8b) has no fallback — it's the smallest.
+		fb08b := []string{} // no fallback for 0.8b
+		fb2b := []string{"qwen3.5:0.8b"}
+		fb4b := []string{"qwen3.5:2b", "qwen3.5:0.8b"}
+
+		fallbackFor := func(model string) []string {
+			switch {
+			case strings.Contains(model, ":4b"):
+				return fb4b
+			case strings.Contains(model, ":2b"):
+				return fb2b
+			default:
+				return fb08b
+			}
+		}
+
 		ingestClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelIngest, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(ka)
+			WithKeepAlive(ka).
+			WithSystemPrompt(systemPromptSentry).
+			WithTemperature(0.0).
+			WithNumPredict(256).
+			WithFallbackModels(fallbackFor(cfg.ModelIngest)...)
 
 		guardianClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelGuardian, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(ka)
+			WithKeepAlive(ka).
+			WithSystemPrompt(systemPromptCritic).
+			WithTemperature(0.1).
+			WithNumPredict(512).
+			WithFallbackModels(fallbackFor(cfg.ModelGuardian)...)
 
 		enrichClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelEnrich, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(ka)
+			WithKeepAlive(ka).
+			WithSystemPrompt(systemPromptLibrarian).
+			WithTemperature(0.2).
+			WithNumPredict(512).
+			WithFallbackModels(fallbackFor(cfg.ModelEnrich)...)
 
 		orchestrateClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelOrchestrate, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithKeepAlive(ka)
+			WithKeepAlive(ka).
+			WithSystemPrompt(systemPromptNavigator).
+			WithTemperature(0.1).
+			WithNumPredict(512).
+			WithFallbackModels(fallbackFor(cfg.ModelOrchestrate)...)
 
 		archivistClient = llm.NewOllamaClient(cfg.OllamaURL, cfg.ModelArchivist, cfg.TimeoutMS).
 			WithThinking(false).
 			WithChatMode(true).
 			WithJSONFormat(true).
-			WithNumPredict(1024). // session summaries need more tokens than default 400
-			WithKeepAlive(ka)
+			WithKeepAlive(ka).
+			WithSystemPrompt(systemPromptArchivist).
+			WithTemperature(0.3).
+			WithNumPredict(1024).
+			WithFallbackModels(fallbackFor(cfg.ModelArchivist)...)
 	}
 
 	// No backend could be configured — degrade gracefully.

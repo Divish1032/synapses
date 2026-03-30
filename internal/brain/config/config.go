@@ -14,17 +14,18 @@ type IntelligenceMode string
 
 const (
 	// ModeOptimal targets 8 GB RAM systems.
-	// Guardian shares Librarian's identity (no separate Critic).
-	// All identities share qwen3.5:2b weights (~1.5GB), evicts after 2 min.
+	// Uses qwen3.5:0.8b (Sentry) + qwen3.5:2b (all other tiers).
+	// Models evict after 2 min idle.
 	ModeOptimal IntelligenceMode = "optimal"
 
 	// ModeStandard targets 16 GB+ RAM systems.
-	// Critic gets its own identity for violation explanations.
-	// All identities share qwen3.5:4b Q4_K_M weights (~2.7GB), evicts after 5 min.
+	// Uses qwen3.5:0.8b (Sentry) + qwen3.5:2b (Critic/Navigator/Archivist) +
+	// qwen3.5:4b (Librarian). Models evict after 5 min idle.
 	ModeStandard IntelligenceMode = "standard"
 
-	// ModeFull is identical to ModeStandard. Kept for config compatibility.
-	// All identities share qwen3.5:4b Q4_K_M weights (~2.7GB), pinned.
+	// ModeFull targets 32 GB+ RAM systems.
+	// Uses qwen3.5:0.8b (Sentry) + qwen3.5:4b (all other tiers).
+	// Models pinned in RAM.
 	ModeFull IntelligenceMode = "full"
 )
 
@@ -154,7 +155,7 @@ func DefaultConfig() BrainConfig {
 		OllamaURL:        "http://localhost:11434",
 		Model:            "qwen3.5:2b",
 		FastModel:        "qwen3.5:2b",
-		ModelIngest:      "qwen3.5:2b",
+		ModelIngest:      "qwen3.5:0.8b",
 		ModelGuardian:    "qwen3.5:2b",
 		ModelEnrich:      "qwen3.5:2b",
 		ModelOrchestrate: "qwen3.5:2b",
@@ -308,61 +309,62 @@ func (c *BrainConfig) applyDefaults() {
 
 // AutoConfigureModels sets per-tier model tags based on IntelligenceMode.
 //
-// Optimal mode uses base Qwen 3.5 2B (~1.5 GB). Standard and Full modes use
-// Qwen 3.5 4B Q4_K_M (~2.7 GB) — the 4B model reaches IFEval 89.8, the
-// threshold for reliable format compliance in classification tasks.
+// Each tier is assigned the smallest model that can reliably handle its task.
+// System prompts are passed per-request (via WithSystemPrompt on OllamaClient),
+// so no Ollama Modelfile identity registration is needed.
 //
-// All tiers in a given mode share the same base model via Ollama Modelfile
-// identities (system prompts + parameters). Ollama deduplicates weights:
-// all 5 identities share one copy of the weights in RAM.
+// Model matrix (tier × mode):
 //
-// Model tags:
+//	Tier        Optimal (8GB)  Standard (16GB)  Full (32GB+)
+//	──────────  ─────────────  ───────────────  ────────────
+//	Sentry      qwen3.5:0.8b   qwen3.5:0.8b    qwen3.5:0.8b
+//	Critic      qwen3.5:2b     qwen3.5:2b      qwen3.5:4b
+//	Librarian   qwen3.5:2b     qwen3.5:4b      qwen3.5:4b
+//	Navigator   qwen3.5:2b     qwen3.5:2b      qwen3.5:4b
+//	Archivist   qwen3.5:2b     qwen3.5:2b      qwen3.5:4b
 //
-//	synapses/sentry    — Gate & Router (classify entities)
-//	synapses/librarian — Enricher (analyze graph slices)
-//	synapses/critic    — Guardian (review diffs for violations)
-//	synapses/navigator — Orchestrator (resolve scope conflicts)
-//	synapses/archivist — Memory synthesizer (session summaries)
-//
-// In Optimal mode Guardian reuses Librarian's identity (same model, different
-// system prompt would be wasted — they share weights anyway).
+// Sentry (entity classification + JSON tagging) uses 0.8b everywhere — the
+// task is simple extraction that doesn't need reasoning capability.
 //
 // totalRAMGB is used only when IntelligenceMode is "" (legacy auto-scaling path).
 func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
 	switch c.IntelligenceMode {
 	case ModeOptimal:
-		c.ModelIngest = "synapses/sentry"
-		c.ModelEnrich = "synapses/librarian"
-		c.ModelGuardian = "synapses/librarian" // shares slot in Optimal
-		c.ModelOrchestrate = "synapses/navigator"
-		c.ModelArchivist = "synapses/archivist"
+		// 8 GB budget: 0.8b (~500MB) + 2b (~1.5GB) = ~2GB peak
+		c.ModelIngest = "qwen3.5:0.8b"
+		c.ModelEnrich = "qwen3.5:2b"
+		c.ModelGuardian = "qwen3.5:2b"
+		c.ModelOrchestrate = "qwen3.5:2b"
+		c.ModelArchivist = "qwen3.5:2b"
 
-	case ModeStandard, ModeFull:
-		c.ModelIngest = "synapses/sentry"
-		c.ModelEnrich = "synapses/librarian"
-		c.ModelGuardian = "synapses/critic"
-		c.ModelOrchestrate = "synapses/navigator"
-		c.ModelArchivist = "synapses/archivist"
+	case ModeStandard:
+		// 16 GB budget: 0.8b + 2b + 4b
+		c.ModelIngest = "qwen3.5:0.8b"
+		c.ModelEnrich = "qwen3.5:4b"  // benefits most from reasoning capability
+		c.ModelGuardian = "qwen3.5:2b"
+		c.ModelOrchestrate = "qwen3.5:2b"
+		c.ModelArchivist = "qwen3.5:2b"
+
+	case ModeFull:
+		// 32 GB+ budget: 0.8b + 4b for all reasoning tiers
+		c.ModelIngest = "qwen3.5:0.8b"
+		c.ModelEnrich = "qwen3.5:4b"
+		c.ModelGuardian = "qwen3.5:4b"
+		c.ModelOrchestrate = "qwen3.5:4b"
+		c.ModelArchivist = "qwen3.5:4b"
 
 	default:
 		// Legacy auto-scaling: no IntelligenceMode set.
-		// Ingest and guardian always use the smallest model — their tasks
-		// (entity classification, diff review) are well within 2b capability
-		// and this avoids loading a second model on tight-RAM machines.
-		c.ModelIngest = "qwen3.5:2b"
+		c.ModelIngest = "qwen3.5:0.8b"
 		c.ModelGuardian = "qwen3.5:2b"
 		switch {
 		case totalRAMGB <= 16:
-			// ≤16 GB: everything on 2b — single model slot (~1.5 GB).
 			c.ModelEnrich = "qwen3.5:2b"
 			c.ModelOrchestrate = "qwen3.5:2b"
 		case totalRAMGB <= 24:
-			// 16-24 GB: enrich benefits from 4b; orchestrate stays on 2b
-			// so only one extra model slot is needed (~2.7 GB + 1.5 GB).
 			c.ModelEnrich = "qwen3.5:4b"
 			c.ModelOrchestrate = "qwen3.5:2b"
 		default:
-			// 24+ GB: both enricher and orchestrator on 4b (same model slot).
 			c.ModelEnrich = "qwen3.5:4b"
 			c.ModelOrchestrate = "qwen3.5:4b"
 		}
@@ -371,10 +373,6 @@ func (c *BrainConfig) AutoConfigureModels(totalRAMGB float64) {
 }
 
 // KeepAlive returns the keep_alive seconds for this intelligence mode.
-//
-// All 5 Ollama identities (synapses/sentry, synapses/librarian, etc.) share the
-// same base model weights, so Ollama treats them as a single loaded model.
-// A single keep_alive value applies to all tiers — the last request's value wins.
 //
 // Per-mode policy (Sprint 17 #3 — Model Manager):
 //
@@ -398,25 +396,18 @@ func (c *BrainConfig) KeepAlive() int {
 }
 
 // KeepAliveValues returns the keep_alive seconds for guardian, enrich,
-// orchestrate, and archivist tiers. All four values are identical — they
-// delegate to KeepAlive() because all Ollama identities share the same model
-// weights. Retained for backward compatibility with existing callers.
+// orchestrate, and archivist tiers. Retained for backward compatibility.
 func (c *BrainConfig) KeepAliveValues() (kaGuardian, kaEnrich, kaOrchestrate, kaArchivist int) {
 	ka := c.KeepAlive()
 	return ka, ka, ka, ka
 }
 
-// BaseModelTag returns the raw Ollama model tag backing all synapses/*
-// identities for this intelligence mode. This is the actual model weights
-// loaded in RAM — not the identity name (synapses/sentry etc.).
+// BaseModelTag returns the heaviest Ollama model tag used in this intelligence
+// mode. Used by ModelManager for RAM requirement checks.
 //
-// Used by ModelManager for RAM requirement checks: is4BModel("synapses/sentry")
-// returns false, but is4BModel(BaseModelTag()) correctly returns true when the
-// mode is standard/full.
-//
-//	optimal  → "qwen3.5:2b"  (~1.5 GB, IFEval ~80)
-//	standard → "qwen3.5:4b"  (~2.7 GB, IFEval 89.8, Q4_K_M)
-//	full     → "qwen3.5:4b"  (~2.7 GB, IFEval 89.8, Q4_K_M)
+//	optimal  → "qwen3.5:2b"  (heaviest tier model)
+//	standard → "qwen3.5:4b"  (Librarian uses 4b)
+//	full     → "qwen3.5:4b"  (all reasoning tiers use 4b)
 //	""       → c.Model       (legacy path, no mode set)
 func (c *BrainConfig) BaseModelTag() string {
 	switch c.IntelligenceMode {
@@ -427,4 +418,18 @@ func (c *BrainConfig) BaseModelTag() string {
 	default:
 		return c.Model
 	}
+}
+
+// ModelsRequired returns all distinct Ollama model tags needed for this mode.
+// Used by brain setup to know which models to pull.
+func (c *BrainConfig) ModelsRequired() []string {
+	seen := map[string]bool{}
+	var models []string
+	for _, m := range []string{c.ModelIngest, c.ModelGuardian, c.ModelEnrich, c.ModelOrchestrate, c.ModelArchivist} {
+		if m != "" && !seen[m] {
+			seen[m] = true
+			models = append(models, m)
+		}
+	}
+	return models
 }

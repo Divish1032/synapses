@@ -45,6 +45,17 @@ type OllamaClient struct {
 	// Default: 400 (sufficient for insight/coordination JSON).
 	// Increase for tiers with longer outputs, e.g. Archivist (1024).
 	numPredict int
+	// system is the system prompt sent per-request. When non-empty, it is included
+	// in the Ollama API payload (both /api/generate and /api/chat) so tier-specific
+	// personas work without needing Ollama Modelfile identity registrations.
+	system string
+	// temperature overrides the default 0.1 when set via WithTemperature.
+	// nil = use default 0.1. Pointer distinguishes "not set" from "set to 0.0".
+	temperature *float64
+	// fallbackModels is a list of model tags to try when the primary model is
+	// unavailable (Ollama returns "model not found"). Tried in order; first
+	// available model wins. Set via WithFallbackModels.
+	fallbackModels []string
 }
 
 // NewOllamaClient creates a client targeting the given Ollama base URL and model.
@@ -114,10 +125,38 @@ func (c *OllamaClient) WithNumPredict(n int) *OllamaClient {
 	return c
 }
 
+// WithSystemPrompt sets the system prompt sent with every request.
+// This replaces the need for Ollama Modelfile identities — the persona's
+// system prompt is passed per-request instead of being baked into a Modelfile.
+// Returns the client to allow chaining.
+func (c *OllamaClient) WithSystemPrompt(prompt string) *OllamaClient {
+	c.system = prompt
+	return c
+}
+
+// WithFallbackModels sets fallback models tried (in order) when the primary
+// model returns "model not found" from Ollama. This provides graceful
+// degradation — e.g. if 4b isn't pulled, fall back to 2b, then 0.8b.
+// Returns the client to allow chaining.
+func (c *OllamaClient) WithFallbackModels(models ...string) *OllamaClient {
+	c.fallbackModels = models
+	return c
+}
+
+// WithTemperature sets the sampling temperature for this client.
+// Default is 0.1 (near-deterministic). Use 0.0 for Sentry (classification),
+// 0.2 for Librarian (analysis), 0.3 for Archivist (synthesis).
+// Returns the client to allow chaining.
+func (c *OllamaClient) WithTemperature(t float64) *OllamaClient {
+	c.temperature = &t
+	return c
+}
+
 // ollamaRequest is the payload for POST /api/generate.
 type ollamaRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
+	System string `json:"system,omitempty"`
 	Stream bool   `json:"stream"`
 	// Think controls extended thinking mode via the Ollama ≥0.6 API field.
 	// When false, chain-of-thought is suppressed (faster). When true, the model
@@ -175,31 +214,54 @@ type ollamaChatResponse struct {
 }
 
 // Generate sends a prompt and returns the response text.
-// Uses stream=false for simplicity and lowest latency on small outputs.
-// For Qwen3.x models, sets the Ollama API think: bool field (≥0.6) to control
-// chain-of-thought. Non-Qwen3 models receive no think field — they ignore it.
-// When useChat=true, dispatches to /api/chat instead of /api/generate —
-// required for fine-tuned Qwen3.5 models that need chat-template formatting.
+// If the primary model is not found and fallback models are configured,
+// they are tried in order until one succeeds. Thread-safe — does not
+// mutate c.model; fallback model names are passed to the generate methods.
 func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, error) {
-	if c.useChat {
-		return c.generateChat(ctx, prompt)
+	resp, err := c.doGenerate(ctx, c.model, prompt)
+	if err != nil && len(c.fallbackModels) > 0 && isModelNotFound(err) {
+		for _, fb := range c.fallbackModels {
+			resp, err = c.doGenerate(ctx, fb, prompt)
+			if err == nil || !isModelNotFound(err) {
+				return resp, err
+			}
+		}
 	}
-	return c.generateRaw(ctx, prompt)
+	return resp, err
+}
+
+// doGenerate dispatches to generateRaw or generateChat with the given model.
+func (c *OllamaClient) doGenerate(ctx context.Context, model, prompt string) (string, error) {
+	if c.useChat {
+		return c.generateChat(ctx, model, prompt)
+	}
+	return c.generateRaw(ctx, model, prompt)
+}
+
+// isModelNotFound returns true if the error indicates the model is not available.
+func isModelNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "model") && (strings.Contains(s, "not found") || strings.Contains(s, "404"))
 }
 
 // generateRaw calls POST /api/generate with the prompt as a raw string.
-func (c *OllamaClient) generateRaw(ctx context.Context, prompt string) (string, error) {
+func (c *OllamaClient) generateRaw(ctx context.Context, model, prompt string) (string, error) {
+	temp := 0.1
+	if c.temperature != nil {
+		temp = *c.temperature
+	}
 	reqBody := ollamaRequest{
-		Model:     c.model,
+		Model:     model,
 		Prompt:    prompt,
+		System:    c.system,
 		Stream:    false,
 		KeepAlive: c.keepAlive,
 		Options: ollamaOptions{
-			Temperature: 0.1, // near-deterministic for structured JSON
+			Temperature: temp,
 			NumPredict:  c.numPredict,
-			// No stop tokens: models wrap JSON in markdown fences and stop tokens
-			// fire immediately (e.g. "```" fires on the opening fence), producing
-			// empty responses. ExtractJSON handles all formatting variants.
 		},
 	}
 	if c.useJSON {
@@ -207,9 +269,7 @@ func (c *OllamaClient) generateRaw(ctx context.Context, prompt string) (string, 
 	}
 
 	// Set think: bool for all models via the Ollama ≥0.6 API field.
-	// Non-Qwen3 models ignore this field. Sending it for all models avoids
-	// needing to detect model family — synapses/* models are Qwen3-based but
-	// don't start with "qwen3", so a name-prefix check would miss them.
+	// Non-Qwen3 models ignore this field.
 	think := c.think
 	reqBody.Think = &think
 
@@ -251,19 +311,28 @@ func (c *OllamaClient) generateRaw(ctx context.Context, prompt string) (string, 
 }
 
 // generateChat calls POST /api/chat, wrapping the prompt as a user message.
-// The Modelfile's SYSTEM block is applied automatically by Ollama.
-// Used for Qwen3.5 models (base or fine-tuned) where chat-template formatting
-// improves structured output adherence.
-func (c *OllamaClient) generateChat(ctx context.Context, prompt string) (string, error) {
+// When a system prompt is configured (via WithSystemPrompt), it is prepended
+// as a system message — replacing the need for Ollama Modelfile identities.
+// Used for Qwen3.5 models where chat-template formatting improves structured
+// output adherence.
+func (c *OllamaClient) generateChat(ctx context.Context, model, prompt string) (string, error) {
+	msgs := make([]ollamaMessage, 0, 2)
+	if c.system != "" {
+		msgs = append(msgs, ollamaMessage{Role: "system", Content: c.system})
+	}
+	msgs = append(msgs, ollamaMessage{Role: "user", Content: prompt})
+
+	temp := 0.1
+	if c.temperature != nil {
+		temp = *c.temperature
+	}
 	reqBody := ollamaChatRequest{
-		Model: c.model,
-		Messages: []ollamaMessage{
-			{Role: "user", Content: prompt},
-		},
+		Model:     model,
+		Messages:  msgs,
 		Stream:    false,
 		KeepAlive: c.keepAlive,
 		Options: ollamaOptions{
-			Temperature: 0.1,
+			Temperature: temp,
 			NumPredict:  c.numPredict,
 		},
 	}

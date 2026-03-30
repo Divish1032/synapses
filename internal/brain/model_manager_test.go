@@ -304,17 +304,22 @@ func TestIs4BModel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestModelRAMRequired(t *testing.T) {
-	want2B := model2BRAMRequired // 2684354560 bytes (2.5 GB)
-	want4B := model4BRAMRequired // 5047730790 bytes (4.7 GB)
+	want08B := model08BRAMRequired // 1073741824 bytes (1 GB)
+	want2B := model2BRAMRequired   // 2684354560 bytes (2.5 GB)
+	want4B := model4BRAMRequired   // 5047730790 bytes (4.7 GB)
 
+	if got := modelRAMRequired("qwen3.5:0.8b"); got != want08B {
+		t.Errorf("modelRAMRequired(0.8b) = %d, want %d", got, want08B)
+	}
 	if got := modelRAMRequired("qwen3.5:2b"); got != want2B {
 		t.Errorf("modelRAMRequired(2b) = %d, want %d", got, want2B)
 	}
 	if got := modelRAMRequired("qwen3.5:4b"); got != want4B {
 		t.Errorf("modelRAMRequired(4b) = %d, want %d", got, want4B)
 	}
-	if got := modelRAMRequired("synapses/sentry"); got != want2B {
-		t.Errorf("modelRAMRequired(sentry) = %d, want %d (non-4B defaults to 2B bucket)", got, want2B)
+	// Unknown model names default to the 2B bucket.
+	if got := modelRAMRequired("unknown-model"); got != want2B {
+		t.Errorf("modelRAMRequired(unknown) = %d, want %d", got, want2B)
 	}
 }
 
