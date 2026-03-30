@@ -12,6 +12,7 @@ func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 		"session_init", "search", "get_context", "get_file_context",
 		"get_impact", "validate", "memory", "end_session",
 		"tasks", "rules", "annotate", "lookup_docs",
+		"get_compaction_guide",
 	}
 	for _, name := range tools {
 		if !s.toolInTier(name) {
@@ -21,12 +22,13 @@ func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 }
 
 // TestCoreTierTools_DesignDocSet verifies core categorization matches
-// the final 12-tool set after Sprint 24 consolidation.
+// the final 13-tool set after Sprint 24 consolidation + compaction guide.
 func TestCoreTierTools_DesignDocSet(t *testing.T) {
 	expected := []string{
 		"session_init", "search", "get_context", "get_file_context",
 		"get_impact", "validate", "memory", "end_session",
 		"tasks", "rules", "annotate", "lookup_docs",
+		"get_compaction_guide",
 	}
 	for _, name := range expected {
 		if !coreTierTools[name] {

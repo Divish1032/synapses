@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // ledgerWatermark tracks which cross-session alerts a session has already seen.
@@ -88,7 +89,70 @@ var signalSpecs = map[string]signalSpec{
 	"memory":   {entityKeys: nil, fileKeys: []string{"affected_files"}},
 	"tasks":    {entityKeys: nil, fileKeys: nil},
 	"rules":    {entityKeys: nil, fileKeys: nil},
-	"annotate": {entityKeys: []string{"node_id", "entity"}, fileKeys: []string{"file"}},
+	"annotate":              {entityKeys: []string{"node_id", "entity"}, fileKeys: []string{"file"}},
+	"get_compaction_guide":  {entityKeys: nil, fileKeys: nil},
+}
+
+// synthesizeWorkSummary builds a human-readable narrative from work ledger signals
+// and optional session state. Used for compaction recovery to quickly re-orient
+// the agent after context compaction. Target: <200 tokens.
+func synthesizeWorkSummary(entities, files []string, state *store.SessionState) string {
+	var b strings.Builder
+
+	// Cap entities and files to top 8
+	maxItems := 8
+	if len(entities) > 0 {
+		shown := entities
+		if len(shown) > maxItems {
+			shown = shown[:maxItems]
+		}
+		b.WriteString("Working on: ")
+		b.WriteString(strings.Join(shown, ", "))
+		if len(entities) > maxItems {
+			fmt.Fprintf(&b, " (+%d more)", len(entities)-maxItems)
+		}
+		b.WriteString(". ")
+	}
+	if len(files) > 0 {
+		shown := files
+		if len(shown) > maxItems {
+			shown = shown[:maxItems]
+		}
+		b.WriteString("Files: ")
+		b.WriteString(strings.Join(shown, ", "))
+		if len(files) > maxItems {
+			fmt.Fprintf(&b, " (+%d more)", len(files)-maxItems)
+		}
+		b.WriteString(". ")
+	}
+
+	if state != nil {
+		if state.Approach != "" {
+			b.WriteString("Approach: ")
+			approach := state.Approach
+			if len(approach) > 200 {
+				approach = approach[:200] + "..."
+			}
+			b.WriteString(approach)
+			b.WriteString(". ")
+		}
+		if len(state.CompletedSteps) > 0 {
+			fmt.Fprintf(&b, "Completed: %d step(s). ", len(state.CompletedSteps))
+		}
+		if len(state.RemainingSteps) > 0 {
+			fmt.Fprintf(&b, "Remaining: %d step(s). ", len(state.RemainingSteps))
+		}
+		if len(state.Blockers) > 0 {
+			b.WriteString("Blocked by: ")
+			b.WriteString(strings.Join(state.Blockers, "; "))
+			b.WriteString(". ")
+		}
+	}
+
+	if b.Len() == 0 {
+		return "No prior work context available."
+	}
+	return b.String()
 }
 
 // extractSignals parses tool call arguments for entity and file references.

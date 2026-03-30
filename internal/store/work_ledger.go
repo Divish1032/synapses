@@ -138,6 +138,40 @@ func (s *Store) SessionLedgerEntities(sessionID string) (entityIDs, filePaths []
 	return entityIDs, filePaths, rows.Err()
 }
 
+// SessionLedgerEntityCounts returns the frequency count for each entity in the
+// session's work ledger. Unlike SessionLedgerEntities which deduplicates, this
+// preserves signal strength: an entity appearing in 5 tool calls gets count=5.
+// Used for compaction guide entity importance ranking.
+func (s *Store) SessionLedgerEntityCounts(sessionID string) (map[string]int, error) {
+	counts := make(map[string]int)
+	if s.knowledgeDB == nil {
+		return counts, nil
+	}
+	rows, err := s.knowledgeDB.Query(
+		`SELECT entity_ids FROM work_ledger WHERE session_id = ?`, sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var eJSON string
+		if err := rows.Scan(&eJSON); err != nil {
+			continue
+		}
+		var arr []string
+		if json.Unmarshal([]byte(eJSON), &arr) == nil {
+			for _, e := range arr {
+				if e != "" {
+					counts[e]++
+				}
+			}
+		}
+	}
+	return counts, rows.Err()
+}
+
 // PruneLedger deletes work ledger entries older than the given duration.
 func (s *Store) PruneLedger(maxAge time.Duration) (int64, error) {
 	if s.knowledgeDB == nil {

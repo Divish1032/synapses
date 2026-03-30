@@ -1540,6 +1540,38 @@ func (s *Store) GetAllMemoryAnchorNodeIDsInSet(memIDs []string, nodeSet map[stri
 	return result, nil
 }
 
+// GetMemoriesForEntitySet returns entity-tier memories for any of the given entity IDs.
+// Used for compaction recovery — surfaces institutional knowledge about entities
+// the agent was working with. Only returns non-expired, non-stale memories.
+func (s *Store) GetMemoriesForEntitySet(entityIDs []string, limit int) ([]Memory, error) {
+	if len(entityIDs) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	placeholders := make([]string, len(entityIDs))
+	args := make([]interface{}, len(entityIDs))
+	for i, id := range entityIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	args = append(args, now, limit)
+	query := `SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+	                 created_at, expires_at, last_accessed_at, source, importance, access_count, source_project
+	          FROM memories
+	          WHERE tier = 'entity'
+	            AND entity_id IN (` + strings.Join(placeholders, ",") + `)
+	            AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?)
+	            AND stale = 0
+	          ORDER BY importance DESC, last_accessed_at DESC
+	          LIMIT ?`
+	rows, err := s.knowledgeDB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get memories for entity set: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
 // GetMemoriesByAnchorNode returns memories anchored to the given node ID via the
 // memory_anchors junction table. This finds memories linked through anchor_nodes=
 // in remember(), which are NOT discoverable via QueryMemories(entityID=...) alone.

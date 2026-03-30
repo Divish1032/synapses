@@ -118,14 +118,15 @@ func (s *Server) handleSessionInit(
 	if scope == "" {
 		scope = "standard"
 	}
-	validScopes := map[string]bool{"full": true, "quick": true, "resume": true, "standard": true}
+	validScopes := map[string]bool{"full": true, "quick": true, "resume": true, "standard": true, "compaction": true}
 	scopeWarning := ""
 	if !validScopes[scope] {
-		scopeWarning = fmt.Sprintf("unknown scope %q — defaulting to 'standard'. Valid values: full, standard, quick, resume.", scope)
+		scopeWarning = fmt.Sprintf("unknown scope %q — defaulting to 'standard'. Valid values: full, standard, quick, resume, compaction.", scope)
 		scope = "standard"
 	}
 	quickMode := scope == "quick" || scope == "standard"
 	resumeMode := scope == "resume"
+	compactionMode := scope == "compaction"
 	s.upsertAgentIfNeeded(agentID)
 	// Phase 6: reset component health tracker for this agent on new session
 	// so auto-disabled components get a fresh chance. Per-agent scoped.
@@ -214,6 +215,9 @@ func (s *Server) handleSessionInit(
 			})
 		}
 	}
+
+	// Compaction mode is explicit-only: agents must pass scope="compaction" when they
+	// know they compacted. No auto-detection — avoids false positives that waste tokens.
 
 	// Detect project-wide first session: count == 1 means this is the first
 	// session_init ever recorded for this project — surfaced as highlights.
@@ -759,6 +763,15 @@ func (s *Server) handleSessionInit(
 				briefing = append(briefing, entry)
 			}
 			resp["active_sessions"] = briefing
+		}
+	}
+
+	// Compaction recovery: when compaction mode is active, enrich the response
+	// with a structured recovery packet so the agent can resume effectively.
+	if compactionMode && s.store != nil && synapseSessionID != "" {
+		recovery := s.buildCompactionRecovery(agentID, synapseSessionID)
+		if recovery != nil {
+			resp["compaction_recovery"] = recovery
 		}
 	}
 
@@ -1946,6 +1959,178 @@ func (s *Server) trimRepoRootSingle(p string) string {
 		prefix += "/"
 	}
 	return strings.TrimPrefix(p, prefix)
+}
+
+// ── Compaction Recovery ──────────────────────────────────────────────────────
+
+// buildCompactionRecovery assembles a structured recovery packet for an agent
+// that has compacted its context. Surfaces the knowledge that is typically lost
+// during compaction: work summary, decisions, failures, rules, violations,
+// and entity memories.
+func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]interface{} {
+	if s.store == nil {
+		return nil
+	}
+
+	// 1. Get work ledger entities/files for this session
+	entities, files, _ := s.store.SessionLedgerEntities(sessionID)
+
+	// 2. Get active session state (from any in-progress task)
+	var activeState *store.SessionState
+	if tasks, err := s.store.GetPendingTasks("", agentID); err == nil {
+		for _, t := range tasks {
+			if t.Status == "in_progress" {
+				if st, stErr := s.store.GetSessionState(t.ID); stErr == nil && st != nil {
+					activeState = st
+					break
+				}
+			}
+		}
+	}
+
+	// 3. Build work summary narrative
+	workSummary := synthesizeWorkSummary(entities, files, activeState)
+
+	// 4. Get session episodes (decisions and failures) via time window
+	var sessionDecisions, sessionFailures []compactEpisode
+	if sess, err := s.store.GetSession(sessionID); err == nil && sess != nil {
+		start := time.Unix(sess.StartedAt, 0)
+		end := time.Now()
+		if decisions, err := s.store.GetEpisodesByTimeWindow(agentID, s.projectID, start, end, "decision", 5); err == nil {
+			for _, ep := range decisions {
+				sessionDecisions = append(sessionDecisions, compactEpisode{
+					Decision:  ep.Decision,
+					Rationale: ep.Rationale,
+					Outcome:   ep.Outcome,
+				})
+			}
+		}
+		if failures, err := s.store.GetEpisodesByTimeWindow(agentID, s.projectID, start, end, "failure", 3); err == nil {
+			for _, ep := range failures {
+				sessionFailures = append(sessionFailures, compactEpisode{
+					Decision:  ep.Decision,
+					Rationale: ep.Rationale,
+					Outcome:   ep.Outcome,
+				})
+			}
+		}
+	}
+
+	// 5. Get applicable rules and violations for touched files
+	var rules []compactRule
+	if matched, err := s.store.GetRulesForFiles(files); err == nil {
+		for _, r := range matched {
+			rules = append(rules, compactRule{
+				ID:          r.ID,
+				Description: r.Description,
+				Severity:    r.Severity,
+			})
+		}
+	}
+
+	var violations []compactViolation
+	if matched, err := s.store.GetViolationsForFiles(files, 5); err == nil {
+		for _, v := range matched {
+			violations = append(violations, compactViolation{
+				RuleID:   v.RuleID,
+				Severity: v.Severity,
+				FromNode: v.FromNode,
+				ToNode:   v.ToNode,
+			})
+		}
+	}
+
+	// 6. Get entity memories
+	var entityMemories []compactMemory
+	if mems, err := s.store.GetMemoriesForEntitySet(entities, 10); err == nil {
+		for _, m := range mems {
+			entityMemories = append(entityMemories, compactMemory{
+				EntityID: m.EntityID,
+				Content:  m.Content,
+			})
+		}
+	}
+
+	// 7. Assemble the recovery packet
+	recovery := map[string]interface{}{
+		"work_summary": workSummary,
+		"hint":         "Your context was compacted. This recovery packet contains your prior work state from Synapses. File contents and graph traversals can be re-queried — focus on decisions and approach.",
+	}
+	if len(sessionDecisions) > 0 {
+		recovery["session_decisions"] = sessionDecisions
+	}
+	if len(sessionFailures) > 0 {
+		recovery["session_failures"] = sessionFailures
+	}
+	if len(rules) > 0 {
+		recovery["active_rules"] = rules
+	}
+	if len(violations) > 0 {
+		recovery["active_violations"] = violations
+	}
+	if len(entityMemories) > 0 {
+		recovery["entity_memories"] = entityMemories
+	}
+	if activeState != nil && activeState.ContextSnapshot != "" {
+		recovery["context_snapshot"] = activeState.ContextSnapshot
+	}
+
+	// 8. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
+	truncateCompactionPacket(recovery, 8000)
+
+	return recovery
+}
+
+// compactEpisode is a lightweight episode representation for compaction recovery.
+type compactEpisode struct {
+	Decision  string `json:"decision"`
+	Rationale string `json:"rationale,omitempty"`
+	Outcome   string `json:"outcome"`
+}
+
+// compactRule is a lightweight rule representation for compaction recovery.
+type compactRule struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"`
+}
+
+// compactViolation is a lightweight violation representation for compaction recovery.
+type compactViolation struct {
+	RuleID   string `json:"rule_id"`
+	Severity string `json:"severity"`
+	FromNode string `json:"from_node"`
+	ToNode   string `json:"to_node"`
+}
+
+// compactMemory is a lightweight memory representation for compaction recovery.
+type compactMemory struct {
+	EntityID string `json:"entity_id"`
+	Content  string `json:"content"`
+}
+
+// truncateCompactionPacket progressively drops lower-priority items from the
+// recovery packet to fit within the character budget. Drop order:
+// violations → memories → failures → decisions → rules.
+// Always preserves work_summary and hint (the minimum useful payload).
+// Safe for single-goroutine use — caller must not share packet concurrently.
+func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
+	data, err := json.Marshal(packet)
+	if err != nil || len(data) <= maxChars {
+		return
+	}
+	// Progressive truncation in priority order (lowest value first).
+	// work_summary and hint are never dropped — they're the minimum useful payload.
+	dropOrder := []string{"active_violations", "entity_memories", "session_failures", "session_decisions", "active_rules", "context_snapshot"}
+	for _, key := range dropOrder {
+		if len(data) <= maxChars {
+			return
+		}
+		if _, ok := packet[key]; ok {
+			delete(packet, key)
+			data, _ = json.Marshal(packet)
+		}
+	}
 }
 
 // computeFirstSessionHighlights analyses the code graph for patterns that

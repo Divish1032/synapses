@@ -371,6 +371,46 @@ func scanEpisodeRow(row *sql.Row) (*Episode, error) {
 	return &e, nil
 }
 
+// GetEpisodesByTimeWindow returns episodes for a given agent and project within a
+// time window. Used for compaction recovery — correlates episodes to a session via
+// agent_id + project_id + created_at range (episodes have no session_id column).
+// Both agentID and projectID are required to prevent cross-project leakage when
+// two agents share the same agent_id.
+// episodeType can be empty (all types) or a specific type like "decision"/"failure".
+func (s *Store) GetEpisodesByTimeWindow(agentID, projectID string, start, end time.Time, episodeType string, limit int) ([]Episode, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if agentID == "" {
+		return nil, nil
+	}
+	query := `
+		SELECT id, agent_id, project_id, created_at, episode_type, outcome,
+		       trigger, decision, rationale, affected_files, affected_nodes,
+		       tags, importance, promoted_rule
+		FROM episodes
+		WHERE agent_id = ? AND created_at >= ? AND created_at <= ?`
+	args := []interface{}{agentID, start.Unix(), end.Unix()}
+
+	if projectID != "" {
+		query += ` AND project_id = ?`
+		args = append(args, projectID)
+	}
+	if episodeType != "" {
+		query += ` AND episode_type = ?`
+		args = append(args, episodeType)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.knowledgeDB.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get episodes by time window: %w", err)
+	}
+	defer rows.Close()
+	return scanEpisodes(rows)
+}
+
 // buildORQuery converts a natural-language plan description into an FTS5 OR
 // query so CheckPlanSafety matches any key term rather than requiring all terms.
 // "change auth token logic" → `"auth"* OR "token"* OR "change"* OR "logic"*`

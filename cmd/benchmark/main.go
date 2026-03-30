@@ -32,7 +32,7 @@ import (
 
 func main() {
 	var (
-		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench | graphbench | featurebench")
+		benchmarkName = flag.String("benchmark", "repobench", "Benchmark to run: contextbench | swe-verified | repobench | graphbench | featurebench | compactionbench")
 		endpoint      = flag.String("endpoint", "http://127.0.0.1:11435", "Synapses daemon REST endpoint")
 		project       = flag.String("project", "", "Single project path (overrides per-repo routing for synapses-embed)")
 		outputDir     = flag.String("output-dir", "results", "Directory to write JSON and markdown results")
@@ -275,6 +275,29 @@ func main() {
 			log.Fatalf("write results: %v", err)
 		}
 		rep.PrintFeatureBenchSummary(fbReport)
+
+	case "compactionbench", "compaction-bench", "compaction_bench":
+		cbResults, err := benchmarks.RunCompactionBench(benchmarks.CompactionBenchOptions{
+			Split:     *fbSplit,
+			TaskIDs:   splitComma(*fbTaskIDs),
+			Level:     *fbLevel,
+			ReposDir:  *reposDir,
+			Limit:     *limit,
+			Mode:      *sweMode,
+			Model:     *sweModel,
+			P1Timeout: 300,
+			P2Timeout: *fbTimeout,
+			OutputDir: *outputDir,
+			Debug:     *fbDebug,
+		})
+		if err != nil {
+			log.Fatalf("compactionbench failed: %v", err)
+		}
+		cbReport := benchmarks.BuildCompactionBenchReport(*sweMode, *sweModel, cbResults)
+		if err := rep.WriteCompactionBench(cbReport); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintCompactionBenchSummary(cbReport)
 
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)

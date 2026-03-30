@@ -50,6 +50,31 @@ type OrphanedTask struct {
 	Evidence     string `json:"evidence,omitempty"`
 }
 
+// SessionInfo holds lightweight session metadata for compaction recovery.
+type SessionInfo struct {
+	ID        string
+	AgentID   string
+	StartedAt int64
+}
+
+// GetSession returns basic session info by ID. Returns nil, nil if not found.
+func (s *Store) GetSession(sessionID string) (*SessionInfo, error) {
+	if s.knowledgeDB == nil || sessionID == "" {
+		return nil, nil
+	}
+	var info SessionInfo
+	err := s.knowledgeDB.QueryRow(
+		`SELECT id, agent_id, started_at FROM sessions WHERE id = ?`, sessionID,
+	).Scan(&info.ID, &info.AgentID, &info.StartedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session: %w", err)
+	}
+	return &info, nil
+}
+
 // StaleSession is a session that timed out without a clean end_session.
 // Surfaced in session_init so the incoming agent can reconcile orphaned tasks.
 type StaleSession struct {

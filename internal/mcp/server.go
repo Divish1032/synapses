@@ -1296,34 +1296,36 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 // All other tools are deferred and auto-promoted on first call.
 // Sprint 24 Phase 6: final 12-tool set. All tools are core — no tiers needed.
 var coreTierTools = map[string]bool{
-	"session_init":     true,
-	"search":           true,
-	"get_context":      true,
-	"get_file_context": true,
-	"get_impact":       true,
-	"validate":         true,
-	"memory":           true,
-	"end_session":      true,
-	"tasks":            true,
-	"rules":            true,
-	"annotate":         true,
-	"lookup_docs":      true,
+	"session_init":         true,
+	"search":               true,
+	"get_context":          true,
+	"get_file_context":     true,
+	"get_impact":           true,
+	"validate":             true,
+	"memory":               true,
+	"end_session":          true,
+	"tasks":                true,
+	"rules":                true,
+	"annotate":             true,
+	"lookup_docs":          true,
+	"get_compaction_guide": true,
 }
 
-// standardTierTools = coreTierTools (all 12 tools are core after consolidation).
+// standardTierTools = coreTierTools (all 13 tools are core after consolidation).
 var standardTierTools = map[string]bool{
-	"session_init":     true,
-	"search":           true,
-	"get_context":      true,
-	"get_file_context": true,
-	"get_impact":       true,
-	"validate":         true,
-	"memory":           true,
-	"end_session":      true,
-	"tasks":            true,
-	"rules":            true,
-	"annotate":         true,
-	"lookup_docs":      true,
+	"session_init":         true,
+	"search":               true,
+	"get_context":          true,
+	"get_file_context":     true,
+	"get_impact":           true,
+	"validate":             true,
+	"memory":               true,
+	"end_session":          true,
+	"tasks":                true,
+	"rules":                true,
+	"annotate":             true,
+	"lookup_docs":          true,
+	"get_compaction_guide": true,
 }
 
 // knowledgeTools are the tools available when the server runs in knowledge mode
@@ -1537,10 +1539,31 @@ func (s *Server) registerTools() {
 					"\"quick\": alias for standard (legacy). "+
 					"\"resume\": tasks with session states + working_state + relevant_memories + federation_health "+
 					"(for task context continuity across reconnects). "+
+					"\"compaction\": use after context compaction — returns compaction_recovery with work summary, "+
+					"session decisions/failures, applicable rules/violations, entity memories, and context snapshot. "+
 					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) are always included in all scopes."),
 			),
 		),
 		s.handleSessionInit,
+	)
+
+	// get_compaction_guide: returns structured hints for efficient context compaction.
+	// Pure graph + ledger queries — no LLM dependency.
+	s.addOrDefer(
+		mcp.NewTool(
+			"get_compaction_guide",
+			mcp.WithDescription(
+				"Returns structured hints for efficient context compaction. "+
+					"Call before compacting to get: must_preserve (task approach, decisions, blockers, violations), "+
+					"safe_to_forget (things Synapses can re-provide), entity_importance (ranked by signal strength + graph connectivity), "+
+					"and relationship_map (edges between work-set entities). No LLM required — pure graph + ledger queries.",
+			),
+			mcp.WithString("agent_id",
+				mcp.Description("Agent identifier. Required to look up session state and work ledger."),
+				mcp.Required(),
+			),
+		),
+		s.handleGetCompactionGuide,
 	)
 
 	// Sprint 24: report_usage absorbed into end_session.
