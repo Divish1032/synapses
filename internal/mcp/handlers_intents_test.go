@@ -862,3 +862,107 @@ func TestResolvedFileBaseline_EmptyFileField(t *testing.T) {
 		t.Errorf("empty file: want 0, got %d", got)
 	}
 }
+
+// --- Sprint 27.2: Phase-aware CarveConfig tests ---
+
+func TestApplyPhaseCarveConfig_Planning(t *testing.T) {
+	cfg := graph.CarveConfig{
+		MaxDepth:    2,
+		TokenBudget: 3000,
+		EdgeWeights: map[graph.EdgeType]float64{
+			graph.EdgeImplements:   0.9,
+			graph.EdgeExplains:     0.7,
+			graph.EdgeDocumentedBy: 0.6,
+		},
+	}
+	applyPhaseCarveConfig(&cfg, brain.PhasePlanning)
+	if cfg.MaxDepth != 3 {
+		t.Errorf("planning: MaxDepth want 3, got %d", cfg.MaxDepth)
+	}
+	if cfg.TokenBudget != 6000 {
+		t.Errorf("planning: TokenBudget want 6000, got %d", cfg.TokenBudget)
+	}
+	if cfg.EdgeWeights[graph.EdgeImplements] < 1.2 {
+		t.Errorf("planning: EdgeImplements should be boosted, got %f", cfg.EdgeWeights[graph.EdgeImplements])
+	}
+}
+
+func TestApplyPhaseCarveConfig_Development_NoChange(t *testing.T) {
+	cfg := graph.CarveConfig{
+		MaxDepth:    2,
+		TokenBudget: 3000,
+		MinRelevance: 0.01,
+		DirectionBoost: 0.0,
+	}
+	applyPhaseCarveConfig(&cfg, brain.PhaseDevelopment)
+	if cfg.MaxDepth != 2 || cfg.TokenBudget != 3000 || cfg.MinRelevance != 0.01 || cfg.DirectionBoost != 0.0 {
+		t.Error("development phase should not modify any CarveConfig defaults")
+	}
+}
+
+func TestApplyPhaseCarveConfig_Testing(t *testing.T) {
+	cfg := graph.CarveConfig{MinRelevance: 0.01}
+	applyPhaseCarveConfig(&cfg, brain.PhaseTesting)
+	if cfg.MinRelevance < 0.02 {
+		t.Errorf("testing: MinRelevance want >= 0.02, got %f", cfg.MinRelevance)
+	}
+}
+
+func TestApplyPhaseCarveConfig_Review(t *testing.T) {
+	cfg := graph.CarveConfig{
+		MaxDepth:       2,
+		TokenBudget:    3000,
+		DirectionBoost: 0.0,
+	}
+	applyPhaseCarveConfig(&cfg, brain.PhaseReview)
+	if cfg.MaxDepth != 3 {
+		t.Errorf("review: MaxDepth want 3, got %d", cfg.MaxDepth)
+	}
+	if cfg.DirectionBoost >= 0.0 {
+		t.Errorf("review: DirectionBoost should be negative (favor callers), got %f", cfg.DirectionBoost)
+	}
+}
+
+func TestApplyPhaseCarveConfig_Deployment(t *testing.T) {
+	cfg := graph.CarveConfig{
+		MaxDepth:    3,
+		TokenBudget: 5000,
+		EdgeWeights: map[graph.EdgeType]float64{
+			graph.EdgeConfiguredBy: 0.5,
+			graph.EdgeDeploys:      0.5,
+		},
+	}
+	applyPhaseCarveConfig(&cfg, brain.PhaseDeployment)
+	if cfg.MaxDepth != 2 {
+		t.Errorf("deployment: MaxDepth want 2, got %d", cfg.MaxDepth)
+	}
+	if cfg.TokenBudget != 3000 {
+		t.Errorf("deployment: TokenBudget want 3000, got %d", cfg.TokenBudget)
+	}
+	if cfg.EdgeWeights[graph.EdgeConfiguredBy] < 0.7 {
+		t.Errorf("deployment: EdgeConfiguredBy should be boosted, got %f", cfg.EdgeWeights[graph.EdgeConfiguredBy])
+	}
+}
+
+func TestBoostEdge_Capped(t *testing.T) {
+	cfg := &graph.CarveConfig{
+		EdgeWeights: map[graph.EdgeType]float64{graph.EdgeCalls: 2.5},
+	}
+	boostEdge(cfg, graph.EdgeCalls, 2.0) // 2.5 * 2.0 = 5.0 → capped to 3.0
+	if cfg.EdgeWeights[graph.EdgeCalls] != 3.0 {
+		t.Errorf("boostEdge should cap at 3.0, got %f", cfg.EdgeWeights[graph.EdgeCalls])
+	}
+}
+
+func TestBoostEdge_NilWeights(t *testing.T) {
+	cfg := &graph.CarveConfig{EdgeWeights: nil}
+	boostEdge(cfg, graph.EdgeCalls, 1.5) // should not panic
+}
+
+func TestApplyPhaseCarveConfig_Unknown_NoChange(t *testing.T) {
+	cfg := graph.CarveConfig{MaxDepth: 2, TokenBudget: 3000}
+	applyPhaseCarveConfig(&cfg, brain.PhaseUnknown)
+	if cfg.MaxDepth != 2 || cfg.TokenBudget != 3000 {
+		t.Error("unknown phase should not modify CarveConfig")
+	}
+}

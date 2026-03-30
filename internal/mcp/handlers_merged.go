@@ -23,7 +23,13 @@ func (s *Server) handleSearchDispatch(
 	if mode == "exact" {
 		return s.handleFindEntity(ctx, req)
 	}
-	return s.handleSearch(ctx, req)
+	result, err := s.handleSearch(ctx, req)
+	if err != nil || result == nil {
+		return result, err
+	}
+	// Sprint 27.3: inject reactive suggestions into search results.
+	s.injectSearchSuggestions(ctx, result, req)
+	return result, nil
 }
 
 // ── Merge 2: get_context + prepare_context + get_call_chain ────────────────
@@ -68,20 +74,27 @@ func (s *Server) handleValidateDispatch(
 		}
 	}
 
+	var result *mcp.CallToolResult
+	var err error
 	switch phase {
 	case "pre":
-		return s.handleValidatePlan(ctx, req)
+		result, err = s.handleValidatePlan(ctx, req)
 	case "post":
-		return s.handleVerifyImplementation(ctx, req)
+		result, err = s.handleVerifyImplementation(ctx, req)
 	case "list":
-		return s.handleGetViolations(ctx, req)
+		result, err = s.handleGetViolations(ctx, req)
 	case "full":
-		return s.handlePlanContext(ctx, req)
+		result, err = s.handlePlanContext(ctx, req)
 	case "safety":
-		return s.handleCheckPlanSafety(ctx, req)
+		result, err = s.handleCheckPlanSafety(ctx, req)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf("unknown validate phase: %q (valid: pre, post, list, full, safety)", phase)), nil
 	}
+	if err == nil && result != nil {
+		// Sprint 27.3: inject reactive suggestions into validate results.
+		s.injectValidateSuggestions(ctx, result, req)
+	}
+	return result, err
 }
 
 // ── Merge 4: memory ────────────────────────────────────────────────────────

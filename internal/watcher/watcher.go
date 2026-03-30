@@ -348,7 +348,7 @@ func New(g *graph.Graph, w *parser.Walker, st *store.Store) (*Watcher, error) {
 // whether NL extraction and scoped doc-edge resolution should run.
 func isDocFile(ext string) bool {
 	switch ext {
-	case ".md", ".markdown", ".mdx", ".txt", ".rst":
+	case ".md", ".markdown", ".mdx", ".txt", ".rst", ".pdf", ".docx":
 		return true
 	}
 	return false
@@ -2469,6 +2469,15 @@ func (w *Watcher) ingestToBrain(path string) {
 		}
 		if doc, ok := n.Metadata["doc"]; ok && doc != "" && code != "" {
 			code = "// " + doc + "\n" + code
+		}
+		// Sprint 27.4: For Section nodes (from PDF/DOCX/markdown), use the
+		// body text as "code" so the Brain can generate meaningful summaries.
+		if code == "" && n.Type == graph.NodeSection {
+			if body, ok := n.Metadata["body"]; ok && body != "" {
+				code = body
+			} else if preview, ok := n.Metadata["body_preview"]; ok && preview != "" {
+				code = preview
+			}
 		}
 		bc.Ingest(ctx, brain.IngestRequest{
 			ProjectID: w.projectID,

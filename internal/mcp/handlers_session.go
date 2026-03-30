@@ -153,6 +153,10 @@ func (s *Server) handleSessionInit(
 		s.ctxCallMu.Unlock()
 	}
 
+	// Sprint 27.1: Reset SDLC auto-detector on new session so detection
+	// starts fresh (no carry-over from previous agent session).
+	s.sdlcDetect.reset()
+
 	// Pulse session event is deferred until after synapseSessionID is obtained
 	// (see below) so we can pass the main store's UUID to eliminate session ID
 	// collision.

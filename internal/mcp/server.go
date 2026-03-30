@@ -133,6 +133,8 @@ type Server struct {
 	projectID          string                 // stable project identifier (FNV hash of project root path)
 	projectPath        string                 // absolute path to the project root (for go.mod parsing)
 	rulesMu            sync.RWMutex           // protects s.config.Rules for concurrent dynamic upserts
+	sdlcDetect         *sdlcDetector          // Sprint 27.1: auto-detects SDLC phase from tool-call patterns
+	toolTracker        *sessionToolTracker    // Sprint 27.3: per-session tool call counts for suggestion suppression
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -574,6 +576,8 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		lg:               newLoopGuard(),
 		approvals:        newApprovalStore(),
 		toolDescs:        make(map[string]string),
+		sdlcDetect:       newSDLCDetector(),
+		toolTracker:      newSessionToolTracker(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
@@ -1418,6 +1422,19 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 			s.goBackground(func() {
 				_ = s.store.AppendLedger(entry)
 			})
+		}
+
+		// Sprint 27.3: Track tool calls per session for suggestion suppression.
+		s.toolTracker.record(sessionID, toolName)
+
+		// Sprint 27.1: SDLC auto-detection from tool-call patterns.
+		if phase, mode, changed := s.sdlcDetect.recordCall(toolName, entities, files); changed {
+			if bc := s.brainClient; bc != nil {
+				p, m := phase, mode
+				s.goBackground(func() {
+					_ = bc.SetSDLCPhaseIfAuto(p, m, s.getLastAgent())
+				})
+			}
 		}
 
 		// Sync overlap check — fast indexed query, <1ms

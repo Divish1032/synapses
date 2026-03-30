@@ -346,6 +346,17 @@ func (s *Server) handleGetContext(
 		applyIntentCarveConfig(&cfg, intent)
 	}
 
+	// Sprint 27.2: Phase-aware CarveConfig — adjusts depth, budget, and edge
+	// weights based on the current SDLC phase. Applied AFTER intent config so
+	// intent remains the primary modifier and phase is secondary.
+	if bc := s.brainClient; bc != nil {
+		if sdlcCfg := bc.GetSDLCConfig(); sdlcCfg.Phase != "" && sdlcCfg.Phase != brain.PhaseUnknown {
+			applyPhaseCarveConfig(&cfg, sdlcCfg.Phase)
+		}
+	}
+
+	// Sprint 27.5: Co-access hints loaded after entity resolution (see below line ~680).
+
 	// Sprint 13 #3: Semantic-structural hybrid scoring.
 	// Wire in the embedding lookup so CarveEgoGraph can blend structural BFS/PPR
 	// scores with cosine similarity to the root node's embedding.
@@ -525,8 +536,11 @@ func (s *Server) handleGetContext(
 	// cfg.UsePPR is included so that toggling use_ppr in synapses.json produces
 	// a different cache key and agents never receive a stale {unchanged:true}
 	// response that was computed under a different traversal algorithm.
-	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v|ppr:%v",
-		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred, cfg.UsePPR)
+	// Sprint 27.5: include co-access pattern count in cache key so cached
+	// subgraphs are invalidated when co-access patterns change.
+	coAccessCount := len(cfg.CoAccessPatterns)
+	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v|ppr:%v|coaccess:%d",
+		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred, cfg.UsePPR, coAccessCount)
 
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
@@ -657,6 +671,13 @@ func (s *Server) handleGetContext(
 			FocusFile:  relFile,
 			FocusSince: time.Now().UTC().Format(time.RFC3339),
 		})
+	}
+
+	// Sprint 27.5: Load co-access hints using the RESOLVED entity name
+	// (best.Name), not the raw user input. This ensures pattern lookup
+	// matches the canonical graph names stored by analyzeCoAccess.
+	if bc := s.brainClient; bc != nil {
+		cfg.CoAccessPatterns = loadCoAccessHints(bc, s.graph, best.Name)
 	}
 
 	traversalStart := time.Now()
@@ -1065,8 +1086,20 @@ func (s *Server) handleGetContext(
 
 	// ── Sequential enrichment (fast, in-memory only) ──
 
-	// Context-aware next-step suggestions.
+	// Context-aware next-step suggestions (Sprint 27.3: phase-aware + session-aware).
 	dc.SuggestedNextTools = suggestNextAfterContext(dc)
+	// Add phase-aware suggestions.
+	if bc := s.brainClient; bc != nil {
+		sdlcCfg := bc.GetSDLCConfig()
+		if sdlcCfg.Phase != "" && sdlcCfg.Phase != brain.PhaseUnknown {
+			dc.SuggestedNextTools = append(dc.SuggestedNextTools, phaseSuggestions(sdlcCfg.Phase, entityName)...)
+		}
+	}
+	// Suppress tools already called 3+ times this session.
+	suggestSessionID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+	if suggestSessionID != "" && s.toolTracker.totalCalls(suggestSessionID) >= 3 {
+		dc.SuggestedNextTools = suppressOverused(dc.SuggestedNextTools, s.toolTracker.get(suggestSessionID), 4)
+	}
 
 	// Hot Constitution: inject project principles if configured.
 	if s.config != nil && s.config.Constitution.InjectInContext && len(s.config.Constitution.Principles) > 0 {
@@ -1728,6 +1761,34 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			dc.Root.Metadata["nl_description"] = nl
 		}
 	}
+
+	// Strip low-value metadata from overflow caller/callee nodes (position 6+).
+	// The first 5 get full detail blocks in compact format; the rest are rendered
+	// as a compact name list ("Calls: foo · bar · baz"). Keeping full metadata
+	// for overflow nodes wastes 100-150 tokens each with zero agent benefit.
+	// We preserve: name, type, file, line, signature, doc, nl_description.
+	// We strip: blame_*, commit_context, staleness_score, complexity, fields,
+	// inferred, confidence, body, body_preview, title, doc_link_source.
+	stripOverflowMetadata := func(nodes []graph.CarvedNode, keepFull int) {
+		lowValueKeys := []string{
+			"blame_author", "blame_date", "blame_subject", "blame_commit",
+			"commit_context", "staleness_score", "complexity",
+			"fields", "inferred", "confidence",
+			"body", "body_preview", "title", "doc_link_source",
+		}
+		for i := keepFull; i < len(nodes); i++ {
+			n := nodes[i].Node
+			if n == nil || n.Metadata == nil {
+				continue
+			}
+			for _, key := range lowValueKeys {
+				delete(n.Metadata, key)
+			}
+		}
+	}
+	stripOverflowMetadata(dc.Callees, 5)
+	stripOverflowMetadata(dc.Callers, 5)
+	stripOverflowMetadata(dc.Related, 3)
 
 	return dc
 }

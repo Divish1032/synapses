@@ -156,6 +156,14 @@ type Brain interface {
 	// limit caps the number of results (0 = default of 20).
 	GetPatterns(trigger string, limit int) []PatternHint
 
+	// UpsertCoAccessPattern records a co-access pattern between two entities.
+	// Sprint 27.5: called from session-end co-access analysis.
+	UpsertCoAccessPattern(trigger, coChange string) error
+
+	// DecayCoAccessPatterns reduces confidence for patterns where trigger was
+	// accessed but co_change was not. Sprint 27.5.
+	DecayCoAccessPatterns(accessedEntities []string) error
+
 	// Prune strips boilerplate (navigation, ads, footers) from raw web page text
 	// using the Tier 0 (0.8B) model. Returns cleaned technical content.
 	// Falls back to returning the original content if the LLM is unavailable.
@@ -984,6 +992,14 @@ func (b *impl) GetSDLCConfig() SDLCConfig {
 		UpdatedAt:   row.UpdatedAt,
 		UpdatedBy:   row.UpdatedBy,
 	}
+}
+
+func (b *impl) UpsertCoAccessPattern(trigger, coChange string) error {
+	return b.store.UpsertPattern(trigger, coChange, "co-access")
+}
+
+func (b *impl) DecayCoAccessPatterns(accessedEntities []string) error {
+	return b.store.DecayCoAccessPatterns(accessedEntities)
 }
 
 func (b *impl) GetPatterns(trigger string, limit int) []PatternHint {

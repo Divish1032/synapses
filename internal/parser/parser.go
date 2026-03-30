@@ -173,6 +173,8 @@ func NewWalker() *Walker {
 	// Documentation
 	w.Register(NewMarkdownParser())  // deep: .md .markdown .mdx (overrides generic)
 	w.Register(NewPlaintextParser()) // deep: .txt .rst (section extraction, overrides generic)
+	w.Register(NewPDFParser())       // deep: .pdf (Sprint 27.4 — text extraction via pdftotext)
+	w.Register(NewDOCXParser())      // deep: .docx (Sprint 27.4 — pure Go ZIP+XML extraction)
 	// Frontend
 	w.Register(NewVueParser()) // deep: .vue (SFC, delegates script to JS/TS)
 	// Data formats

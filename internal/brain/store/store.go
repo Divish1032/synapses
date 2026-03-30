@@ -462,6 +462,48 @@ func (s *Store) UpsertPattern(trigger, coChange, reason string) error {
 	return err
 }
 
+// DecayCoAccessPatterns reduces confidence for patterns where the trigger was
+// accessed in this session but the co_change entity was NOT. This prevents
+// stale patterns from permanently inflating context.
+//
+// Sprint 27.5: Called from analyzeCoAccess after recording positive patterns.
+// For each trigger entity that was accessed, any co_change entity NOT in the
+// accessedEntities set gets its total_count incremented (without co_count),
+// which naturally decays confidence = co_count / total_count.
+func (s *Store) DecayCoAccessPatterns(accessedEntities []string) error {
+	if len(accessedEntities) == 0 {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	// Build set for fast lookup.
+	accessed := make(map[string]bool, len(accessedEntities))
+	for _, e := range accessedEntities {
+		accessed[e] = true
+	}
+	// For each accessed entity as trigger, decay patterns where co_change was not accessed.
+	for _, trigger := range accessedEntities {
+		patterns := s.GetPatternsForTriggers([]string{trigger}, 100)
+		for _, p := range patterns {
+			if accessed[p.CoChange] {
+				continue // both accessed — no decay needed
+			}
+			// Increment total_count only → confidence decreases.
+			_, err := s.db.Exec(`
+				UPDATE context_patterns
+				SET total_count = total_count + 1,
+				    confidence  = CAST(co_count AS REAL) / CAST(total_count + 1 AS REAL),
+				    updated_at  = ?
+				WHERE trigger = ? AND co_change = ?`,
+				now, trigger, p.CoChange,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // --- Decision Log ---
 
 // DecisionLogEntry is a row from decision_log.

@@ -443,7 +443,25 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 	var visited map[NodeID]float64
 	bfsTruncated := false
 
-	if cfg.UsePPR {
+	// High-fanin BFS fallback: when the root has >30 direct CALLS callers and
+	// PPR is requested, fall back to BFS. PPR distributes rank mass uniformly
+	// across all callers (each gets ~1/N), pushing scores below MinRelevance.
+	// BFS assigns hop-1 callers a score of edgeWeight*decay^1 ≈ 0.5, well
+	// above MinRelevance. This ensures high-fanin entities retain their callers.
+	usePPR := cfg.UsePPR
+	if usePPR {
+		callerCount := 0
+		for _, e := range g.inEdges[rootID] {
+			if e.Type == EdgeCalls {
+				callerCount++
+			}
+		}
+		if callerCount > 30 {
+			usePPR = false
+		}
+	}
+
+	if usePPR {
 		// PPR path: power iteration scores all reachable nodes.
 		// MinRelevance (applied in post-processing below) acts as the reach
 		// limiter in place of MaxDepth — PPR naturally assigns near-zero scores
@@ -756,6 +774,33 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
+	// Sprint 27.5: Co-access injection — entities frequently co-accessed with
+	// the root get injected as virtual neighbors with floor relevance.
+	// Injected only if they exist in the graph, weren't already visited,
+	// and aren't excluded by ExcludeTypes.
+	for _, hint := range cfg.CoAccessPatterns {
+		if _, already := visited[hint.NodeID]; already {
+			continue
+		}
+		n := g.nodes[hint.NodeID]
+		if n == nil {
+			continue
+		}
+		// Respect ExcludeTypes — don't inject package/file hub nodes.
+		if cfg.ExcludeTypes[n.Type] {
+			continue
+		}
+		// Respect ExcludeTestFiles.
+		if cfg.ExcludeTestFiles && isTestFile(n.File) {
+			continue
+		}
+		floor := hint.Confidence * 0.15
+		if floor < 0.05 {
+			floor = 0.05
+		}
+		visited[hint.NodeID] = floor
+	}
+
 	// Build scored node list, applying MinRelevance and ExcludeTypes filters.
 	// Excluded-type nodes are still BFS-traversed above (so their edges are
 	// discovered) but they are never emitted in the output.
@@ -765,17 +810,17 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		hop       int
 	}
 	var scored []scoredNode
-	const callerReservationCap = 10
-	callerReserved := 0
 	for id, rel := range visited {
-		// Sprint 24: Direct callers of the root bypass MinRelevance filter,
-		// but only when MinRelevance is at a normal default (≤0.05). Extreme
-		// values (e.g., 0.99 in tests) are respected as hard filters.
-		// Capped at 10 to prevent dominating the budget for ultra-high-fanin nodes.
-		isProtectedCaller := directCallerSet[id] && callerReserved < callerReservationCap && cfg.MinRelevance <= 0.05
+		// Sprint 24 (revised): ALL direct callers of the root bypass MinRelevance
+		// filter when MinRelevance is at a normal default (≤0.05). Extreme values
+		// (e.g., 0.99 in tests) are respected as hard filters.
+		//
+		// Previously capped at 10, which dropped 80% of callers for high-fanin
+		// entities (50+ callers). Removing the cap ensures the budget-split phase
+		// (not the relevance filter) controls how many callers are emitted.
+		isProtectedCaller := directCallerSet[id] && cfg.MinRelevance <= 0.05
 		if isProtectedCaller {
-			callerReserved++
-			// Ensure minimum relevance so they don't get budget-pruned later.
+			// Ensure minimum relevance so they survive budget pruning.
 			if rel < cfg.MinRelevance*2 {
 				rel = cfg.MinRelevance * 2
 			}
@@ -933,15 +978,12 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		}
 	}
 
-	// Sprint 24: Directional budget split — partition nodes into callers,
-	// callees, and other, then allocate budget to each pool independently.
-	// Research (InlineCoder 2026, CatRAG 2026, Call Graphlets 2024) shows that
-	// undirected PPR+budget causes high-fanin entities to lose all callers
-	// because PPR mass is diluted across many candidates. Treating directions
-	// as separate budget pools ensures both callers and callees are represented.
-	//
-	// Budget allocation: 35% callers, 35% callees, 30% other.
-	// If a pool has fewer nodes than its budget, surplus goes to other pools.
+	// Sprint 24 (revised): Directional budget split — partition nodes into
+	// callers, callees, and other, then allocate budget proportionally to
+	// actual pool sizes. This replaced the fixed 35/35/30 split which starved
+	// callers for high-fanin entities (50-caller functions got the same 35%
+	// as 2-callee functions). Now a 50-caller/2-callee function allocates
+	// ~73% to callers, ~3% to callees, ~24% to other.
 	var callerNodes, calleeNodes, otherNodes []scoredNode
 	for _, s := range scored {
 		if s.id == rootID {
@@ -983,11 +1025,38 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 		if remainingBudget < 0 {
 			remainingBudget = 0
 		}
-		callerBudget := remainingBudget * 35 / 100
-		calleeBudget := remainingBudget * 35 / 100
-		otherBudget := remainingBudget * 30 / 100
+		// Adaptive budget: proportional to pool sizes with 15% minimum per
+		// non-empty pool. Surplus from empty pools is redistributed.
+		nc, ne, no := len(callerNodes), len(calleeNodes), len(otherNodes)
+		total := nc + ne + no
+		callerBudget, calleeBudget, otherBudget := 0, 0, 0
+		if total > 0 {
+			callerBudget = remainingBudget * nc / total
+			calleeBudget = remainingBudget * ne / total
+			otherBudget = remainingBudget * no / total
+			// Enforce 15% minimum per non-empty pool to prevent starvation.
+			minBudget := remainingBudget * 15 / 100
+			if nc > 0 && callerBudget < minBudget {
+				callerBudget = minBudget
+			}
+			if ne > 0 && calleeBudget < minBudget {
+				calleeBudget = minBudget
+			}
+			if no > 0 && otherBudget < minBudget {
+				otherBudget = minBudget
+			}
+		}
 
-		applyPoolBudget := func(nodes []scoredNode, budget int) []scoredNode {
+		// estimateCompact returns a compact token estimate (name + file:line only,
+		// ~20 tokens) used for high-fanin caller/callee pools. When a pool has
+		// many entries, the MCP response renders them as a compact list rather
+		// than full node dumps. Using full estimates would truncate 80% of callers
+		// even though they're rendered compactly.
+		estimateCompact := func(n *Node) int {
+			return (len(n.Name) + len(n.File) + 8) / 4 // name + file:line ≈ 20 tokens
+		}
+
+		applyPoolBudget := func(nodes []scoredNode, budget int, compact bool) []scoredNode {
 			if budget <= 0 {
 				truncatedCount += len(nodes)
 				return nil
@@ -998,7 +1067,12 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				if n == nil {
 					continue
 				}
-				cost := estimateNodeTokens(n)
+				var cost int
+				if compact {
+					cost = estimateCompact(n)
+				} else {
+					cost = estimateNodeTokens(n)
+				}
 				if used+cost > budget {
 					truncatedCount += len(nodes) - i
 					return nodes[:i]
@@ -1008,9 +1082,15 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 			return nodes
 		}
 
-		callerNodes = applyPoolBudget(callerNodes, callerBudget)
-		calleeNodes = applyPoolBudget(calleeNodes, calleeBudget)
-		otherNodes = applyPoolBudget(otherNodes, otherBudget)
+		// Direct callers and callees ALWAYS use compact token estimates (~30 tokens
+		// vs ~150 full). The MCP handler renders them as a compact list ("Calls:
+		// foo · bar · baz") with detail blocks only for the top ~5. Using full
+		// estimates for 48 callers wastes 80% of the budget on metadata that never
+		// reaches the LLM. Compact estimates let ALL direct neighbors fit in budget.
+		// Extended neighbors (otherNodes, hop 2+) keep full estimates for detail blocks.
+		callerNodes = applyPoolBudget(callerNodes, callerBudget, true)
+		calleeNodes = applyPoolBudget(calleeNodes, calleeBudget, true)
+		otherNodes = applyPoolBudget(otherNodes, otherBudget, false)
 
 		totalKept := 1 + len(callerNodes) + len(calleeNodes) + len(otherNodes) // +1 for root
 		totalScored := len(scored)

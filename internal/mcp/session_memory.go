@@ -225,6 +225,10 @@ func (s *Server) handleEndSession(
 		outcome = "success"
 	}
 	synapseSessionID := s.getSynapseSessionID(mcpSessionID)
+	// Sprint 27.3: clear per-session tool counts.
+	if synapseSessionID != "" {
+		s.toolTracker.clear(synapseSessionID)
+	}
 	var retro *store.ToolCallSummary
 	if s.store != nil && synapseSessionID != "" {
 		_ = s.store.EndSession(synapseSessionID, "clean", outcome, summary)
@@ -232,6 +236,14 @@ func (s *Server) handleEndSession(
 		if ts, err := s.store.GetToolCallSummary(synapseSessionID); err == nil && ts.TotalCalls > 0 {
 			retro = &ts
 		}
+		// Sprint 27.5: Analyze co-access patterns from session work ledger.
+		if bc := s.brainClient; bc != nil {
+			sid := synapseSessionID
+			s.goBackground(func() {
+				analyzeCoAccess(s.store, bc, sid)
+			})
+		}
+
 		// Sprint 15 #1: emit "task_abandoned" signals for entities that received
 		// context but have no task completion outcome. Must run BEFORE
 		// CorrelateSessionOutcome so we can identify task_outcome='' rows.

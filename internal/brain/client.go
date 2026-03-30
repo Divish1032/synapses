@@ -285,6 +285,37 @@ func (c *Client) Memorize(ctx context.Context, req archivist.MemorizeRequest) (a
 	return c.brain.Memorize(ctx, req)
 }
 
+// GetPatterns returns learned co-occurrence patterns for a trigger entity.
+func (c *Client) GetPatterns(trigger string, limit int) []PatternHint {
+	return c.brain.GetPatterns(trigger, limit)
+}
+
+// DecayCoAccessPatterns reduces confidence for non-reinforced patterns. Sprint 27.5.
+func (c *Client) DecayCoAccessPatterns(accessedEntities []string) error {
+	return c.brain.DecayCoAccessPatterns(accessedEntities)
+}
+
+// UpsertCoAccessPattern records a co-access pattern. Sprint 27.5.
+func (c *Client) UpsertCoAccessPattern(trigger, coChange string) error {
+	return c.brain.UpsertCoAccessPattern(trigger, coChange)
+}
+
+// GetSDLCConfig returns the current SDLC phase and quality mode for the project.
+func (c *Client) GetSDLCConfig() SDLCConfig {
+	return c.brain.GetSDLCConfig()
+}
+
+// SetSDLCPhaseIfAuto updates the SDLC phase and quality mode when auto-detected.
+// The caller (sdlcDetector) is responsible for checking explicitlySet before calling.
+// The agentID is tagged with "auto:" prefix so logs distinguish auto vs explicit.
+func (c *Client) SetSDLCPhaseIfAuto(phase SDLCPhase, mode QualityMode, agentID string) error {
+	tag := "auto:" + agentID
+	if err := c.brain.SetSDLCPhase(phase, tag); err != nil {
+		return err
+	}
+	return c.brain.SetQualityMode(mode, tag)
+}
+
 // SetQualityMode updates the active quality mode. Returns the updated SDLCConfig.
 func (c *Client) SetQualityMode(_ context.Context, mode QualityMode) (*SDLCConfig, error) {
 	if err := c.brain.SetQualityMode(mode, ""); err != nil {

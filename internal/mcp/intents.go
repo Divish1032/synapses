@@ -39,6 +39,71 @@ func applyIntentCarveConfig(cfg *graph.CarveConfig, intent string) {
 	cfg.IntentID = intent
 }
 
+// applyPhaseCarveConfig adjusts CarveConfig defaults based on the current SDLC phase.
+// Applied AFTER intent config — phase is a secondary modifier. All adjustments are
+// additive/multiplicative on existing values, never replacing intent-set values.
+//
+// Sprint 27.2.
+func applyPhaseCarveConfig(cfg *graph.CarveConfig, phase brain.SDLCPhase) {
+	switch phase {
+	case brain.PhasePlanning:
+		// Broader view: deeper traversal, more architectural edges.
+		if cfg.MaxDepth < 3 {
+			cfg.MaxDepth = 3
+		}
+		if cfg.TokenBudget < 6000 {
+			cfg.TokenBudget = 6000
+		}
+		boostEdge(cfg, graph.EdgeImplements, 1.4)
+		boostEdge(cfg, graph.EdgeExplains, 1.3)
+		boostEdge(cfg, graph.EdgeDocumentedBy, 1.3)
+
+	case brain.PhaseDevelopment:
+		// Development IS the baseline — no adjustments needed.
+
+	case brain.PhaseTesting:
+		// Stricter relevance cutoff to reduce noise.
+		if cfg.MinRelevance < 0.02 {
+			cfg.MinRelevance = 0.02
+		}
+
+	case brain.PhaseReview:
+		// Blast radius focus: deeper traversal, favor callers.
+		if cfg.MaxDepth < 3 {
+			cfg.MaxDepth = 3
+		}
+		if cfg.TokenBudget < 5000 {
+			cfg.TokenBudget = 5000
+		}
+		cfg.DirectionBoost -= 0.15 // negative = favor callers
+
+	case brain.PhaseDeployment:
+		// Minimal scope, config-focused.
+		if cfg.MaxDepth > 2 {
+			cfg.MaxDepth = 2
+		}
+		if cfg.TokenBudget > 3000 {
+			cfg.TokenBudget = 3000
+		}
+		boostEdge(cfg, graph.EdgeConfiguredBy, 1.5)
+		boostEdge(cfg, graph.EdgeDeploys, 1.5)
+	}
+}
+
+// boostEdge multiplies an edge weight by factor, capping at 3.0.
+func boostEdge(cfg *graph.CarveConfig, et graph.EdgeType, factor float64) {
+	if cfg.EdgeWeights == nil {
+		return
+	}
+	if w, ok := cfg.EdgeWeights[et]; ok {
+		w *= factor
+		if w > 3.0 {
+			w = 3.0
+		}
+		cfg.EdgeWeights[et] = w
+	}
+}
+
 // aggregatedImpact runs ImpactAnalysis and, for struct/interface nodes, aggregates
 // impact across all methods (same logic as handleGetImpact). This ensures plan/modify/review
 // intents show meaningful blast radius for struct types.

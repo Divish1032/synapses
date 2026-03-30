@@ -603,12 +603,26 @@ type CarveConfig struct {
 	// Cap: 2.0x boost, floor: 0.3x penalty. Nil disables learned-weight
 	// adjustments (backward-compatible default).
 	LearnedEdgeWeights map[EdgeWeightKey]float64
+	// CoAccessPatterns maps a root entity name to co-accessed entity node IDs
+	// with their confidence scores. When non-nil, CarveEgoGraph injects these
+	// as virtual neighbors with floor relevance after the main BFS traversal.
+	// Sprint 27.5: Auto-pinning via co-access patterns.
+	CoAccessPatterns []CoAccessHint
+
 	// LearnedEdgeWeightsVersion is the store's monotonic write counter at the
 	// time LearnedEdgeWeights was loaded. It is included in the subgraph cache
 	// key so that cached subgraphs are automatically invalidated after any write
 	// to the edge_learned_weights table — regardless of whether the map has the
 	// same number of entries (len-based discrimination is not sufficient).
 	LearnedEdgeWeightsVersion int64
+}
+
+// CoAccessHint represents an entity that was frequently co-accessed with the
+// current query root. Used by CarveEgoGraph to inject "soft-linked" entities.
+// Sprint 27.5.
+type CoAccessHint struct {
+	NodeID     NodeID
+	Confidence float64 // 0.0–1.0
 }
 
 // EdgeWeightKey uniquely identifies a specific directed edge in the graph.
