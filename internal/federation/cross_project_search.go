@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/store"
@@ -16,7 +17,8 @@ import (
 // sibling stores. This is the component that cross-project knowledge
 // queries call.
 type CrossProjectSearch struct {
-	resolver *Resolver
+	resolver  *Resolver
+	loadGroup singleflight.Group // deduplicate concurrent graph loads per alias
 }
 
 func newCrossProjectSearch(r *Resolver) *CrossProjectSearch {
@@ -162,11 +164,16 @@ func (s *CrossProjectSearch) GetEntityContext(ctx context.Context, entity string
 	if st.NodeCount() > 50_000 {
 		return nil
 	}
-	g, err := st.LoadGraph()
-	if err != nil || g == nil {
-		if err != nil {
-			log.Printf("federation: load graph for %q: %v", alias, err)
-		}
+	// Deduplicate concurrent graph loads for the same alias.
+	val, err, _ := s.loadGroup.Do(alias, func() (interface{}, error) {
+		return st.LoadGraph()
+	})
+	if err != nil {
+		log.Printf("federation: load graph for %q: %v", alias, err)
+		return nil
+	}
+	g, _ := val.(*graph.Graph)
+	if g == nil {
 		return nil
 	}
 

@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/SynapsesOS/synapses/internal/embed"
@@ -334,93 +333,4 @@ func normalizeVec(v []float32) []float32 {
 		out[i] = x * scale
 	}
 	return out
-}
-
-// EmbedToolCatalog pre-computes normalized vector embeddings for all entries in
-// toolCatalog. Each tool is embedded as "Description keywords…" so that
-// cosine similarity captures both the functional description and intent tags.
-//
-// Called as a background goroutine from SetMemoryEmbedder. Safe to call
-// concurrently — results are committed atomically under toolEmbedsMu.
-// Aborts on any embedding error to avoid a partial index, which would silently
-// degrade ranking (partial embeddings produce misleading similarity scores).
-func (s *Server) EmbedToolCatalog(ctx context.Context, embedder embed.Embedder) {
-	if embedder == nil {
-		return
-	}
-	embeddings := make([][]float32, len(toolCatalog))
-	for i, tool := range toolCatalog {
-		text := tool.Description
-		if len(tool.Keywords) > 0 {
-			text += " " + strings.Join(tool.Keywords, " ")
-		}
-		var vec []float32
-		var err error
-		for attempt := 0; attempt < 3; attempt++ {
-			if ctx.Err() != nil {
-				return
-			}
-			embedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			vec, err = embedder.Embed(embedCtx, text)
-			cancel()
-			if err == nil && len(vec) > 0 {
-				break
-			}
-			if attempt < 2 {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(attempt+1) * time.Second):
-				}
-			}
-		}
-		if err != nil {
-			logutil.Warn("synapses: embed tool catalog %s: %v — semantic tool discovery unavailable\n", tool.Name, err)
-			s.scheduleToolCatalogRetry(ctx, embedder)
-			return // abort this attempt; partial index is worse than no index
-		}
-		if len(vec) == 0 {
-			logutil.Warn("synapses: embed tool catalog %s: empty vector — semantic tool discovery unavailable\n", tool.Name)
-			s.scheduleToolCatalogRetry(ctx, embedder)
-			return
-		}
-		normed := normalizeVec(vec)
-		if normed == nil {
-			logutil.Warn("synapses: embed tool catalog %s: zero-magnitude vector — skipping\n", tool.Name)
-			return
-		}
-		embeddings[i] = normed
-	}
-
-	model := embedder.Model()
-	s.toolEmbedsMu.Lock()
-	s.toolEmbeds = embeddings
-	s.toolEmbedModel = model
-	s.toolCatalogRetries.Store(0) // reset retry counter on success
-	s.toolEmbedsMu.Unlock()
-	logutil.Info("synapses: tool catalog embedded (%d tools, model=%s)\n", len(embeddings), model)
-}
-
-// scheduleToolCatalogRetry schedules a single delayed retry of EmbedToolCatalog
-// after a transient failure. At most 2 retries are scheduled to prevent infinite
-// retry loops. The retry runs after 30 seconds in a background goroutine.
-func (s *Server) scheduleToolCatalogRetry(ctx context.Context, embedder embed.Embedder) {
-	if s.toolCatalogRetries.Add(1) > 2 {
-		logutil.Warn("synapses: tool catalog embed retries exhausted — semantic tool discovery disabled for this session\n")
-		return
-	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.stopCh:
-			return
-		case <-time.After(30 * time.Second):
-		}
-		retryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-		s.EmbedToolCatalog(retryCtx, embedder)
-	}()
 }

@@ -224,7 +224,8 @@ func exportMemoryVersionsTx(tx *sql.Tx) ([]ExportedMemVer, error) {
 	rows, err := tx.Query(`
 		SELECT id, memory_id, version, content, superseded_by, created_at, superseded_at
 		FROM memory_versions
-		ORDER BY memory_id, version`)
+		ORDER BY memory_id, version
+		LIMIT 500000`)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +250,8 @@ func exportMemoryAnchorsTx(tx *sql.Tx) ([]ExportedMemAnchor, error) {
 	rows, err := tx.Query(`
 		SELECT memory_id, node_id, created_at
 		FROM memory_anchors
-		ORDER BY memory_id`)
+		ORDER BY memory_id
+		LIMIT 500000`)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +274,8 @@ func exportMemoryEmbeddingsTx(tx *sql.Tx) ([]ExportedMemEmbed, error) {
 	rows, err := tx.Query(`
 		SELECT memory_id, model, embedding, content_hash, embedded_at, stale
 		FROM memory_embeddings
-		ORDER BY memory_id`)
+		ORDER BY memory_id
+		LIMIT 500000`)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +324,8 @@ func exportDynamicRulesTx(tx *sql.Tx) ([]ExportedRule, error) {
 		       edge_type, to_name_pattern, rule_type, path_pattern,
 		       created_at, updated_at
 		FROM dynamic_rules
-		ORDER BY created_at`)
+		ORDER BY created_at
+		LIMIT 500000`)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +352,8 @@ func exportAnnotationsTx(tx *sql.Tx) ([]Annotation, error) {
 	rows, err := tx.Query(`
 		SELECT id, node_id, agent_id, note, created_at, source, stale
 		FROM annotations
-		ORDER BY created_at`)
+		ORDER BY created_at
+		LIMIT 500000`)
 	if err != nil {
 		return nil, err
 	}

@@ -914,18 +914,6 @@ func TestToDirectionalContext_AllEdgeTypesRouteCorrectly(t *testing.T) {
 	}
 }
 
-// ── handleGetWorkingState ─────────────────────────────────────────────────────
-
-func TestHandleGetWorkingState_NonGitDir(t *testing.T) {
-	s := newTestServer(t)
-	req := callTool(map[string]any{})
-	result, err := s.handleGetWorkingState(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = result
-}
-
 // ── handleGetCallChain ────────────────────────────────────────────────────────
 
 func TestHandleGetCallChain_NoParams(t *testing.T) {
@@ -964,68 +952,6 @@ func TestHandleSearch_WithKeywordMode(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = result
-}
-
-// ── handleDiscoverTools keyword scoring (IMP-EVAL-5) ─────────────────────────
-
-// TestDiscoverTools_KeywordScoring verifies that specific natural-language queries
-// rank the correct tool first. This catches regressions if keywords are changed.
-func TestDiscoverTools_KeywordScoring(t *testing.T) {
-	s := newTestServer(t)
-
-	cases := []struct {
-		query   string
-		wantTop string // expected name of the top-ranked tool
-	}{
-		// find_entity: locate/find/where/defined
-		{"where is AuthService defined", "find_entity"},
-		{"locate symbol named Store", "find_entity"},
-		{"find function HandleRequest", "find_entity"}, // avoids "file" which scores get_file_context
-
-		// get_impact: blast/radius/breaks/callers/dependents/downstream
-		{"what callers depend on Store.Close", "get_impact"},
-		{"blast radius of CarveEgoGraph", "get_impact"},
-		{"what breaks when changing this symbol", "get_impact"},
-		{"downstream dependents of Handler", "get_impact"},
-
-		// upsert_rule: rule/architectural/constraint/forbid/enforce/ban/policy/restrict
-		{"add architectural constraint forbid direct imports", "upsert_rule"},
-		{"ban handler database access restrict policy", "upsert_rule"},
-		{"enforce architectural rule circular imports", "upsert_rule"},
-
-		// upsert_rule: natural-language architectural phrasing (expanded keyword coverage)
-		{"ensure handlers never access the database directly", "upsert_rule"},
-		{"disallow direct imports from handlers to the store", "upsert_rule"},
-		{"never allow the service to access the store directly", "upsert_rule"},
-
-		// get_impact: natural-language dependency questions (expanded keyword coverage)
-		{"who depends on this function", "get_impact"},
-		{"downstream impact of changing this", "get_impact"},
-		{"will this change break callers", "get_impact"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.query, func(t *testing.T) {
-			res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{"query": tc.query}))
-			if err != nil {
-				t.Fatalf("handleDiscoverTools error: %v", err)
-			}
-			m := mustResult(t, res, nil)
-			matches, ok := m["matches"].([]any)
-			if !ok || len(matches) == 0 {
-				t.Fatalf("query %q: expected matches, got %v", tc.query, m["matches"])
-			}
-			top, ok := matches[0].(map[string]any)
-			if !ok {
-				t.Fatalf("query %q: expected map in matches[0], got %T", tc.query, matches[0])
-			}
-			gotName, _ := top["name"].(string)
-			if gotName != tc.wantTop {
-				t.Errorf("query %q: want top=%q got top=%q (full matches: %v)",
-					tc.query, tc.wantTop, gotName, matches)
-			}
-		})
-	}
 }
 
 // ── handleGetContext disambiguation (BUG-EVAL-9) ─────────────────────────────

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -10,6 +11,83 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
+
+// connectivityMap counts inbound references per node (excluding defines/imports edges).
+func connectivityMap(edges []*graph.Edge) map[graph.NodeID]int {
+	m := make(map[graph.NodeID]int, len(edges)/2)
+	for _, e := range edges {
+		if e.Type == graph.EdgeDefines || e.Type == graph.EdgeImports {
+			continue
+		}
+		m[e.To]++
+	}
+	return m
+}
+
+// relPath returns abs relative to root, or abs unchanged if root is empty.
+func relPath(root, abs string) string {
+	if root == "" {
+		return abs
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return abs
+	}
+	return rel
+}
+
+// detectLayerLabel assigns a human-readable architectural layer label to a package name.
+func detectLayerLabel(pkg string) string {
+	lower := strings.ToLower(pkg)
+	switch {
+	case strings.Contains(lower, "cmd") || strings.Contains(lower, "main"):
+		return "[entry point]"
+	case strings.Contains(lower, "store") || strings.Contains(lower, "db") ||
+		strings.Contains(lower, "repository") || strings.Contains(lower, "dao") ||
+		strings.Contains(lower, "sqlite") || strings.Contains(lower, "postgres"):
+		return "[persistence]"
+	case strings.Contains(lower, "handler") || strings.Contains(lower, "controller") ||
+		strings.Contains(lower, "router") || strings.Contains(lower, "http") ||
+		strings.Contains(lower, "api") || strings.Contains(lower, "mcp") ||
+		strings.Contains(lower, "rpc") || strings.Contains(lower, "grpc"):
+		return "[api surface]"
+	case strings.Contains(lower, "config") || strings.Contains(lower, "settings"):
+		return "[config]"
+	case strings.Contains(lower, "test") || strings.Contains(lower, "mock") ||
+		strings.Contains(lower, "fake"):
+		return "[test support]"
+	case strings.Contains(lower, "doc") || strings.Contains(lower, "docs") ||
+		strings.Contains(lower, "documentation") || strings.Contains(lower, "council") ||
+		strings.Contains(lower, "report") || strings.Contains(lower, "spec"):
+		return "[documentation]"
+	case strings.Contains(lower, "script") || strings.Contains(lower, "tool") ||
+		strings.Contains(lower, "build") || strings.Contains(lower, "deploy") ||
+		strings.Contains(lower, "ci") || strings.Contains(lower, "infra") ||
+		strings.Contains(lower, "docker") || strings.Contains(lower, "k8s") ||
+		strings.Contains(lower, "makefile"):
+		return "[tooling/infra]"
+	case strings.Contains(lower, "proto") || strings.Contains(lower, "schema") ||
+		strings.Contains(lower, "model") || strings.Contains(lower, "types") ||
+		strings.Contains(lower, "dto") || strings.Contains(lower, "entity"):
+		return "[data model]"
+	case strings.Contains(lower, "util") || strings.Contains(lower, "utils") ||
+		strings.Contains(lower, "common") || strings.Contains(lower, "shared") ||
+		strings.Contains(lower, "helper") || strings.Contains(lower, "lib"):
+		return "[utilities]"
+	case strings.Contains(lower, "auth") || strings.Contains(lower, "authn") ||
+		strings.Contains(lower, "authz") || strings.Contains(lower, "security") ||
+		strings.Contains(lower, "permission") || strings.Contains(lower, "token"):
+		return "[security]"
+	case strings.Contains(lower, "cache") || strings.Contains(lower, "caching") ||
+		strings.Contains(lower, "redis") || strings.Contains(lower, "memcache"):
+		return "[caching]"
+	case strings.Contains(lower, "parser") || strings.Contains(lower, "lexer") ||
+		strings.Contains(lower, "ast") || strings.Contains(lower, "syntax"):
+		return "[parser]"
+	default:
+		return "[core logic]"
+	}
+}
 
 // handleGetRepoMap returns a navigable text overview of the repository,
 // grouped by package and sorted by connectivity. Two detail levels:

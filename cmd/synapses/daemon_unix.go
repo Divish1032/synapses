@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strconv"
@@ -51,7 +52,9 @@ func forceKillProcess(pid int) error {
 // This is locale-independent (no month/day names), working reliably on
 // macOS, Linux, and BSD regardless of LC_TIME settings.
 func processStartTime(pid int) int64 {
-	out, err := exec.Command("ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "etime=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return 0
 	}

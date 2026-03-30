@@ -231,7 +231,7 @@ func (c *subgraphCache) invalidateForFile(file string) {
 // given path (suffix-based match to handle absolute vs relative).
 func entryReferencesFile(e *cacheEntry, file string) bool {
 	for f := range e.files {
-		if f == file || strings.HasSuffix(f, "/"+file) || strings.HasSuffix(file, "/"+f) {
+		if f == file || strings.HasSuffix(f, "/"+file) {
 			return true
 		}
 	}

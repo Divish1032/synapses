@@ -499,8 +499,12 @@ func stripToRelative(filePath string) string {
 }
 
 // packageFromFile extracts the immediate parent directory name from a file path.
+// Applies stripToRelative for absolute paths to avoid leaking filesystem paths.
 // "internal/auth/service.go" → "auth"
 func packageFromFile(filePath string) string {
+	if filepath.IsAbs(filePath) {
+		filePath = stripToRelative(filePath)
+	}
 	return filepath.Base(filepath.Dir(filePath))
 }
 

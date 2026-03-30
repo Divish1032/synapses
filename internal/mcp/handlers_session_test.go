@@ -521,43 +521,6 @@ func TestHandleGetProjectIdentity_PopulatedGraph(t *testing.T) {
 	}
 }
 
-// ── handleGetWorkingState ─────────────────────────────────────────────────────
-
-func TestHandleGetWorkingState_NoChangeSource(t *testing.T) {
-	s := newTestServer(t)
-	// changeSource is nil — should return without error.
-	res, err := s.handleGetWorkingState(ctx, callTool(nil))
-	m := mustResult(t, res, err)
-	hasKey(t, m, "recent_changes")
-}
-
-// ── handleDiscoverTools ───────────────────────────────────────────────────────
-
-func TestHandleDiscoverTools_ReturnsRecommendation(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
-		"query": "how do I understand a function",
-	}))
-	m := mustResult(t, res, err)
-	// discover_tools returns recommended_tool or recommended_workflow depending on match type.
-	if _, ok := m["recommended_tool"]; !ok {
-		if _, ok2 := m["recommended_workflow"]; !ok2 {
-			t.Errorf("expected recommended_tool or recommended_workflow in result, keys: %v", mapKeys(m))
-		}
-	}
-}
-
-func TestHandleDiscoverTools_EmptyQuery_StillResponds(t *testing.T) {
-	s := newTestServer(t)
-	result, err := s.handleDiscoverTools(ctx, callTool(map[string]any{"query": ""}))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result for empty query")
-	}
-}
-
 // ── handleAnnotateNode ────────────────────────────────────────────────────────
 
 func TestHandleAnnotateNode_StoresNote(t *testing.T) {

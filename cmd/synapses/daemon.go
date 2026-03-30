@@ -191,6 +191,8 @@ func startSidecar(s Sidecar, quiet bool) error {
 	go cmd.Wait() //nolint:errcheck
 
 	if err := writePID(s.Name, pid); err != nil {
+		// Kill the orphaned child since we can't track it without a PID file.
+		cmd.Process.Kill() //nolint:errcheck
 		return fmt.Errorf("write pid for %s: %w", s.Name, err)
 	}
 	if !quiet {

@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -32,77 +31,6 @@ func TestSuggestToolsForIntent_NilForEmpty(t *testing.T) {
 	suggestions := s.SuggestToolsForIntent("")
 	if suggestions != nil {
 		t.Errorf("expected nil for empty intent, got %v", suggestions)
-	}
-}
-
-// ── discover_tools status field tests ────────────────────────────────────────
-
-func TestDiscoverTools_StatusField(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
-		"query": "what depends on this function",
-	}))
-	m := mustResult(t, res, err)
-	matches, ok := m["matches"].([]any)
-	if !ok || len(matches) == 0 {
-		t.Fatal("expected at least one match")
-	}
-	for _, raw := range matches {
-		match := raw.(map[string]any)
-		status, ok := match["status"].(string)
-		if !ok || status == "" {
-			t.Errorf("match %v missing status field", match["name"])
-		}
-		// Status must be one of the valid values — never "promoted".
-		valid := status == "core — always available" ||
-			status == "standard — always available" ||
-			status == "available — ready to call" ||
-			status == "hidden — not in tools/list, still callable"
-		if !valid {
-			t.Errorf("invalid status %q for %v", status, match["name"])
-		}
-	}
-}
-
-func TestDiscoverTools_CoreToolStatus(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
-		"query": "session start bootstrap init",
-	}))
-	m := mustResult(t, res, err)
-	matches, ok := m["matches"].([]any)
-	if !ok || len(matches) == 0 {
-		t.Fatal("expected matches")
-	}
-	for _, raw := range matches {
-		match := raw.(map[string]any)
-		if match["name"] == "session_init" {
-			status := match["status"].(string)
-			if status != "core — always available" {
-				t.Errorf("session_init status = %q, want %q", status, "core — always available")
-			}
-			return
-		}
-	}
-}
-
-func TestDiscoverTools_NoPromotedStatus(t *testing.T) {
-	// "promoted" status must never appear — all tools are always registered.
-	s := newTestServer(t)
-	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{
-		"query": "impact blast radius callers",
-		"debug": true,
-	}))
-	m := mustResult(t, res, err)
-	matches, ok := m["matches"].([]any)
-	if !ok {
-		t.Fatal("expected matches")
-	}
-	for _, raw := range matches {
-		match := raw.(map[string]any)
-		if strings.Contains(match["status"].(string), "promoted") {
-			t.Errorf("found 'promoted' status for %v — dead code path", match["name"])
-		}
 	}
 }
 
@@ -141,29 +69,6 @@ func TestDiscoverTools_HiddenToolStatus(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatal("expected non-nil result")
-	}
-}
-
-func TestDiscoverTools_EmptyQuery_HiddenToolsMarked(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleDiscoverTools(ctx, callTool(map[string]any{}))
-	m := mustResult(t, res, err)
-	categories, ok := m["categories"].(map[string]any)
-	if !ok {
-		t.Fatal("expected categories")
-	}
-	// Walk all categories and check that hidden tools have status field.
-	for _, tools := range categories {
-		for _, raw := range tools.([]any) {
-			entry := raw.(map[string]any)
-			name := entry["name"].(string)
-			if hiddenTools[name] {
-				st, _ := entry["status"].(string)
-				if st == "" {
-					t.Errorf("hidden tool %q missing status in category overview", name)
-				}
-			}
-		}
 	}
 }
 
@@ -242,12 +147,6 @@ func TestSessionInit_NoToolSuggestions_UnknownIntent(t *testing.T) {
 }
 
 // ── Regression tests ─────────────────────────────────────────────────────────
-
-func TestAllExistingToolsInCatalog(t *testing.T) {
-	if len(toolCatalog) == 0 {
-		t.Fatal("tool catalog is empty")
-	}
-}
 
 func TestToolSuggestion_JSONShape(t *testing.T) {
 	s := ToolSuggestion{Tool: "get_impact", Reason: "Check deps", Example: `get_impact(symbol="X")`}

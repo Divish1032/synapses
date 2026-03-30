@@ -81,7 +81,21 @@ func (ws *NPMWorkspace) resolveWorkspacePatterns(patterns []string) {
 		if err != nil {
 			continue
 		}
+		absRoot, _ := filepath.EvalSymlinks(ws.RootDir)
+		if absRoot == "" {
+			absRoot = ws.RootDir
+		}
+		absRoot = filepath.Clean(absRoot) + string(filepath.Separator)
 		for _, dir := range matches {
+			// Validate the match stays within project root (prevent traversal).
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				continue
+			}
+			resolved = filepath.Clean(resolved)
+			if !strings.HasPrefix(resolved+string(filepath.Separator), absRoot) && resolved != filepath.Clean(absRoot[:len(absRoot)-1]) {
+				continue
+			}
 			pkgJSONPath := filepath.Join(dir, "package.json")
 			data, err := os.ReadFile(pkgJSONPath)
 			if err != nil {

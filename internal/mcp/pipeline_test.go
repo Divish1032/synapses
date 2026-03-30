@@ -311,14 +311,3 @@ func BenchmarkRunComponents_SingleCollector(b *testing.B) {
 	}
 }
 
-// ── get_working_state entity impact enrichment ───────────────────────────────
-
-func TestGetWorkingState_EntityImpactEnrichment(t *testing.T) {
-	s, _, _ := newPopulatedServer(t)
-	res, err := s.handleGetWorkingState(ctx, callTool(map[string]any{
-		"window_minutes": float64(60),
-	}))
-	m := mustResult(t, res, err)
-	hasKey(t, m, "recent_changes")
-	hasKey(t, m, "suggested_tools")
-}

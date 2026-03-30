@@ -255,7 +255,9 @@ func normalizeL2(v []float32) []float32 {
 		return nil
 	}
 	if norm > 0.999 && norm < 1.001 {
-		return v
+		out := make([]float32, len(v))
+		copy(out, v)
+		return out
 	}
 	out := make([]float32, len(v))
 	for i, x := range v {

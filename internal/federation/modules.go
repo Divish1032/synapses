@@ -123,8 +123,10 @@ func parseReplaceLine(line string, mod *GoModule) {
 }
 
 // FindGoMod searches for go.mod in the given directory and parent directories.
+// Stops after 10 levels to avoid unbounded traversal.
 func FindGoMod(dir string) string {
-	for {
+	const maxDepth = 10
+	for i := 0; i < maxDepth; i++ {
 		candidate := filepath.Join(dir, "go.mod")
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
@@ -135,6 +137,7 @@ func FindGoMod(dir string) string {
 		}
 		dir = parent
 	}
+	return ""
 }
 
 // MatchesSibling checks if a Go import path matches a sibling project's module path.

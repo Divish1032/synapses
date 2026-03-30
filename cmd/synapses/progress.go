@@ -211,8 +211,19 @@ func writeProgressFile(snap IndexingSnapshot) {
 	if err != nil {
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".synapses-progress-*.tmp")
+	if err != nil {
+		return
+	}
+	tmp := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmp)
+		return
+	}
+	tmpFile.Close()
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		os.Remove(tmp)
 		return
 	}
 	os.Rename(tmp, path) //nolint:errcheck

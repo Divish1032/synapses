@@ -662,6 +662,24 @@ func applySelfUpdateFromPath(newBinary string, expectedHash string) error {
 		return fmt.Errorf("write temp binary: %w", err)
 	}
 
+	// Save the current binary for rollback before replacing it.
+	if home, homeErr := synapsesHome(); homeErr == nil {
+		previous := filepath.Join(home, "bin", "synapses.previous")
+		os.MkdirAll(filepath.Join(home, "bin"), 0o755) //nolint:errcheck
+		if src, err := os.Open(exe); err == nil {
+			if dst, err := os.Create(previous); err == nil {
+				_, copyErr := io.Copy(dst, src)
+				dst.Close()
+				src.Close()
+				if copyErr != nil {
+					os.Remove(previous) // don't leave a partial backup
+				}
+			} else {
+				src.Close()
+			}
+		}
+	}
+
 	// Atomic rename.
 	if err := os.Rename(tmp, exe); err != nil {
 		os.Remove(tmp)

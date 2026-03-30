@@ -381,6 +381,7 @@ func (s *Store) RebuildNodeHNSW() {
 			s.hnswNodeMu.Lock()
 			s.hnswNodeRebuilding = false
 			s.hnswNodePendingAdds = nil
+			s.hnswNodePendingDeletes = nil
 			s.hnswNodeMu.Unlock()
 		}
 	}()
@@ -397,6 +398,7 @@ func (s *Store) RebuildNodeHNSW() {
 		s.hnswNodeMu.Lock()
 		s.hnswNodeRebuilding = false
 		s.hnswNodePendingAdds = nil
+		s.hnswNodePendingDeletes = nil
 		s.hnswNodeMu.Unlock()
 		return
 	}
@@ -431,9 +433,11 @@ func (s *Store) RebuildNodeHNSW() {
 	}
 
 	s.hnswNodeMu.Lock()
-	// Replay any additions that were queued during the rebuild.
+	// Replay any additions and deletes that were queued during the rebuild.
 	pending := s.hnswNodePendingAdds
 	s.hnswNodePendingAdds = nil
+	pendingDeletes := s.hnswNodePendingDeletes
+	s.hnswNodePendingDeletes = nil
 	if len(pending) > 10000 {
 		logutil.Warn("synapses: node HNSW rebuild: %d pending entries, capping replay to 10000\n", len(pending))
 		pending = pending[len(pending)-10000:]
@@ -450,12 +454,23 @@ func (s *Store) RebuildNodeHNSW() {
 			count++
 		}()
 	}
+	// Replay pending deletes.
+	for _, nodeID := range pendingDeletes {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logutil.Warn("synapses: node HNSW delete replay skipped node_id=%s: %v\n", nodeID, r)
+				}
+			}()
+			g.Delete(nodeID)
+		}()
+	}
 	s.hnswNodeIndex = g
 	s.hnswNodeRebuilding = false
 	s.hnswNodeMu.Unlock()
 
 	if count > 0 {
-		logutil.Info("synapses: node HNSW index built (%d node embeddings, %d replayed)\n", count, len(pending))
+		logutil.Info("synapses: node HNSW index built (%d node embeddings, %d replayed, %d deletes replayed)\n", count, len(pending), len(pendingDeletes))
 	}
 
 	// Persist to disk for fast startup next time.
@@ -526,6 +541,26 @@ func (s *Store) nodeHNSWAdd(nodeID string, vec []float32) {
 	// Pre-delete: same workaround as hnswAdd (see comment there).
 	s.hnswNodeIndex.Delete(nodeID)
 	s.hnswNodeIndex.Add(hnsw.MakeNode(nodeID, vec))
+}
+
+// nodeHNSWDelete removes a node embedding from the node HNSW index.
+// If a rebuild is in progress, the deletion is queued for replay.
+func (s *Store) nodeHNSWDelete(nodeID string) bool {
+	s.hnswNodeMu.Lock()
+	defer s.hnswNodeMu.Unlock()
+	if s.hnswNodeRebuilding {
+		s.hnswNodePendingDeletes = append(s.hnswNodePendingDeletes, nodeID)
+		return true
+	}
+	if s.hnswNodeIndex == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logutil.Error("synapses: node HNSW delete recovered from panic (node_id=%s): %v\n", nodeID, r)
+		}
+	}()
+	return s.hnswNodeIndex.Delete(nodeID)
 }
 
 // nodeHNSWReady returns true if the node HNSW index is initialized and non-empty.

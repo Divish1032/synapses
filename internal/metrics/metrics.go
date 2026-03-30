@@ -879,23 +879,30 @@ func EnrichCommitContext(g *graph.Graph, repoRoot string) {
 	cache := make(map[string]string, len(jobs))
 	var cacheMu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4) // concurrency limit
 
+	// Use a fixed 4-worker pool (same pattern as EnrichBlame) to avoid
+	// spawning one goroutine per file (~2KB stack overhead each).
+	jobCh := make(chan fileJob, len(jobs))
 	for _, j := range jobs {
+		jobCh <- j
+	}
+	close(jobCh)
+	const commitWorkerCount = 4
+	for range commitWorkerCount {
 		wg.Add(1)
-		go func(f fileJob) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{} // acquire
-			commits := RecentCommitsForFile(context.Background(), f.gitRoot, f.absFile, 3)
-			<-sem // release
-			if len(commits) > 0 {
-				if raw, err := json.Marshal(commits); err == nil {
-					cacheMu.Lock()
-					cache[f.absFile] = string(raw)
-					cacheMu.Unlock()
+			for f := range jobCh {
+				commits := RecentCommitsForFile(context.Background(), f.gitRoot, f.absFile, 3)
+				if len(commits) > 0 {
+					if raw, err := json.Marshal(commits); err == nil {
+						cacheMu.Lock()
+						cache[f.absFile] = string(raw)
+						cacheMu.Unlock()
+					}
 				}
 			}
-		}(j)
+		}()
 	}
 	wg.Wait()
 

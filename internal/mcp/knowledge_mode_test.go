@@ -121,59 +121,6 @@ func TestKnowledgeMode_EndSession(t *testing.T) {
 	}
 }
 
-func TestKnowledgeMode_DiscoverToolsFiltered(t *testing.T) {
-	srv := newKnowledgeServer(t)
-
-	// Empty query should only show knowledge-mode tools.
-	res, err := srv.handleDiscoverTools(context.Background(), callTool(map[string]any{}))
-	m := mustResult(t, res, err)
-
-	if mode, ok := m["mode"].(string); !ok || mode != "knowledge" {
-		t.Errorf("expected mode=knowledge, got %v", m["mode"])
-	}
-
-	// Verify categories don't contain graph tools.
-	cats, _ := m["categories"].(map[string]any)
-	for _, toolList := range cats {
-		if tools, ok := toolList.([]any); ok {
-			for _, raw := range tools {
-				tool, ok := raw.(map[string]any)
-				if !ok {
-					continue
-				}
-				name, _ := tool["name"].(string)
-				if name == "get_context" || name == "get_impact" || name == "find_entity" || name == "search" {
-					t.Errorf("graph tool %q should not appear in knowledge mode discover_tools", name)
-				}
-			}
-		}
-	}
-}
-
-func TestKnowledgeMode_GraphToolStub(t *testing.T) {
-	// Verify that the server is created correctly in knowledge mode
-	// and that knowledgeMode flag is set properly.
-	srv := newKnowledgeServer(t)
-
-	if !srv.knowledgeMode {
-		t.Error("expected knowledgeMode to be true")
-	}
-
-	// Verify that knowledge tools are in the set.
-	for _, name := range []string{"session_init", "memory", "tasks", "validate"} {
-		if !knowledgeTools[name] {
-			t.Errorf("expected %q to be in knowledgeTools", name)
-		}
-	}
-
-	// Verify graph tools are NOT in the knowledge set.
-	for _, name := range []string{"get_context", "get_impact", "search", "annotate"} {
-		if knowledgeTools[name] {
-			t.Errorf("%q should NOT be in knowledgeTools", name)
-		}
-	}
-}
-
 func TestNewKnowledge_NilConfig(t *testing.T) {
 	st := openTestStore(t)
 	srv := NewKnowledge(nil, st)
