@@ -75,7 +75,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/scout"
-	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
 	"github.com/SynapsesOS/synapses/internal/webcache"
@@ -134,17 +133,32 @@ func callerBucket(remoteAddr string) *tokenBucket {
 
 	// Lazy eviction: sweep for entries idle >60s.
 	// For a loopback-only daemon, the number of distinct IPs is tiny (1-2),
-	// so this sweep is O(1) in practice.
+	// so this sweep is O(1) in practice. Hard cap at 1000 entries prevents
+	// unbounded growth when bound to 0.0.0.0.
+	var mapSize int
 	perCallerBuckets.Range(func(k, val interface{}) bool {
+		mapSize++
 		e := val.(*perCallerEntry)
 		e.mu.Lock()
 		idle := now.Sub(e.lastSeen)
 		e.mu.Unlock()
 		if idle > 60*time.Second {
 			perCallerBuckets.Delete(k)
+			mapSize--
 		}
 		return true
 	})
+	if mapSize > 1000 {
+		// Emergency eviction: delete oldest entries to stay under cap.
+		perCallerBuckets.Range(func(k, val interface{}) bool {
+			if mapSize <= 1000 {
+				return false
+			}
+			perCallerBuckets.Delete(k)
+			mapSize--
+			return true
+		})
+	}
 	return entry.bucket
 }
 
@@ -860,16 +874,26 @@ func cmdDaemonServe(args []string) error {
 		}
 	}
 
+	// ── Hibernate system ─────────────────────────────────────────────────────
+	// Wire the wake function so GetOrSet can auto-wake hibernated projects.
+	reg.SetWakeFunc(func(absPath string) (*ProjectInstance, error) {
+		return wakeProjectInstance(appCtx, absPath, sharedPulse, reg)
+	})
+	// Start the hibernation sweeper goroutine.
+	go startHibernationSweeper(appCtx, reg)
+
 	// ── Eager project warming ────────────────────────────────────────────────
 	// Pre-initialize projects that were registered before the last shutdown.
+	// Hibernated projects are loaded as tombstones (no full init).
 	// Runs in background so it doesn't block HTTP server startup.
 	go func() {
-		projects := loadKnownProjects()
-		if len(projects) == 0 {
+		entries := loadKnownProjectsWithState()
+		if len(entries) == 0 {
 			return
 		}
-		logutil.Info("synapses daemon: warming %d known project(s)\n", len(projects))
-		for _, path := range projects {
+		logutil.Info("synapses daemon: loading %d known project(s)\n", len(entries))
+		for _, entry := range entries {
+			path := entry.Path
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				logutil.Info("synapses daemon: removing stale project %s\n", path)
 				removeKnownProject(path)
@@ -880,6 +904,21 @@ func cmdDaemonServe(args []string) error {
 				removeKnownProject(path)
 				continue
 			}
+
+			if entry.State == "hibernated" {
+				// Restore as tombstone — no full init, just sentinel watcher.
+				tomb := &HibernatedProject{
+					AbsPath:      path,
+					HibernatedAt: time.Now(),
+					sentinelStop: make(chan struct{}),
+				}
+				go runSentinelWatcher(tomb)
+				reg.Hibernate(path, tomb)
+				logutil.Info("synapses daemon: restored hibernated %s\n", filepath.Base(path))
+				continue
+			}
+
+			// Warm init (default for "warm" or unrecognized states).
 			_, err := reg.GetOrSet(path, func() (*ProjectInstance, error) {
 				return initProjectInstance(appCtx, path, sharedPulse, reg)
 			})
@@ -929,10 +968,12 @@ func cmdDaemonServe(args []string) error {
 		}
 
 		snap := ActiveSnapshot()
+		hibernatedPaths := reg.HibernatedPaths()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":               overallStatus,
 			"project_count":        len(projects),
+			"hibernated_count":     len(hibernatedPaths),
 			"watchers_dead":        watcherDead,
 			"bg_queue_depth":       totalBgDepth,
 			"bg_queue_drops":       totalBgDrops,
@@ -1618,6 +1659,10 @@ func cmdDaemonServe(args []string) error {
 	// ── Auth token ────────────────────────────────────────────────────────────
 	// Generated on first start, persisted at ~/.synapses/auth_token.
 	// Required only for non-localhost connections; localhost is always trusted.
+	if os.Getenv("SYNAPSES_NO_AUTH") == "1" {
+		logutil.Warn("synapses: WARNING — SYNAPSES_NO_AUTH=1 is set, authentication is DISABLED. Do not use in production.\n")
+	}
+
 	authToken, authErr := loadOrCreateAuthToken()
 	if authErr != nil {
 		// Non-fatal: log a warning and continue. Localhost-only binding
@@ -2101,38 +2146,10 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			srv.SetPulseClient(sharedPulse)
 		}
 
-		// Skills / prompts (same as full mode).
-		{
-			var allPrompts []skills.PromptTemplate
-			allPrompts = append(allPrompts, skills.BuiltinPrompts()...)
-			if homeDir, err := os.UserHomeDir(); err == nil {
-				userDir := filepath.Join(homeDir, ".synapses", "prompts")
-				if pts, err := skills.LoadPromptDir(userDir, "user"); err == nil {
-					allPrompts = append(allPrompts, pts...)
-				}
-			}
-			projectDir := filepath.Join(absPath, ".synapses", "prompts")
-			if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
-				allPrompts = append(allPrompts, pts...)
-			}
-			allPrompts = skills.DeduplicatePrompts(allPrompts)
-			if len(allPrompts) > 0 {
-				srv.SetPromptTemplates(allPrompts)
-			}
-		}
+		loadAndSetPrompts(srv, absPath)
 
 		httpHandler := mcpserver.NewStreamableHTTPServer(srv.MCPServer())
-
-		// Per-project Unix socket.
-		sockPath, sockErr := daemonSocketPath(absPath)
-		if sockErr == nil {
-			os.Remove(sockPath)
-			listener, listenErr := net.Listen("unix", sockPath)
-			if listenErr == nil {
-				os.Chmod(sockPath, 0o700) //nolint:errcheck
-				go serveProjectSocket(projCtx, srv, listener)
-			}
-		}
+		startProjectSocket(projCtx, srv, absPath, reg)
 
 		// Wire embedder into knowledge-mode server so rank_candidates is usable.
 		knowledgeEmbedder := createMemoryEmbedder(cfg)
@@ -2270,24 +2287,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	srv.StartBackground()
 
 	// Skills / prompts.
-	{
-		var allPrompts []skills.PromptTemplate
-		allPrompts = append(allPrompts, skills.BuiltinPrompts()...)
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			userDir := filepath.Join(homeDir, ".synapses", "prompts")
-			if pts, err := skills.LoadPromptDir(userDir, "user"); err == nil {
-				allPrompts = append(allPrompts, pts...)
-			}
-		}
-		projectDir := filepath.Join(absPath, ".synapses", "prompts")
-		if pts, err := skills.LoadPromptDir(projectDir, "project"); err == nil {
-			allPrompts = append(allPrompts, pts...)
-		}
-		allPrompts = skills.DeduplicatePrompts(allPrompts)
-		if len(allPrompts) > 0 {
-			srv.SetPromptTemplates(allPrompts)
-		}
-	}
+	loadAndSetPrompts(srv, absPath)
 
 	// Federation resolver: cross-project drift detection + dependency tracking.
 	// Only created when federation entries are configured in synapses.json.
@@ -2412,17 +2412,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 
 	// HTTP MCP handler for this project (used via /mcp?project=<path>).
 	httpHandler := mcpserver.NewStreamableHTTPServer(srv.MCPServer())
-
-	// Per-project Unix socket (for stdio proxy backward compat).
-	sockPath, sockErr := daemonSocketPath(absPath)
-	if sockErr == nil {
-		os.Remove(sockPath) // clean stale socket
-		listener, listenErr := net.Listen("unix", sockPath)
-		if listenErr == nil {
-			os.Chmod(sockPath, 0o700) //nolint:errcheck
-			go serveProjectSocket(projCtx, srv, listener)
-		}
-	}
+	startProjectSocket(projCtx, srv, absPath, reg)
 
 	identity := g.ProjectIdentity()
 	logutil.Info("synapses: project ready — %s (%d nodes, %d edges)\n",
@@ -2447,7 +2437,9 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 
 // serveProjectSocket accepts MCP sessions on the per-project Unix socket.
 // This provides backward compatibility for "synapses start" stdio proxies.
-func serveProjectSocket(ctx context.Context, srv *mcpsrv.Server, listener net.Listener) {
+// reg and absPath are used to dynamically look up the registry entry for
+// activeConns tracking. If reg is nil, connection tracking is disabled.
+func serveProjectSocket(ctx context.Context, srv *mcpsrv.Server, listener net.Listener, reg *projectRegistry, absPath string) {
 	// Limit concurrent connections per socket to prevent FD exhaustion.
 	listener = netutil.LimitListener(listener, 64)
 
@@ -2487,6 +2479,21 @@ func serveProjectSocket(ctx context.Context, srv *mcpsrv.Server, listener net.Li
 		go func(c net.Conn, sid string) {
 			defer wg.Done()
 			defer c.Close()
+			// Track active proxy connections for hibernation sweeper.
+			// Dynamic lookup ensures tracking works even when the socket was
+			// started before the registry entry existed (cold init path).
+			if reg != nil {
+				if entry := reg.getEntry(absPath); entry != nil {
+					entry.activeConns.Add(1)
+					defer func() {
+						// Re-lookup on close: entry may have been replaced by
+						// hibernate/wake cycle. Decrement whichever entry exists.
+						if e := reg.getEntry(absPath); e != nil {
+							e.activeConns.Add(-1)
+						}
+					}()
+				}
+			}
 			if err := serveMCPConn(ctx, srv.MCPServer(), srv, c, sid); err != nil {
 				if !strings.Contains(err.Error(), "EOF") &&
 					!strings.Contains(err.Error(), "use of closed") {

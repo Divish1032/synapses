@@ -164,6 +164,11 @@ type Config struct {
 	// Session configures agent session memory behavior.
 	Session SessionConfig `json:"session,omitempty"`
 
+	// Hibernate configures the project hibernation lifecycle.
+	// When enabled (default), idle projects are hibernated to reclaim memory
+	// and woken on-demand in <2s when an IDE reconnects or MCP request arrives.
+	Hibernate HibernateConfig `json:"hibernate,omitempty"`
+
 	// RateLimits configures per-session token-bucket rate limiting for write
 	// operations and expensive read operations on the MCP stdio transport.
 	// All limits are per-session (per MCP connection) and measured per minute.
@@ -389,6 +394,35 @@ type SessionConfig struct {
 	// Example: hibernate_window_secs: 7200   # 2-hour window
 	// Example: hibernate_window_secs: -1      # disable
 	HibernateWindowSecs int `json:"hibernate_window_secs,omitempty"`
+}
+
+// HibernateConfig configures the project hibernation lifecycle.
+// When enabled (default), idle projects are hibernated to reclaim memory
+// and woken on-demand when an IDE reconnects or MCP request arrives.
+type HibernateConfig struct {
+	// Disabled completely turns off project hibernation.
+	// Default: false (hibernation enabled).
+	Disabled bool `json:"disabled,omitempty"`
+
+	// IdleMinutes is the number of minutes a project must be idle (no requests,
+	// no active IDE connections) before the sweeper hibernates it.
+	// Default: 60.
+	IdleMinutes int `json:"idle_minutes,omitempty"`
+
+	// PressureIdleMinutes is the idle threshold when heap memory exceeds
+	// HeapThresholdMB. Under memory pressure, projects are hibernated sooner.
+	// Default: 30.
+	PressureIdleMinutes int `json:"pressure_idle_minutes,omitempty"`
+
+	// HeapThresholdMB is the Go heap size in MB above which the sweeper uses
+	// PressureIdleMinutes instead of IdleMinutes.
+	// Default: 1024 (1 GB).
+	HeapThresholdMB int `json:"heap_threshold_mb,omitempty"`
+
+	// SentinelIntervalSecs controls how often the sentinel watcher polls
+	// .git/index for changes on hibernated projects.
+	// Default: 30.
+	SentinelIntervalSecs int `json:"sentinel_interval_secs,omitempty"`
 }
 
 // RateLimitConfig configures per-session token-bucket rate limiting for

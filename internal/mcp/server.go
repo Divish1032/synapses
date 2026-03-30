@@ -133,11 +133,6 @@ type Server struct {
 	projectID          string                 // stable project identifier (FNV hash of project root path)
 	projectPath        string                 // absolute path to the project root (for go.mod parsing)
 	rulesMu            sync.RWMutex           // protects s.config.Rules for concurrent dynamic upserts
-	toolEmbeds         [][]float32            // per-tool normalized vectors; len==len(toolCatalog) when ready
-	toolEmbedModel     string                 // embedding model used to build toolEmbeds; must match query model
-	toolEmbedsMu       sync.RWMutex           // protects toolEmbeds and toolEmbedModel
-	toolCatalogRetries atomic.Int32           // counts delayed retries to cap at 2
-
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -358,6 +353,12 @@ func (s *Server) getConfig() *config.Config {
 	return cfg
 }
 
+// Config returns the current server config, safe for concurrent use.
+// Used by the hibernation sweeper to read per-project hibernate thresholds.
+func (s *Server) Config() *config.Config {
+	return s.getConfig()
+}
+
 // BackgroundQueueStats returns the current queue depth and total drop count
 // for health endpoint reporting (BUG-020).
 func (s *Server) BackgroundQueueStats() (depth int, drops int64) {
@@ -511,6 +512,13 @@ func (s *Server) ClearSynapseSession(mcpSessionID string) {
 	s.lg.clearSession(key)
 	// Security F10: release rate-limiter state for the closed session.
 	s.rl.clearSession(key)
+}
+
+// ActiveSessionCount returns the number of active MCP sessions tracked by the
+// loop guard. Used by the hibernation sweeper to avoid hibernating projects
+// with active IDE/agent connections.
+func (s *Server) ActiveSessionCount() int {
+	return s.lg.ActiveSessionCount()
 }
 
 // ctxCallEntry tracks how many times an agent requested context for an entity.
@@ -1083,24 +1091,6 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 		setter.SetNodeEmbedder(e)
 	}
 
-	// Pre-embed tool catalog in background so discover_tools can rank by
-	// cosine similarity instead of keyword overlap (Sprint 12 #5).
-	if e != nil {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			ctx, cancel := context.WithCancel(context.Background())
-			go func() {
-				select {
-				case <-s.stopCh:
-					cancel()
-				case <-ctx.Done():
-				}
-			}()
-			defer cancel()
-			s.EmbedToolCatalog(ctx, e)
-		}()
-	}
 }
 
 // SetUpdateChecker sets the function that returns the pending update version.

@@ -488,6 +488,65 @@ func registerAdminEndpoints(mux *http.ServeMux, reg *projectRegistry, initProjec
 		}()
 	})
 
+	// ── POST /api/admin/projects/hibernate — manually hibernate a project ────
+	mux.HandleFunc("/api/admin/projects/hibernate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		projPath := r.URL.Query().Get("path")
+		if projPath == "" {
+			http.Error(w, `{"error":"path query param required"}`, http.StatusBadRequest)
+			return
+		}
+		absPath, err := canonicalPath(projPath)
+		if err != nil {
+			http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+			return
+		}
+		if reg.IsHibernated(absPath) {
+			json.NewEncoder(w).Encode(map[string]string{"status": "already_hibernated", "path": absPath}) //nolint:errcheck
+			return
+		}
+		if err := hibernateProject(reg, absPath); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "hibernated", "path": absPath}) //nolint:errcheck
+	})
+
+	// ── POST /api/admin/projects/wake — manually wake a hibernated project ───
+	mux.HandleFunc("/api/admin/projects/wake", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"use POST"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		projPath := r.URL.Query().Get("path")
+		if projPath == "" {
+			http.Error(w, `{"error":"path query param required"}`, http.StatusBadRequest)
+			return
+		}
+		absPath, err := canonicalPath(projPath)
+		if err != nil {
+			http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+			return
+		}
+		if !reg.IsHibernated(absPath) {
+			json.NewEncoder(w).Encode(map[string]string{"status": "not_hibernated", "path": absPath}) //nolint:errcheck
+			return
+		}
+		_, err = reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+			return initProject(absPath)
+		})
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "warm", "path": absPath}) //nolint:errcheck
+	})
+
 	// ── GET/PUT /api/admin/projects/config — read/write project synapses.json ─
 	mux.HandleFunc("/api/admin/projects/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

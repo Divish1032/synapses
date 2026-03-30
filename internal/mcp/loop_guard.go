@@ -84,6 +84,14 @@ func (g *loopGuard) gcIdleSessions(maxIdle time.Duration) {
 	}
 }
 
+// ActiveSessionCount returns the number of tracked sessions. Used by the
+// hibernation sweeper to avoid hibernating projects with active MCP clients.
+func (g *loopGuard) ActiveSessionCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.sessions)
+}
+
 // SetPulseClient wires a pulse client so loop-guard can emit guard events.
 func (g *loopGuard) SetPulseClient(pc *pulse.Client) { g.pc = pc }
 
