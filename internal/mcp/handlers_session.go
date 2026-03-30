@@ -2051,7 +2051,11 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 		}
 	}
 
-	// 7. Assemble the recovery packet
+	// 7. Entity importance ranking + relationship map (merged from guide)
+	importance := s.rankEntityImportance(sessionID, entities)
+	relationships := s.buildRelationshipMap(entities)
+
+	// 8. Assemble the recovery packet
 	recovery := map[string]interface{}{
 		"work_summary": workSummary,
 		"hint":         "Your context was compacted. This recovery packet contains your prior work state from Synapses. File contents and graph traversals can be re-queried — focus on decisions and approach.",
@@ -2074,8 +2078,14 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 	if activeState != nil && activeState.ContextSnapshot != "" {
 		recovery["context_snapshot"] = activeState.ContextSnapshot
 	}
+	if len(importance) > 0 {
+		recovery["entity_importance"] = importance
+	}
+	if len(relationships) > 0 {
+		recovery["relationship_map"] = relationships
+	}
 
-	// 8. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
+	// 9. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
 	truncateCompactionPacket(recovery, 8000)
 
 	return recovery
@@ -2121,7 +2131,7 @@ func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
 	}
 	// Progressive truncation in priority order (lowest value first).
 	// work_summary and hint are never dropped — they're the minimum useful payload.
-	dropOrder := []string{"active_violations", "entity_memories", "session_failures", "session_decisions", "active_rules", "context_snapshot"}
+	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "session_failures", "session_decisions", "active_rules", "context_snapshot"}
 	for _, key := range dropOrder {
 		if len(data) <= maxChars {
 			return
