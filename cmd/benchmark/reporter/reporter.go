@@ -35,6 +35,10 @@ type ContextBenchResult struct {
 	AvgTokensGold      int                      `json:"avg_tokens_gold,omitempty"`
 	AvgTokenPrecision  float64                  `json:"avg_token_precision,omitempty"`
 	TokenEfficiency    float64                  `json:"token_efficiency,omitempty"` // gold/retrieved ratio
+	// File-level metrics.
+	AvgFilePrecision   float64                  `json:"avg_file_precision,omitempty"`
+	AvgFileRecall      float64                  `json:"avg_file_recall,omitempty"`
+	AvgFileF1          float64                  `json:"avg_file_f1,omitempty"`
 	PerLanguage        []ContextBenchLangResult `json:"per_language"`
 	TaskResults        []interface{}            `json:"tasks"` // []ContextBenchTaskResult from benchmarks pkg
 	// Multi-budget evaluation (always populated).
@@ -84,6 +88,138 @@ type ContextBenchLangResult struct {
 	AvgF1        float64 `json:"avg_f1"`
 }
 
+// ─── LLM ContextBench ─────────────────────────────────────────────────────────
+
+// LLMContextBenchResult holds results for LLM-powered contextbench.
+type LLMContextBenchResult struct {
+	Timestamp        string                     `json:"timestamp"`
+	Mode             string                     `json:"mode"`   // "baseline" or "synapses"
+	Model            string                     `json:"model"`
+	TotalTasks       int                        `json:"total_tasks"`
+	AvgPrecision     float64                    `json:"avg_precision"`
+	AvgRecall        float64                    `json:"avg_recall"`
+	AvgF1            float64                    `json:"avg_f1"`
+	AvgFilePrecision float64                    `json:"avg_file_precision"`
+	AvgFileRecall    float64                    `json:"avg_file_recall"`
+	AvgFileF1        float64                    `json:"avg_file_f1"`
+	AvgTurns         float64                    `json:"avg_turns"`
+	AvgCostUSD       float64                    `json:"avg_cost_usd"`
+	TotalCostUSD     float64                    `json:"total_cost_usd"`
+	ToolUsage        map[string]int             `json:"tool_usage"`
+	PerLanguage      []ContextBenchLangResult   `json:"per_language"`
+	Tasks            []interface{}              `json:"tasks"`
+	BothModes        *LLMContextBenchComparison `json:"both_modes,omitempty"`
+}
+
+// LLMContextBenchComparison holds baseline vs synapses delta.
+type LLMContextBenchComparison struct {
+	BaselineF1      float64 `json:"baseline_f1"`
+	SynapsesF1      float64 `json:"synapses_f1"`
+	AgentLift       float64 `json:"agent_lift"`
+	BaselineFileF1  float64 `json:"baseline_file_f1"`
+	SynapsesFileF1  float64 `json:"synapses_file_f1"`
+	FileAgentLift   float64 `json:"file_agent_lift"`
+	BaselineAvgCost float64 `json:"baseline_avg_cost"`
+	SynapsesAvgCost float64 `json:"synapses_avg_cost"`
+	CostSavingsPct  float64 `json:"cost_savings_pct"`
+}
+
+// WriteLLMContextBench writes JSON + Markdown results for an LLM ContextBench run.
+func (r *Reporter) WriteLLMContextBench(result *LLMContextBenchResult) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("contextbench_llm_%s_%s.json", result.Mode, ts))
+	mdPath := filepath.Join(r.dir, fmt.Sprintf("contextbench_llm_%s_%s.md", result.Mode, ts))
+	if err := writeJSON(jsonPath, result); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(llmContextBenchMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
+	}
+	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
+	return nil
+}
+
+// PrintLLMContextBenchSummary prints a compact summary to stdout.
+func (r *Reporter) PrintLLMContextBenchSummary(result *LLMContextBenchResult) {
+	fmt.Printf("\n=== LLM ContextBench Summary (%s mode, %s) ===\n", result.Mode, result.Model)
+	fmt.Printf("Tasks: %d | Line F1: %.1f%% (P=%.1f%% R=%.1f%%) | File F1: %.1f%% (P=%.1f%% R=%.1f%%)\n",
+		result.TotalTasks,
+		result.AvgF1*100, result.AvgPrecision*100, result.AvgRecall*100,
+		result.AvgFileF1*100, result.AvgFilePrecision*100, result.AvgFileRecall*100,
+	)
+	fmt.Printf("Avg turns: %.1f | Avg cost: $%.4f | Total cost: $%.4f\n",
+		result.AvgTurns, result.AvgCostUSD, result.TotalCostUSD)
+
+	if len(result.ToolUsage) > 0 {
+		fmt.Printf("\nTool Usage:\n")
+		for name, count := range result.ToolUsage {
+			fmt.Printf("  %-35s %d\n", name, count)
+		}
+	}
+
+	if len(result.PerLanguage) > 0 {
+		fmt.Printf("\n%-12s  %6s  %8s  %8s\n", "Language", "Tasks", "Line F1", "File F1")
+		fmt.Printf("%s\n", strings.Repeat("-", 40))
+		for _, l := range result.PerLanguage {
+			fmt.Printf("%-12s  %6d  %7.1f%%  %7.1f%%\n",
+				l.Language, l.Tasks, l.AvgF1*100, l.AvgPrecision*100)
+		}
+	}
+
+	if result.BothModes != nil {
+		bm := result.BothModes
+		fmt.Printf("\n=== Baseline vs Synapses ===\n")
+		fmt.Printf("Line F1:  baseline=%.1f%%  synapses=%.1f%%  lift=%+.1f%%\n",
+			bm.BaselineF1*100, bm.SynapsesF1*100, bm.AgentLift*100)
+		fmt.Printf("File F1:  baseline=%.1f%%  synapses=%.1f%%  lift=%+.1f%%\n",
+			bm.BaselineFileF1*100, bm.SynapsesFileF1*100, bm.FileAgentLift*100)
+		fmt.Printf("Cost:     baseline=$%.4f  synapses=$%.4f  savings=%.1f%%\n",
+			bm.BaselineAvgCost, bm.SynapsesAvgCost, bm.CostSavingsPct)
+	}
+}
+
+func llmContextBenchMarkdown(result *LLMContextBenchResult) string {
+	var sb strings.Builder
+	sb.WriteString("# LLM ContextBench Results\n\n")
+	fmt.Fprintf(&sb, "**Mode:** %s | **Model:** %s | **Tasks:** %d\n\n", result.Mode, result.Model, result.TotalTasks)
+
+	sb.WriteString("## Metrics\n\n")
+	sb.WriteString("| Metric | Precision | Recall | F1 |\n")
+	sb.WriteString("|--------|-----------|--------|----|\n")
+	fmt.Fprintf(&sb, "| Line-level | %.1f%% | %.1f%% | %.1f%% |\n",
+		result.AvgPrecision*100, result.AvgRecall*100, result.AvgF1*100)
+	fmt.Fprintf(&sb, "| File-level | %.1f%% | %.1f%% | %.1f%% |\n\n",
+		result.AvgFilePrecision*100, result.AvgFileRecall*100, result.AvgFileF1*100)
+
+	fmt.Fprintf(&sb, "**Avg turns:** %.1f | **Avg cost:** $%.4f | **Total cost:** $%.4f\n\n",
+		result.AvgTurns, result.AvgCostUSD, result.TotalCostUSD)
+
+	if result.BothModes != nil {
+		bm := result.BothModes
+		sb.WriteString("## Baseline vs Synapses\n\n")
+		sb.WriteString("| Metric | Baseline | Synapses | Lift |\n")
+		sb.WriteString("|--------|----------|----------|------|\n")
+		fmt.Fprintf(&sb, "| Line F1 | %.1f%% | %.1f%% | %+.1f%% |\n",
+			bm.BaselineF1*100, bm.SynapsesF1*100, bm.AgentLift*100)
+		fmt.Fprintf(&sb, "| File F1 | %.1f%% | %.1f%% | %+.1f%% |\n",
+			bm.BaselineFileF1*100, bm.SynapsesFileF1*100, bm.FileAgentLift*100)
+		fmt.Fprintf(&sb, "| Avg Cost | $%.4f | $%.4f | %.1f%% |\n\n",
+			bm.BaselineAvgCost, bm.SynapsesAvgCost, bm.CostSavingsPct)
+	}
+
+	if len(result.PerLanguage) > 0 {
+		sb.WriteString("## Per-Language\n\n")
+		sb.WriteString("| Language | Tasks | Line F1 | File F1 |\n")
+		sb.WriteString("|----------|-------|---------|---------|\n")
+		for _, l := range result.PerLanguage {
+			fmt.Fprintf(&sb, "| %s | %d | %.1f%% | %.1f%% |\n",
+				l.Language, l.Tasks, l.AvgF1*100, l.AvgPrecision*100)
+		}
+	}
+
+	return sb.String()
+}
+
 // WriteContextBench writes JSON + Markdown results for a ContextBench run.
 func (r *Reporter) WriteContextBench(result *ContextBenchResult) error {
 	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
@@ -103,11 +239,10 @@ func (r *Reporter) WriteContextBench(result *ContextBenchResult) error {
 // PrintContextBenchSummary prints a compact summary to stdout.
 func (r *Reporter) PrintContextBenchSummary(result *ContextBenchResult) {
 	fmt.Printf("\n=== ContextBench Summary ===\n")
-	fmt.Printf("Tasks: %d | Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n",
+	fmt.Printf("Tasks: %d | Line F1: %.1f%% (P=%.1f%% R=%.1f%%) | File F1: %.1f%% (P=%.1f%% R=%.1f%%)\n",
 		result.TotalTasks,
-		result.AvgPrecision*100,
-		result.AvgRecall*100,
-		result.AvgF1*100,
+		result.AvgF1*100, result.AvgPrecision*100, result.AvgRecall*100,
+		result.AvgFileF1*100, result.AvgFilePrecision*100, result.AvgFileRecall*100,
 	)
 	if result.MultiBudget != nil {
 		fmt.Printf("\n%-12s  %10s  %8s  %6s\n", "Budget", "Precision", "Recall", "F1")

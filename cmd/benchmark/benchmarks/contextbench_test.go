@@ -582,3 +582,69 @@ Calls: Validate, Transform`
 		t.Errorf("expected Transform in entities %v", entities)
 	}
 }
+
+// ─── LLM context output parser ─────────────────────────────────────────────
+
+func TestParseContextMarkers(t *testing.T) {
+	text := `I found several relevant files.
+
+RELEVANT_CONTEXT_START
+file: src/auth/handler.go
+lines: 42-60
+reason: Main authentication handler
+
+file: src/auth/middleware.go
+lines: 10-25
+reason: Auth middleware chain
+
+file: tests/auth_test.go
+lines: 100-150
+reason: Tests for auth flow
+RELEVANT_CONTEXT_END
+
+That covers the relevant code.`
+
+	ranges := parseContextMarkers(text)
+	if len(ranges) != 3 {
+		t.Fatalf("expected 3 ranges, got %d", len(ranges))
+	}
+	if ranges[0].File != "src/auth/handler.go" || ranges[0].StartLine != 42 || ranges[0].EndLine != 60 {
+		t.Errorf("range 0: got %+v", ranges[0])
+	}
+	if ranges[1].File != "src/auth/middleware.go" || ranges[1].StartLine != 10 || ranges[1].EndLine != 25 {
+		t.Errorf("range 1: got %+v", ranges[1])
+	}
+	if ranges[2].File != "tests/auth_test.go" || ranges[2].StartLine != 100 || ranges[2].EndLine != 150 {
+		t.Errorf("range 2: got %+v", ranges[2])
+	}
+}
+
+func TestParseContextFallback(t *testing.T) {
+	text := `Looking at src/handler.go:42-60 and src/utils.go lines 10-25 for the bug.`
+	ranges := parseContextFallback(text)
+	if len(ranges) != 2 {
+		t.Fatalf("expected 2 ranges, got %d: %+v", len(ranges), ranges)
+	}
+	if ranges[0].File != "src/handler.go" || ranges[0].StartLine != 42 || ranges[0].EndLine != 60 {
+		t.Errorf("range 0: got %+v", ranges[0])
+	}
+}
+
+func TestComputeContextF1(t *testing.T) {
+	gold := map[string]bool{"a.go:1": true, "a.go:2": true, "a.go:3": true, "a.go:4": true}
+	retrieved := map[string]bool{"a.go:1": true, "a.go:2": true, "b.go:1": true, "b.go:2": true}
+
+	p, r, f1, hits := computeContextF1(retrieved, gold)
+	if hits != 2 {
+		t.Errorf("hits = %d, want 2", hits)
+	}
+	if p != 0.5 {
+		t.Errorf("precision = %.2f, want 0.5", p)
+	}
+	if r != 0.5 {
+		t.Errorf("recall = %.2f, want 0.5", r)
+	}
+	if f1 != 0.5 {
+		t.Errorf("f1 = %.2f, want 0.5", f1)
+	}
+}

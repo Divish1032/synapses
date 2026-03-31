@@ -156,7 +156,7 @@ func (c *SynapsesClient) PrepareContext(taskID, entity, intent string) (*Context
 		return &ContextResult{}, nil
 	}
 	args := map[string]interface{}{
-		"entity": entity,
+		"target": entity,
 		"intent": intent,
 		"mode":   "intent",
 	}
@@ -212,6 +212,8 @@ func (c *SynapsesClient) GetContextJSON(taskID, entity, detailLevel string) (str
 	if c.disabled {
 		return "{}", nil
 	}
+	// Default mode uses "entity" param (handlers_context.go).
+	// mode=intent uses "target" param (intents.go).
 	args := map[string]interface{}{
 		"entity":       entity,
 		"format":       "json",
@@ -251,10 +253,45 @@ func (c *SynapsesClient) GetFileContext(taskID, filePath string) (*FileContextRe
 	}
 	c.recordAccess(taskID, "get_file_context", raw)
 
+	// extractText concatenates multiple MCP text blocks, so the raw string
+	// may have trailing non-JSON content (e.g. suggested_next_tools).
+	// Try parsing the full string first; on failure, extract the first JSON object.
 	var result FileContextResult
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		// Response might be wrapped differently; return raw as fallback.
-		return &FileContextResult{File: filePath}, nil
+		// Try extracting just the first JSON object.
+		if start := strings.Index(raw, "{"); start >= 0 {
+			depth, end := 0, start
+			inStr := false
+			for i := start; i < len(raw); i++ {
+				if inStr {
+					if raw[i] == '\\' {
+						i++
+					} else if raw[i] == '"' {
+						inStr = false
+					}
+					continue
+				}
+				switch raw[i] {
+				case '"':
+					inStr = true
+				case '{':
+					depth++
+				case '}':
+					depth--
+					if depth == 0 {
+						end = i + 1
+						goto done
+					}
+				}
+			}
+		done:
+			if end > start {
+				_ = json.Unmarshal([]byte(raw[start:end]), &result)
+			}
+		}
+		if result.File == "" {
+			return &FileContextResult{File: filePath}, nil
+		}
 	}
 	return &result, nil
 }
@@ -323,6 +360,7 @@ func (c *SynapsesClient) GetContextJSONWithFile(taskID, entity, detailLevel, fil
 	if c.disabled {
 		return "{}", nil
 	}
+	// Default mode uses "entity" param (handlers_context.go).
 	args := map[string]interface{}{
 		"entity":       entity,
 		"format":       "json",

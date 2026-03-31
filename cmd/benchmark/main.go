@@ -43,6 +43,11 @@ func main() {
 		cbSources   = flag.String("cb-sources", "", "Comma-separated source filter for ContextBench (e.g. Verified)")
 		cbWarmup    = flag.Int("cb-warmup", 0, "Cold/warm comparison: run N warmup sessions, then compare F1 (0 = off)")
 		cbCompaction = flag.Bool("cb-compaction", false, "Compaction mode: test recovery quality after simulated context loss")
+		cbMode       = flag.String("cb-mode", "heuristic", "ContextBench mode: heuristic (daemon-only) | llm (Claude + optional MCP)")
+		cbLLMModel   = flag.String("cb-llm-model", "claude-sonnet-4-6", "Claude model for LLM contextbench")
+		cbLLMTimeout = flag.Int("cb-llm-timeout", 180, "Timeout per task in seconds for LLM contextbench")
+		cbBothModes  = flag.Bool("cb-both-modes", false, "LLM mode: run baseline + synapses, compute delta")
+		cbLLMDebug   = flag.Bool("cb-debug", false, "Dump raw stream-json for LLM contextbench")
 		// GraphBench-specific flags.
 		gbDataFile = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
 		gbMode     = flag.String("gb-mode", "full", "GraphBench mode: full (curated ground truth) | smoke (self-validating, CI-safe)")
@@ -86,26 +91,91 @@ func main() {
 
 	switch *benchmarkName {
 	case "contextbench":
-		cbOpts := benchmarks.ContextBenchOptions{
-			DataFile:       *cbDataFile,
-			ReposDir:       *reposDir,
-			CacheFile:      *cacheFile,
-			Limit:          *limit,
-			Languages:      splitComma(*cbLanguages),
-			Sources:        splitComma(*cbSources),
-			IndexWorkers:   *indexWorkers,
-			SkipIndex:      *skipIndex,
-			WarmupSessions: *cbWarmup,
-			CompactionMode: *cbCompaction,
+		if *cbMode == "llm" {
+			// LLM-powered ContextBench: Claude identifies relevant context.
+			llmMode := *sweMode // reuse --mode flag (baseline|synapses)
+			if llmMode == "" {
+				llmMode = "synapses"
+			}
+
+			runLLMCB := func(mode string) *reporter.LLMContextBenchResult {
+				llmOpts := benchmarks.LLMContextBenchOptions{
+					DataFile:    *cbDataFile,
+					ReposDir:    *reposDir,
+					Limit:       *limit,
+					Languages:   splitComma(*cbLanguages),
+					Sources:     splitComma(*cbSources),
+					Mode:        mode,
+					Model:       *cbLLMModel,
+					Timeout:     *cbLLMTimeout,
+					OutputDir:   *outputDir,
+					Debug:       *cbLLMDebug,
+					DaemonPort:  "11435",
+				}
+				result, err := benchmarks.RunLLMContextBench(llmOpts)
+				if err != nil {
+					log.Fatalf("llm contextbench (%s) failed: %v", mode, err)
+				}
+				return result
+			}
+
+			if *cbBothModes {
+				log.Printf("LLM ContextBench: both-modes — running baseline then synapses")
+				baselineResult := runLLMCB("baseline")
+				synapsesResult := runLLMCB("synapses")
+
+				// Attach comparison to the synapses result.
+				synapsesResult.BothModes = &reporter.LLMContextBenchComparison{
+					BaselineF1:      baselineResult.AvgF1,
+					SynapsesF1:      synapsesResult.AvgF1,
+					AgentLift:       synapsesResult.AvgF1 - baselineResult.AvgF1,
+					BaselineFileF1:  baselineResult.AvgFileF1,
+					SynapsesFileF1:  synapsesResult.AvgFileF1,
+					FileAgentLift:   synapsesResult.AvgFileF1 - baselineResult.AvgFileF1,
+					BaselineAvgCost: baselineResult.AvgCostUSD,
+					SynapsesAvgCost: synapsesResult.AvgCostUSD,
+				}
+				if baselineResult.AvgCostUSD > 0 {
+					synapsesResult.BothModes.CostSavingsPct = (baselineResult.AvgCostUSD - synapsesResult.AvgCostUSD) / baselineResult.AvgCostUSD * 100
+				}
+
+				if err := rep.WriteLLMContextBench(baselineResult); err != nil {
+					log.Fatalf("write baseline results: %v", err)
+				}
+				if err := rep.WriteLLMContextBench(synapsesResult); err != nil {
+					log.Fatalf("write synapses results: %v", err)
+				}
+				rep.PrintLLMContextBenchSummary(synapsesResult)
+			} else {
+				result := runLLMCB(llmMode)
+				if err := rep.WriteLLMContextBench(result); err != nil {
+					log.Fatalf("write results: %v", err)
+				}
+				rep.PrintLLMContextBenchSummary(result)
+			}
+		} else {
+			// Heuristic ContextBench (existing, daemon-only).
+			cbOpts := benchmarks.ContextBenchOptions{
+				DataFile:       *cbDataFile,
+				ReposDir:       *reposDir,
+				CacheFile:      *cacheFile,
+				Limit:          *limit,
+				Languages:      splitComma(*cbLanguages),
+				Sources:        splitComma(*cbSources),
+				IndexWorkers:   *indexWorkers,
+				SkipIndex:      *skipIndex,
+				WarmupSessions: *cbWarmup,
+				CompactionMode: *cbCompaction,
+			}
+			cbResult, err := benchmarks.RunContextBench(mcpClient, cbOpts)
+			if err != nil {
+				log.Fatalf("contextbench failed: %v", err)
+			}
+			if err := rep.WriteContextBench(cbResult); err != nil {
+				log.Fatalf("write results: %v", err)
+			}
+			rep.PrintContextBenchSummary(cbResult)
 		}
-		cbResult, err := benchmarks.RunContextBench(mcpClient, cbOpts)
-		if err != nil {
-			log.Fatalf("contextbench failed: %v", err)
-		}
-		if err := rep.WriteContextBench(cbResult); err != nil {
-			log.Fatalf("write results: %v", err)
-		}
-		rep.PrintContextBenchSummary(cbResult)
 
 	case "graphbench", "graph-bench", "graph_bench":
 		gbOpts := benchmarks.GraphBenchOptions{

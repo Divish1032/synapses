@@ -26,6 +26,9 @@ package benchmarks
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +109,13 @@ type ContextBenchTaskResult struct {
 	TokensRetrieved int    `json:"tokens_retrieved"`  // estimated tokens in retrieved context
 	TokensGold      int    `json:"tokens_gold"`       // estimated tokens in gold context
 	TokenPrecision  float64 `json:"token_precision"`   // hit_tokens / retrieved_tokens
+	// File-level metrics (did we find the right files, regardless of exact lines).
+	FilePrecision   float64 `json:"file_precision"`
+	FileRecall      float64 `json:"file_recall"`
+	FileF1          float64 `json:"file_f1"`
+	GoldFiles       int     `json:"gold_files"`
+	HitFiles        int     `json:"hit_files"`
+	RetrievedFiles  int     `json:"retrieved_files"`
 	// Multi-budget metrics at different retrieval line limits.
 	PAt250          float64 `json:"p_at_250"`
 	RAt250          float64 `json:"r_at_250"`
@@ -134,7 +144,16 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 	if len(tasks) == 0 {
 		return nil, fmt.Errorf("no tasks after filtering")
 	}
-	fmt.Printf("[contextbench] %d tasks loaded\n", len(tasks))
+	// Sort tasks by repo so same-repo tasks run consecutively, minimizing
+	// clone/index work and daemon memory pressure (one repo loaded at a time).
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].Repo != tasks[j].Repo {
+			return tasks[i].Repo < tasks[j].Repo
+		}
+		return tasks[i].BaseCommit < tasks[j].BaseCommit
+	})
+
+	fmt.Printf("[contextbench] %d tasks loaded (%d unique repos)\n", len(tasks), countUniqueRepos(tasks))
 
 	// Build a cache keyed by "repo@commit" so each (repo, commit) pair
 	// is cloned and indexed exactly once.
@@ -143,7 +162,7 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 		return nil, fmt.Errorf("load cache: %w", err)
 	}
 
-	// Run each task sequentially (tool calls hit daemon, moderate parallelism).
+	// Run each task sequentially. Tasks are sorted by repo so index reuse is maximized.
 	var results []ContextBenchTaskResult
 	var totalP, totalR, totalF1 float64
 	var totalTokensRetrieved, totalTokensGold int
@@ -151,6 +170,7 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 	var totalPAt250, totalRAt250, totalF1At250 float64
 	var totalPAt500, totalRAt500, totalF1At500 float64
 	var totalPAt1000, totalRAt1000, totalF1At1000 float64
+	var totalFileP, totalFileR, totalFileF1 float64
 	for i, task := range tasks {
 		fmt.Printf("[contextbench] task %d/%d: %s\n", i+1, len(tasks), task.InstanceID)
 
@@ -159,6 +179,9 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 		totalP += tr.Precision
 		totalR += tr.Recall
 		totalF1 += tr.F1
+		totalFileP += tr.FilePrecision
+		totalFileR += tr.FileRecall
+		totalFileF1 += tr.FileF1
 		totalTokensRetrieved += tr.TokensRetrieved
 		totalTokensGold += tr.TokensGold
 		totalTokenPrecision += tr.TokenPrecision
@@ -171,10 +194,9 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 		totalPAt1000 += tr.PAt1000
 		totalRAt1000 += tr.RAt1000
 		totalF1At1000 += tr.F1At1000
-		fmt.Printf("  → P=%.1f%% R=%.1f%% F1=%.1f%% (gold=%d hits=%d retrieved=%d tools=%d F1@250=%.1f%% F1@1000=%.1f%%)\n",
-			tr.Precision*100, tr.Recall*100, tr.F1*100,
-			tr.GoldLines, tr.HitLines, tr.TotalLines, tr.ToolCalls,
-			tr.F1At250*100, tr.F1At1000*100,
+		fmt.Printf("  → F1=%.1f%% (P=%.1f%% R=%.1f%%) FileF1=%.1f%% (files=%d/%d) tools=%d\n",
+			tr.F1*100, tr.Precision*100, tr.Recall*100,
+			tr.FileF1*100, tr.HitFiles, tr.GoldFiles, tr.ToolCalls,
 		)
 	}
 
@@ -224,6 +246,11 @@ func RunContextBench(client *agent.SynapsesClient, opts ContextBenchOptions) (*r
 			AvgF1:        lm.f1 / float64(lm.n),
 		})
 	}
+
+	// File-level aggregation.
+	result.AvgFilePrecision = totalFileP / n
+	result.AvgFileRecall = totalFileR / n
+	result.AvgFileF1 = totalFileF1 / n
 
 	// Multi-budget aggregation.
 	result.MultiBudget = &reporter.MultiBudgetResult{
@@ -395,6 +422,9 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 	}
 
 	// Create a project-scoped client.
+	if os.Getenv("CB_DEBUG") != "" {
+		fmt.Printf("  [debug] repoPath=%s\n", repoPath)
+	}
 	sc := client.WithProject(repoPath)
 
 	// Retrieval strategy — file-scoring approach:
@@ -447,6 +477,9 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 	}
 
 	toolCalls := 0
+	// impactFiles: files surfaced by get_impact's affected_files — high-confidence
+	// signal that these files are structurally connected to the problem entities.
+	impactFiles := make(map[string]bool)
 
 	// Pass 0 — session_init priming. Primes the daemon session and extracts
 	// entity/file hints from the bootstrap response (stale_context_hints,
@@ -473,7 +506,21 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 	}
 	toolCalls++
 
-	// Pass 2 — for each code entity: search (broad symbol lookup) + prepare_context
+	// Pass 1.5 — keyword search. Extract significant keywords from the problem
+	// statement and search for them. This widens coverage beyond backtick/CamelCase
+	// entities to catch domain terms (e.g. "artwork", "cache", "fallback").
+	keywords := extractKeywords(task.ProblemStatement, 3)
+	for _, kw := range keywords {
+		if toolCalls >= 6 {
+			break
+		}
+		if sr, err := sc.Search(task.InstanceID, kw); err == nil && sr.Text != "" {
+			collectSearchMentions(sr.Text, addMention)
+		}
+		toolCalls++
+	}
+
+	// Pass 2 — for each code entity: search (broad symbol lookup) + get_context
 	// (graph traversal) + get_impact (downstream effects).
 	// Entities come from problem statement + session_init/memory discoveries.
 	entities := extractEntitiesFromProblem(task.ProblemStatement)
@@ -501,15 +548,18 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		toolCalls++
 
 		// Graph traversal — finds callers, callees, related nodes.
-		if ctxR, err := sc.PrepareContext(task.InstanceID, entity, "investigate issue"); err == nil && ctxR.Text != "" {
-			collectMarkdownMentions(ctxR.Text, addMention)
-			followUpEntities = append(followUpEntities, extractEntitiesFromResponse(ctxR.Text)...)
+		// Use JSON format for structured file:line data instead of regex-parsing markdown.
+		if ctxJSON, err := sc.GetContextJSON(task.InstanceID, entity, "full"); err == nil && ctxJSON != "" {
+			collectContextJSONMentions(ctxJSON, addMention)
+			followUpEntities = append(followUpEntities, extractEntitiesFromResponse(ctxJSON)...)
 		}
 		toolCalls++
 
 		// Impact analysis — finds downstream affected symbols.
 		if impR, err := sc.GetImpact(task.InstanceID, entity); err == nil && impR.Text != "" {
 			collectImpactMentions(impR.Text, addMention)
+			// Collect affected_files as high-confidence file signals.
+			collectImpactAffectedFiles(impR.Text, repoPath, impactFiles)
 			// Also extract entity names from impact tiers for follow-up discovery.
 			followUpEntities = append(followUpEntities, extractEntitiesFromResponse(impR.Text)...)
 		}
@@ -617,23 +667,42 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 			entityStems[s] = true
 		}
 	}
+	// isUtilityFile detects constants, config, and generated files that accumulate
+	// many search mentions but rarely contain bug-fix context.
+	isUtilityFile := func(f string) bool {
+		base := strings.ToLower(filepath.Base(f))
+		stem := strings.TrimSuffix(base, filepath.Ext(base))
+		utilityNames := []string{"const", "consts", "constants", "config", "types",
+			"errors", "enums", "version", "generated", "init", "setup"}
+		for _, u := range utilityNames {
+			if stem == u {
+				return true
+			}
+		}
+		return false
+	}
+
 	// fileScore is defined at package level for use by buildRetrievedLines.
 	var scored []fileScore
 	for file, lines := range fileMentions {
 		score := len(lines)
-		// Filename-entity match bonus: if the file's basename (without extension)
-		// matches any entity, boost its score significantly. This helps when the
-		// entity "qdp" maps to qdp.py even though qdp.py has fewer mentions than
-		// generic files like table.py.
+
+		// Improvement 1: Impact-file boost. Files that get_impact identified as
+		// structurally affected get a strong score boost. These are files
+		// the dependency graph says are connected to the problem entities.
+		// The boost must be large enough to outrank high-mention noise files
+		// (e.g. lastfm/agent.go with 38 mentions from unrelated search hits).
+		if impactFiles[file] {
+			score += 40
+		}
+
+		// Filename-entity match bonus.
 		base := filepath.Base(file)
 		ext := filepath.Ext(base)
 		stem := strings.ToLower(strings.TrimSuffix(base, ext))
 		if entityStems[stem] {
-			score += 15 // strong boost for exact basename match
+			score += 15
 		} else {
-			// Check if any entity stem is a substring of the filename.
-			// Use the LONGEST match to prefer "sliced_wcs" matching
-			// "sliced_wcs" over "wcs" matching "sliced_wcs".
 			bestMatchLen := 0
 			for es := range entityStems {
 				if len(es) >= 4 && strings.Contains(stem, es) && len(es) > bestMatchLen {
@@ -641,7 +710,6 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 				}
 			}
 			if bestMatchLen > 0 {
-				// Scale boost by match length — longer matches are more specific.
 				boost := 5 + bestMatchLen
 				if boost > 15 {
 					boost = 15
@@ -649,6 +717,13 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 				score += boost
 			}
 		}
+
+		// Improvement 2: Utility-file penalty. Constants, config, and type-only
+		// files accumulate many search mentions but rarely contain fix context.
+		if isUtilityFile(file) {
+			score = score / 3
+		}
+
 		scored = append(scored, fileScore{file, score, isSourceFile(file), fileDepth(file)})
 	}
 	// Sort: primary = score desc, secondary = source files first, tertiary = depth desc.
@@ -666,17 +741,37 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 		}
 	}
 
-	// Pass 5 — get_file_context on top-scored files. Retrieves exact entity
-	// definition lines from the daemon, improving window centering precision.
-	// Run before window building so the injected lines influence block density.
-	for i, fs := range scored {
-		if i >= 3 || toolCalls >= 40 {
+	// Pass 5 — get_file_context on impact-discovered files. Instead of running
+	// on top-scored files (which may be noise like consts.go), we target files
+	// that get_impact identified as structurally affected. This gives exact
+	// entity definition lines for files the graph says matter.
+	// Fall back to top-scored files if no impact files were found.
+	pass5Files := make([]string, 0, 5)
+	for _, fs := range scored {
+		if impactFiles[fs.file] && len(pass5Files) < 5 {
+			pass5Files = append(pass5Files, fs.file)
+		}
+	}
+	if len(pass5Files) == 0 {
+		// Fallback: use top-scored files.
+		for i, fs := range scored {
+			if i >= 3 {
+				break
+			}
+			pass5Files = append(pass5Files, fs.file)
+		}
+	}
+	for _, file := range pass5Files {
+		if toolCalls >= 45 {
 			break
 		}
-		if fcr, err := sc.GetFileContext(task.InstanceID, fs.file); err == nil && fcr != nil {
-			for _, ent := range fcr.Entities {
-				if ent.Line > 0 {
-					addMention(fcr.File, ent.Line)
+		if fcr, err := sc.GetFileContext(task.InstanceID, file); err == nil && fcr != nil {
+			// Skip files with >30 entities (constants/generated).
+			if len(fcr.Entities) <= 30 {
+				for _, ent := range fcr.Entities {
+					if ent.Line > 0 {
+						addMention(fcr.File, ent.Line)
+					}
 				}
 			}
 		}
@@ -774,6 +869,40 @@ func runContextBenchTask(client *agent.SynapsesClient, task ContextBenchTask, ca
 	result.PAt500, result.RAt500, result.F1At500 = computeF1(retrieved500)
 	result.PAt1000, result.RAt1000, result.F1At1000 = computeF1(retrieved1000)
 
+	// File-level F1: did we find the right files (regardless of exact line hits)?
+	goldFileSet := make(map[string]bool)
+	for gl := range goldLines {
+		parts := strings.SplitN(gl, ":", 2)
+		if len(parts) == 2 {
+			goldFileSet[parts[0]] = true
+		}
+	}
+	retrievedFileSet := make(map[string]bool)
+	for rl := range retrieved500 {
+		parts := strings.SplitN(rl, ":", 2)
+		if len(parts) == 2 {
+			retrievedFileSet[parts[0]] = true
+		}
+	}
+	fileHits := 0
+	for f := range retrievedFileSet {
+		if goldFileSet[f] {
+			fileHits++
+		}
+	}
+	result.GoldFiles = len(goldFileSet)
+	result.RetrievedFiles = len(retrievedFileSet)
+	result.HitFiles = fileHits
+	if len(retrievedFileSet) > 0 {
+		result.FilePrecision = float64(fileHits) / float64(len(retrievedFileSet))
+	}
+	if len(goldFileSet) > 0 {
+		result.FileRecall = float64(fileHits) / float64(len(goldFileSet))
+	}
+	if result.FilePrecision+result.FileRecall > 0 {
+		result.FileF1 = 2 * result.FilePrecision * result.FileRecall / (result.FilePrecision + result.FileRecall)
+	}
+
 	// Token efficiency: estimate tokens as chars/4 (standard approximation for code).
 	result.TokensRetrieved = result.TotalLines * 40 / 4 // ~40 chars per line average
 	result.TokensGold = result.GoldLines * 40 / 4
@@ -801,8 +930,12 @@ type fileScore struct {
 // buildRetrievedLines builds a set of "file:line" keys from scored files using
 // density-sorted per-file windows, capped at maxLines total.
 func buildRetrievedLines(scored []fileScore, fileMentions map[string]map[int]bool, maxLines int) map[string]bool {
+	// Scale topFiles with budget: more budget → more files to cover.
+	topFiles := 8
+	if maxLines >= 1000 {
+		topFiles = 12
+	}
 	const (
-		topFiles     = 8
 		windowBefore = 5
 		windowAfter  = 60
 		mergeGap     = 10
@@ -1002,9 +1135,77 @@ func ensureRepoAtCommit(task ContextBenchTask, cache *indexer.Cache, opts Contex
 		repoPath = real
 	}
 
+	// Wait for the daemon to finish indexing. `synapses index` registers the
+	// project but parsing is async — tools return empty until the graph is built.
+	if !opts.SkipIndex {
+		fmt.Printf("  waiting for index to be ready ...\n")
+		searchURL := fmt.Sprintf("http://127.0.0.1:11435/v1/tools/search?project=%s",
+			url.QueryEscape(repoPath))
+		for attempt := 0; attempt < 150; attempt++ {
+			time.Sleep(2 * time.Second)
+			body := strings.NewReader(`{"query":"function"}`)
+			resp, err := http.Post(searchURL, "application/json", body)
+			if err != nil {
+				continue
+			}
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == 200 && len(respBody) > 100 {
+				fmt.Printf("  index ready (attempt %d)\n", attempt+1)
+				break
+			}
+			if attempt%15 == 14 {
+				fmt.Printf("  still waiting for index... (attempt %d)\n", attempt+1)
+			}
+		}
+	}
+
 	// Cache for reuse.
 	_ = cache.Set(cacheKey, repoPath)
 	return repoPath, nil
+}
+
+func countUniqueRepos(tasks []ContextBenchTask) int {
+	seen := make(map[string]bool)
+	for _, t := range tasks {
+		seen[t.Repo] = true
+	}
+	return len(seen)
+}
+
+// restartDaemon restarts the Synapses daemon to free memory between repo groups.
+func restartDaemon(opts ContextBenchOptions) {
+	synapsesBin := opts.SynapsesBin
+	if synapsesBin == "" {
+		synapsesBin = detectSynapsesBinPath()
+	}
+
+	// Stop the daemon gracefully.
+	stop := exec.Command(synapsesBin, "stop")
+	stop.Env = os.Environ()
+	_ = stop.Run()
+	time.Sleep(2 * time.Second)
+
+	// Start the daemon again in background via daemon serve.
+	start := exec.Command(synapsesBin, "daemon", "serve")
+	start.Env = os.Environ()
+	start.Stdout = nil
+	start.Stderr = nil
+	_ = start.Start() // non-blocking
+
+	// Wait for the daemon to be ready.
+	for attempt := 0; attempt < 30; attempt++ {
+		time.Sleep(time.Second)
+		resp, err := http.Get("http://127.0.0.1:11435/v1/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				fmt.Printf("[contextbench] daemon restarted\n")
+				return
+			}
+		}
+	}
+	fmt.Printf("[contextbench] WARNING: daemon restart may have failed\n")
 }
 
 func minInt(a, b int) int {
@@ -1038,9 +1239,41 @@ func detectSynapsesBinPath() string {
 // (file, line) pair found. Windowing and merging happen later in the scoring
 // phase, not here — keeping raw line numbers maximises scoring accuracy.
 
+// extractFirstJSON extracts the first JSON object from text that may contain
+// trailing non-JSON content (e.g. suggested_next_tools appended by the daemon).
+// The daemon's MCP response has multiple text blocks that extractText() concatenates.
+func extractFirstJSON(text string) string {
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return text
+	}
+	// Find the matching closing brace by counting depth.
+	depth := 0
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return text[start : i+1]
+			}
+		case '"':
+			// Skip string contents to avoid counting braces inside strings.
+			for i++; i < len(text) && text[i] != '"'; i++ {
+				if text[i] == '\\' {
+					i++ // skip escaped char
+				}
+			}
+		}
+	}
+	return text[start:] // unclosed — return from first brace
+}
+
 // collectSearchMentions parses the search tool JSON response.
 // Format: {"results": [{"file": "...", "line": N, ...}]}
 func collectSearchMentions(text string, addMention func(string, int)) {
+	text = extractFirstJSON(text)
 	var resp struct {
 		Results []struct {
 			File string `json:"file"`
@@ -1060,6 +1293,7 @@ func collectSearchMentions(text string, addMention func(string, int)) {
 // collectImpactMentions parses the get_impact tool JSON response.
 // Format: {"tiers": [{"nodes": [{"file":"...", "line": N}], ...}]}
 func collectImpactMentions(text string, addMention func(string, int)) {
+	text = extractFirstJSON(text)
 	var resp struct {
 		Tiers []struct {
 			Nodes []struct {
@@ -1083,6 +1317,109 @@ func collectImpactMentions(text string, addMention func(string, int)) {
 	for _, f := range resp.AffectedFiles {
 		if f != "" {
 			addMention(f, 1)
+		}
+	}
+}
+
+// contextJSONItem wraps a node reference from the get_context JSON response.
+// The actual data is nested: {"node": {"file": "...", "line": N, "name": "..."}, ...}
+type contextJSONItem struct {
+	Node struct {
+		File string `json:"file"`
+		Line int    `json:"line"`
+		Name string `json:"name"`
+	} `json:"node"`
+}
+
+// collectContextJSONMentions parses the get_context JSON response.
+// Extracts file:line from root entity, callers, callees, related arrays.
+func collectContextJSONMentions(text string, addMention func(string, int)) {
+	text = extractFirstJSON(text)
+	var resp struct {
+		Root struct {
+			File string `json:"file"`
+			Line int    `json:"line"`
+		} `json:"root"`
+		Callers     []contextJSONItem `json:"callers"`
+		Callees     []contextJSONItem `json:"callees"`
+		Related     []contextJSONItem `json:"related"`
+		Imports     []contextJSONItem `json:"imports"`
+		CrossDomain []contextJSONItem `json:"cross_domain"`
+	}
+	if json.Unmarshal([]byte(text), &resp) != nil {
+		// Fall back to markdown parsing if JSON fails.
+		collectMarkdownMentions(text, addMention)
+		return
+	}
+	// Add the root entity itself.
+	if resp.Root.File != "" && resp.Root.Line > 0 {
+		addMention(resp.Root.File, resp.Root.Line)
+	}
+	// Add all related entities.
+	allItems := make([]contextJSONItem, 0, len(resp.Callers)+len(resp.Callees)+len(resp.Related)+len(resp.Imports)+len(resp.CrossDomain))
+	allItems = append(allItems, resp.Callers...)
+	allItems = append(allItems, resp.Callees...)
+	allItems = append(allItems, resp.Related...)
+	allItems = append(allItems, resp.Imports...)
+	allItems = append(allItems, resp.CrossDomain...)
+	for _, item := range allItems {
+		if item.Node.File != "" && item.Node.Line > 0 {
+			addMention(item.Node.File, item.Node.Line)
+		}
+	}
+}
+
+// collectImpactAffectedFiles extracts affected files from a get_impact response,
+// using the affected_files array. Each file gets a score proportional to how
+// many tier nodes reference it (files appearing in multiple tiers are higher confidence).
+func collectImpactAffectedFiles(text string, repoPath string, impactFiles map[string]bool) {
+	text = extractFirstJSON(text)
+	var resp struct {
+		Tiers []struct {
+			Nodes []struct {
+				File string `json:"file"`
+			} `json:"nodes"`
+		} `json:"tiers"`
+		AffectedFiles []string `json:"affected_files"`
+	}
+	if json.Unmarshal([]byte(text), &resp) != nil {
+		return
+	}
+
+	normalize := func(f string) string {
+		if strings.HasPrefix(f, "/") && repoPath != "" {
+			for _, prefix := range []string{repoPath + "/", repoPath} {
+				if strings.HasPrefix(f, prefix) {
+					return f[len(prefix):]
+				}
+			}
+		}
+		return f
+	}
+
+	// Count how many tier nodes reference each file.
+	fileTierCount := make(map[string]int)
+	for _, tier := range resp.Tiers {
+		for _, n := range tier.Nodes {
+			if n.File != "" {
+				fileTierCount[normalize(n.File)]++
+			}
+		}
+	}
+
+	// Files with 2+ tier node references are high-confidence direct dependencies.
+	// Files with 1 reference are still relevant but less certain.
+	// affected_files not in any tier are the weakest signal.
+	for _, f := range resp.AffectedFiles {
+		f = normalize(f)
+		if f != "" && fileTierCount[f] >= 1 {
+			impactFiles[f] = true
+		}
+	}
+	// Also add files with 2+ tier references even if not in affected_files.
+	for f, count := range fileTierCount {
+		if count >= 2 {
+			impactFiles[f] = true
 		}
 	}
 }
