@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -614,18 +615,72 @@ func (s *Server) handleSearch(
 		Name      string `json:"name"`
 		File      string `json:"file"`
 		Line      int    `json:"line"`
+		EndLine   int    `json:"end_line,omitempty"`
 		Doc       string `json:"doc,omitempty"`
 		Signature string `json:"signature,omitempty"`
+		Source    string `json:"source,omitempty"`
 	}
+
+	// Source snippet injection: read entity bodies inline so the LLM
+	// doesn't need a separate Read call. Cap at 15 lines per snippet.
+	const snippetLines = 15
+	// Resolve project root for source snippet extraction.
+	repoRoot := s.graph.Root()
+	if repoRoot == "" {
+		repoRoot = s.projectPath
+	}
+	if repoRoot == "" {
+		repoRoot = s.getProjectRoot()
+	}
+	srcCache := newSourceCache(repoRoot)
+
+	// Build per-file node lists for end-line computation.
+	fileNodes := make(map[string][]*graph.Node)
+	for _, h := range hits {
+		rel := strings.TrimPrefix(h.node.File, prefix)
+		fileNodes[rel] = append(fileNodes[rel], h.node)
+	}
+	// Add neighboring nodes from the graph for better end-line estimates.
+	for file := range fileNodes {
+		for _, n := range s.graph.FindByFile(file) {
+			fileNodes[file] = append(fileNodes[file], n)
+		}
+		sort.Slice(fileNodes[file], func(i, j int) bool {
+			return fileNodes[file][i].Line < fileNodes[file][j].Line
+		})
+	}
+
 	results := make([]result, len(hits))
 	for i, h := range hits {
+		rel := strings.TrimPrefix(h.node.File, prefix)
+
+		// Compute end line from neighboring nodes.
+		lineCount, _ := strconv.Atoi(h.node.Metadata["line_count"])
+		nextStart := 0
+		for _, fn := range fileNodes[rel] {
+			if fn.Line > h.node.Line {
+				nextStart = fn.Line
+				break
+			}
+		}
+		fileTotal := srcCache.TotalLines(rel)
+		endLine := computeEndLine(h.node.Line, nextStart, lineCount, fileTotal)
+
+		// Cap snippet at snippetLines.
+		snippetEnd := endLine
+		if snippetEnd-h.node.Line+1 > snippetLines {
+			snippetEnd = h.node.Line + snippetLines - 1
+		}
+
 		results[i] = result{
 			Type:      string(h.node.Type),
 			Name:      h.node.Name,
-			File:      strings.TrimPrefix(h.node.File, prefix),
+			File:      rel,
 			Line:      h.node.Line,
+			EndLine:   endLine,
 			Doc:       h.node.Metadata["doc"],
 			Signature: h.node.Metadata["signature"],
+			Source:    srcCache.Extract(rel, h.node.Line, snippetEnd),
 		}
 	}
 
@@ -740,84 +795,166 @@ func (s *Server) handleGetCallChain(
 		return jsonResult(resp)
 	}
 
-	// BFS following CALLS + HANDLES edges (forward) and IMPLEMENTS edges (both
-	// directions). HANDLES edges allow traversal through framework routing
-	// registrations (R1): setupFn --CALLS--> routeNode --HANDLES--> handlerFn.
-	// IMPLEMENTS edges are traversed bidirectionally so the search can cross
-	// interface boundaries: struct → interface (forward) and interface → struct
-	// (backward), enabling chains like: Caller → ConcreteType → Interface or
-	// Caller → Interface → ConcreteImplementation.
-	prev := map[graph.NodeID]graph.NodeID{fromNode.ID: ""}
-	// viaImpl tracks which steps in the chain crossed an IMPLEMENTS boundary.
-	viaImpl := make(map[graph.NodeID]bool)
-	// viaHandles tracks which steps crossed a synthetic HANDLES boundary (R1).
-	viaHandles := make(map[graph.NodeID]bool)
-	// Single queue carries both the node ID and hop distance — no parallel slice needed.
+	// Sprint 28: Bidirectional BFS — search from both endpoints simultaneously.
+	// This doubles effective reach within the same hop limit and finds paths
+	// that unidirectional BFS misses when the graph is sparse or asymmetric.
+	//
+	// Forward BFS from `from` follows outgoing CALLS/HANDLES/IMPLEMENTS edges.
+	// Backward BFS from `to` follows incoming CALLS/HANDLES edges (reverse callers).
+	// Both directions follow IMPLEMENTS bidirectionally.
+
 	type bfsEntry struct {
 		id  graph.NodeID
 		hop int
 	}
-	const maxBFSHops = 30 // prevent full-graph traversal on dense graphs
-	queue := []bfsEntry{{fromNode.ID, 0}}
+	const maxBFSHops = 15 // per-direction (30 total reach with bidirectional)
+
+	// Forward search state (from→to).
+	fwdPrev := map[graph.NodeID]graph.NodeID{fromNode.ID: ""}
+	fwdQueue := []bfsEntry{{fromNode.ID, 0}}
+	// Backward search state (to→from).
+	bwdPrev := map[graph.NodeID]graph.NodeID{toNode.ID: ""}
+	bwdQueue := []bfsEntry{{toNode.ID, 0}}
+
+	viaImpl := make(map[graph.NodeID]bool)
+	viaHandles := make(map[graph.NodeID]bool)
+
+	var meetNode graph.NodeID // node where forward and backward searches meet
 	found := false
-	// closestReachable tracks the deepest node reached (by hop count from root).
-	// Used in the not-found response to show agents where the static graph ends.
 	var closestReachableID graph.NodeID
 	maxHop := 0
 
-	for len(queue) > 0 && !found {
-		curr := queue[0]
-		queue = queue[1:]
+	// isCallChainEdge returns true for edge types valid in call chain traversal.
+	isCallChainEdge := func(et graph.EdgeType) bool {
+		return et == graph.EdgeCalls || et == graph.EdgeImplements || et == graph.EdgeHandles
+	}
 
-		if curr.hop >= maxBFSHops {
-			continue
+	// expandForward processes one level of forward BFS.
+	expandForward := func() {
+		if len(fwdQueue) == 0 || found {
+			return
 		}
-
+		curr := fwdQueue[0]
+		fwdQueue = fwdQueue[1:]
+		if curr.hop >= maxBFSHops {
+			return
+		}
 		if curr.hop > maxHop {
 			maxHop = curr.hop
 			closestReachableID = curr.id
 		}
-
-		// Forward edges: CALLS, HANDLES, and IMPLEMENTS (concrete → interface).
+		// Outgoing: CALLS, HANDLES, IMPLEMENTS.
 		for _, e := range s.graph.OutEdges(curr.id) {
-			if e.Type != graph.EdgeCalls && e.Type != graph.EdgeImplements && e.Type != graph.EdgeHandles {
+			if !isCallChainEdge(e.Type) {
 				continue
 			}
-			if _, visited := prev[e.To]; visited {
+			if _, visited := fwdPrev[e.To]; visited {
 				continue
 			}
-			prev[e.To] = curr.id
+			fwdPrev[e.To] = curr.id
 			if e.Type == graph.EdgeImplements {
 				viaImpl[e.To] = true
 			}
 			if e.Type == graph.EdgeHandles {
 				viaHandles[e.To] = true
 			}
-			if e.To == toNode.ID {
+			if _, inBwd := bwdPrev[e.To]; inBwd {
+				meetNode = e.To
 				found = true
-				break
+				return
 			}
-			queue = append(queue, bfsEntry{e.To, curr.hop + 1})
+			fwdQueue = append(fwdQueue, bfsEntry{e.To, curr.hop + 1})
 		}
-		if found {
-			break
-		}
-
-		// Backward IMPLEMENTS edges (interface → concrete struct).
+		// Backward IMPLEMENTS (interface → concrete).
 		for _, e := range s.graph.InEdges(curr.id) {
 			if e.Type != graph.EdgeImplements {
 				continue
 			}
-			if _, visited := prev[e.From]; visited {
+			if _, visited := fwdPrev[e.From]; visited {
 				continue
 			}
-			prev[e.From] = curr.id
+			fwdPrev[e.From] = curr.id
 			viaImpl[e.From] = true
-			if e.From == toNode.ID {
+			if _, inBwd := bwdPrev[e.From]; inBwd {
+				meetNode = e.From
 				found = true
+				return
+			}
+			fwdQueue = append(fwdQueue, bfsEntry{e.From, curr.hop + 1})
+		}
+	}
+
+	// expandBackward processes one level of backward BFS (reverse callers).
+	expandBackward := func() {
+		if len(bwdQueue) == 0 || found {
+			return
+		}
+		curr := bwdQueue[0]
+		bwdQueue = bwdQueue[1:]
+		if curr.hop >= maxBFSHops {
+			return
+		}
+		// Incoming: CALLS, HANDLES (who calls/handles this node).
+		for _, e := range s.graph.InEdges(curr.id) {
+			if !isCallChainEdge(e.Type) {
+				continue
+			}
+			if _, visited := bwdPrev[e.From]; visited {
+				continue
+			}
+			bwdPrev[e.From] = curr.id
+			if e.Type == graph.EdgeImplements {
+				viaImpl[e.From] = true
+			}
+			if e.Type == graph.EdgeHandles {
+				viaHandles[e.From] = true
+			}
+			if _, inFwd := fwdPrev[e.From]; inFwd {
+				meetNode = e.From
+				found = true
+				return
+			}
+			bwdQueue = append(bwdQueue, bfsEntry{e.From, curr.hop + 1})
+		}
+		// Forward IMPLEMENTS from backward direction.
+		for _, e := range s.graph.OutEdges(curr.id) {
+			if e.Type != graph.EdgeImplements {
+				continue
+			}
+			if _, visited := bwdPrev[e.To]; visited {
+				continue
+			}
+			bwdPrev[e.To] = curr.id
+			viaImpl[e.To] = true
+			if _, inFwd := fwdPrev[e.To]; inFwd {
+				meetNode = e.To
+				found = true
+				return
+			}
+			bwdQueue = append(bwdQueue, bfsEntry{e.To, curr.hop + 1})
+		}
+	}
+
+	// Alternate between forward and backward expansion.
+	for !found && (len(fwdQueue) > 0 || len(bwdQueue) > 0) {
+		expandForward()
+		if !found {
+			expandBackward()
+		}
+	}
+
+	// Reconstruct prev map for path building: merge fwd and bwd paths through meetNode.
+	prev := fwdPrev
+	if found && meetNode != "" {
+		// Build backward chain from meetNode to toNode and append to prev.
+		curr := meetNode
+		for curr != toNode.ID {
+			next := bwdPrev[curr]
+			if next == "" {
 				break
 			}
-			queue = append(queue, bfsEntry{e.From, curr.hop + 1})
+			prev[next] = curr
+			curr = next
 		}
 	}
 

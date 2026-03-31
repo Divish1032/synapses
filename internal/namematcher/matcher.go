@@ -251,10 +251,14 @@ func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store,
 					continue
 				}
 
-				// Create MENTIONS edge from code→api→infra→docs (heavier domain first).
+				// Sprint 28: classify cross-domain edge type based on the
+				// non-code node's domain instead of always using MENTIONS.
+				// This enables get_context to populate specific cross-domain
+				// buckets (deploys, consumes, configured_by, documented_in).
 				from, to := orderEdge(a.node, b.node)
+				edgeType := classifyCrossDomainEdge(a.node, b.node)
 
-				me, err := st.SaveSyntheticEdge(from.ID, to.ID, graph.EdgeMentions, conf)
+				me, err := st.SaveSyntheticEdge(from.ID, to.ID, edgeType, conf)
 				if err != nil {
 					logutil.Warn("synapses/namematcher: persist edge %s→%s: %v\n", from.ID, to.ID, err)
 					continue
@@ -264,7 +268,7 @@ func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store,
 				if me.Suppressed {
 					continue
 				}
-				g.AddEdge(&graph.Edge{From: from.ID, To: to.ID, Type: graph.EdgeMentions})
+				g.AddEdge(&graph.Edge{From: from.ID, To: to.ID, Type: edgeType})
 				created++
 			}
 		}
@@ -272,6 +276,42 @@ func (m *Matcher) RunAsync(ctx context.Context, g *graph.Graph, st *store.Store,
 
 	if created > 0 {
 		logutil.Info("synapses/namematcher: created %d MENTIONS edges\n", created)
+	}
+}
+
+// classifyCrossDomainEdge determines the specific edge type for a cross-domain
+// name match based on the non-code node's domain. Falls back to EdgeMentions.
+func classifyCrossDomainEdge(a, b *graph.Node) graph.EdgeType {
+	// Determine which node is the non-code node.
+	nonCode := b
+	if a.Domain != graph.DomainCode && a.Domain != "" {
+		nonCode = a
+	}
+
+	switch nonCode.Domain {
+	case graph.DomainInfra:
+		// Infrastructure files (Terraform, K8s, Docker, CI) → EdgeConfiguredBy or EdgeDeploys.
+		// Heuristic: Dockerfile/K8s manifests deploy code; Terraform/config configures it.
+		ext := strings.ToLower(filepath.Ext(nonCode.File))
+		base := strings.ToLower(filepath.Base(nonCode.File))
+		if strings.Contains(base, "dockerfile") || strings.Contains(base, "docker-compose") ||
+			ext == ".yaml" || ext == ".yml" {
+			// Check if it's a K8s/deploy manifest vs general config.
+			if strings.Contains(base, "deploy") || strings.Contains(base, "kube") ||
+				strings.Contains(base, "k8s") || strings.Contains(base, "docker") ||
+				strings.Contains(base, "helm") {
+				return graph.EdgeDeploys
+			}
+		}
+		return graph.EdgeConfiguredBy
+	case graph.DomainAPI:
+		// API schema files (OpenAPI, GraphQL, protobuf) → EdgeConsumes.
+		return graph.EdgeConsumes
+	case graph.DomainDocs:
+		// Documentation files → EdgeDocuments (which routes to documented_in bucket).
+		return graph.EdgeDocuments
+	default:
+		return graph.EdgeMentions
 	}
 }
 

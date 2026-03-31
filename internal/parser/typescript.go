@@ -514,6 +514,9 @@ func (p *TypeScriptParser) extractDeclarations(
 	// --- Call sites ---
 	collectTSCallSites(g, lang, root, src, filePath, fileNodeID)
 
+	// --- Variable type extraction (Sprint 28) ---
+	collectTSVarTypes(g, root, src, filePath)
+
 	return nil
 }
 
@@ -937,6 +940,148 @@ func extractTSTypeIdentifier(typeAnnotation sitter.Node, src []byte) string {
 		return ""
 	}
 	return find(typeAnnotation)
+}
+
+// collectTSVarTypes extracts variable → type mappings from TypeScript/JavaScript AST.
+// Enables the resolver to resolve obj.method() calls when obj has a known type.
+//
+// Patterns extracted:
+//  1. Variable declarations with type annotations: const x: Type = ...
+//  2. Variable declarations with new expressions: const x = new Type()
+//  3. Function/method parameters with type annotations: function f(x: Type)
+//  4. Class field definitions: private repo: Repository
+//  5. Constructor shorthand parameters: constructor(private auth: AuthService)
+func collectTSVarTypes(g *graph.Graph, root sitter.Node, src []byte, filePath string) {
+	var walk func(n sitter.Node, enclosingClass string)
+	walk = func(n sitter.Node, enclosingClass string) {
+		if n.IsNull() {
+			return
+		}
+		nt := nodeType(n)
+
+		// Track class context for "this.x" qualified var types.
+		if nt == "class_declaration" || nt == "class" {
+			className := ""
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
+				className = string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+			if className != "" {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					walk(n.Child(i), className)
+				}
+				return
+			}
+		}
+
+		switch nt {
+		case "variable_declarator":
+			// const x: Type = ... OR const x = new Type()
+			nameNode := n.ChildByFieldName("name")
+			if nameNode.IsNull() || nodeType(nameNode) != "identifier" {
+				break
+			}
+			varName := string(src[nameNode.StartByte():nameNode.EndByte()])
+
+			// Try type annotation first.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if !child.IsNull() && nodeType(child) == "type_annotation" {
+					typeName := extractTSTypeIdentifier(child, src)
+					if typeName != "" && !isTSBuiltin(typeName) {
+						g.AddVarType(filePath, varName, typeName)
+						break
+					}
+				}
+			}
+
+			// Fallback: infer from new_expression (const x = new Router()).
+			valueNode := n.ChildByFieldName("value")
+			if !valueNode.IsNull() && nodeType(valueNode) == "new_expression" {
+				ctorNode := valueNode.ChildByFieldName("constructor")
+				if ctorNode.IsNull() {
+					// Try first identifier child.
+					for i := uint32(0); i < valueNode.ChildCount(); i++ {
+						child := valueNode.Child(i)
+						if !child.IsNull() && nodeType(child) == "identifier" {
+							ctorNode = child
+							break
+						}
+					}
+				}
+				if !ctorNode.IsNull() {
+					ctorName := string(src[ctorNode.StartByte():ctorNode.EndByte()])
+					if ctorName != "" && !isTSBuiltin(ctorName) && ctorName[0] >= 'A' && ctorName[0] <= 'Z' {
+						g.AddVarType(filePath, varName, ctorName)
+					}
+				}
+			}
+
+			// Fallback: infer from uppercase call expression (const app = Express()).
+			if !valueNode.IsNull() && nodeType(valueNode) == "call_expression" {
+				fnNode := valueNode.ChildByFieldName("function")
+				if !fnNode.IsNull() && nodeType(fnNode) == "identifier" {
+					fnName := string(src[fnNode.StartByte():fnNode.EndByte()])
+					if fnName != "" && !isTSBuiltin(fnName) && fnName[0] >= 'A' && fnName[0] <= 'Z' {
+						g.AddVarType(filePath, varName, fnName)
+					}
+				}
+			}
+
+		case "required_parameter", "optional_parameter":
+			// function f(x: Type) or method(x: Type)
+			nameNode := n.ChildByFieldName("pattern")
+			if nameNode.IsNull() {
+				// Try direct identifier child.
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					child := n.Child(i)
+					if !child.IsNull() && nodeType(child) == "identifier" {
+						nameNode = child
+						break
+					}
+				}
+			}
+			if nameNode.IsNull() {
+				break
+			}
+			varName := string(src[nameNode.StartByte():nameNode.EndByte()])
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if !child.IsNull() && nodeType(child) == "type_annotation" {
+					typeName := extractTSTypeIdentifier(child, src)
+					if typeName != "" && !isTSBuiltin(typeName) {
+						g.AddVarType(filePath, varName, typeName)
+					}
+					break
+				}
+			}
+
+		case "public_field_definition":
+			// class Foo { private repo: Repository }
+			var propName string
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if !child.IsNull() && nodeType(child) == "property_identifier" {
+					propName = string(src[child.StartByte():child.EndByte()])
+				}
+				if !child.IsNull() && nodeType(child) == "type_annotation" && propName != "" {
+					typeName := extractTSTypeIdentifier(child, src)
+					if typeName != "" && !isTSBuiltin(typeName) {
+						// Store as "this.prop" for resolver's self/this resolution path.
+						if enclosingClass != "" {
+							g.AddVarType(filePath, "this."+propName, typeName)
+						}
+						g.AddVarType(filePath, propName, typeName)
+					}
+					break
+				}
+			}
+		}
+
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), enclosingClass)
+		}
+	}
+	walk(root, "")
 }
 
 // collectTSCallSites performs a depth-first AST walk to collect call sites with

@@ -263,7 +263,8 @@ func TestRunAsync_CreatesEdge(t *testing.T) {
 	g := graph.New("test-repo")
 	st := openTestStore(t)
 
-	// Exact cross-domain match — should create MENTIONS edge
+	// Exact cross-domain match — should create a classified edge.
+	// Sprint 28: infra-domain nodes get EdgeConfiguredBy instead of EdgeMentions.
 	n1 := makeNode("code:PaymentService:1", "PaymentService", graph.DomainCode, graph.NodeStruct, "/src/payment.go")
 	n2 := makeNode("infra:PaymentService:1", "PaymentService", graph.DomainInfra, "resource", "/infra/payment.tf")
 	g.AddNode(n1)
@@ -279,8 +280,8 @@ func TestRunAsync_CreatesEdge(t *testing.T) {
 		t.Fatalf("expected 1 edge, got %d", len(edges))
 	}
 	e := edges[0]
-	if e.Relation != string(graph.EdgeMentions) {
-		t.Errorf("expected relation MENTIONS, got %s", e.Relation)
+	if e.Relation != string(graph.EdgeConfiguredBy) {
+		t.Errorf("expected relation CONFIGURED_BY, got %s", e.Relation)
 	}
 	if e.Confidence < minConfidence {
 		t.Errorf("expected confidence >= %v, got %v", minConfidence, e.Confidence)
@@ -487,8 +488,11 @@ func TestRunAsync_ConfirmedEdgeConfidenceNotDowngraded(t *testing.T) {
 	m.running.Store(0)
 	m.RunAsync(context.Background(), g, st, nil)
 
+	// Sprint 28: infra nodes now get EdgeConfiguredBy.
+	edgeType := graph.EdgeConfiguredBy
+
 	// Simulate human confirmation (confidence=1.0).
-	if err := st.ConfirmEdge(n1.ID, n2.ID, string(graph.EdgeMentions), true); err != nil {
+	if err := st.ConfirmEdge(n1.ID, n2.ID, string(edgeType), true); err != nil {
 		t.Fatalf("ConfirmEdge: %v", err)
 	}
 
@@ -501,7 +505,7 @@ func TestRunAsync_ConfirmedEdgeConfidenceNotDowngraded(t *testing.T) {
 		t.Fatalf("LoadManualEdges: %v", err)
 	}
 	for _, e := range edges {
-		if e.FromID == n1.ID && e.ToID == n2.ID && e.Relation == string(graph.EdgeMentions) {
+		if e.FromID == n1.ID && e.ToID == n2.ID && e.Relation == string(edgeType) {
 			if e.Confidence != 1.0 {
 				t.Errorf("confirmed edge confidence was downgraded to %v after re-run — must stay 1.0", e.Confidence)
 			}
@@ -511,7 +515,7 @@ func TestRunAsync_ConfirmedEdgeConfidenceNotDowngraded(t *testing.T) {
 			return
 		}
 	}
-	t.Error("MENTIONS edge not found after second run")
+	t.Errorf("%s edge not found after second run", edgeType)
 }
 
 // TestRunAsync_SuppressedEdgeNotReinjected verifies that when a MENTIONS edge has
@@ -527,26 +531,29 @@ func TestRunAsync_SuppressedEdgeNotReinjected(t *testing.T) {
 	g.AddNode(n1)
 	g.AddNode(n2)
 
-	// First run: matcher creates the MENTIONS edge.
+	// Sprint 28: infra nodes now get EdgeConfiguredBy.
+	edgeType := graph.EdgeConfiguredBy
+
+	// First run: matcher creates the classified edge.
 	m.running.Store(0) // reset so RunAsync can proceed
 	m.RunAsync(context.Background(), g, st, nil)
 
-	if !g.HasEdge(n1.ID, n2.ID, graph.EdgeMentions) {
-		t.Fatal("expected MENTIONS edge after first run")
+	if !g.HasEdge(n1.ID, n2.ID, edgeType) {
+		t.Fatalf("expected %s edge after first run", edgeType)
 	}
 
 	// Simulate human rejection: suppress the edge in the store and remove from graph.
-	if err := st.ConfirmEdge(n1.ID, n2.ID, string(graph.EdgeMentions), false); err != nil {
+	if err := st.ConfirmEdge(n1.ID, n2.ID, string(edgeType), false); err != nil {
 		t.Fatalf("ConfirmEdge(suppress): %v", err)
 	}
-	g.RemoveEdge(n1.ID, n2.ID, graph.EdgeMentions)
+	g.RemoveEdge(n1.ID, n2.ID, edgeType)
 
 	// Second run: matcher must not re-inject the suppressed edge.
 	m.running.Store(0)
 	m.RunAsync(context.Background(), g, st, nil)
 
-	if g.HasEdge(n1.ID, n2.ID, graph.EdgeMentions) {
-		t.Error("suppressed MENTIONS edge was re-injected into live graph — confirm_edge rejection must be respected")
+	if g.HasEdge(n1.ID, n2.ID, edgeType) {
+		t.Errorf("suppressed %s edge was re-injected into live graph — confirm_edge rejection must be respected", edgeType)
 	}
 
 	// The edge must still exist in the store (for audit trail) but remain suppressed.
@@ -556,7 +563,7 @@ func TestRunAsync_SuppressedEdgeNotReinjected(t *testing.T) {
 	}
 	found := false
 	for _, e := range edges {
-		if e.FromID == n1.ID && e.ToID == n2.ID && e.Relation == string(graph.EdgeMentions) {
+		if e.FromID == n1.ID && e.ToID == n2.ID && e.Relation == string(edgeType) {
 			found = true
 			if !e.Suppressed {
 				t.Error("edge should remain suppressed in store after second matcher run")

@@ -86,6 +86,14 @@ func ResolveCallEdges(g *graph.Graph) int {
 			site.PkgAlias = site.PkgAlias[strings.IndexByte(site.PkgAlias, '.')+1:]
 		}
 
+		// Sprint 28: normalize C++ scope operator (::) to dot notation.
+		// C++ call sites extract scopes like "Namespace::" or "Foo::" but the
+		// method index uses dot notation ("Namespace.method", "Foo.method").
+		if strings.Contains(site.PkgAlias, "::") {
+			site.PkgAlias = strings.TrimSuffix(site.PkgAlias, "::")
+			site.PkgAlias = strings.ReplaceAll(site.PkgAlias, "::", ".")
+		}
+
 		// Self/this intra-class resolution: self.method() or this.method()
 		// When PkgAlias is "self" or "this", extract the class name from the
 		// caller's node name (e.g., "View.dispatch" → class "View") and look

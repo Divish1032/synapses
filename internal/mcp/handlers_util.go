@@ -333,3 +333,79 @@ func looksLikeFilePath(q string) bool {
 	}
 	return false
 }
+
+// isLikelyExternalImport classifies an import package name as external (stdlib,
+// third-party) or internal (project-relative). Uses name pattern heuristics:
+//
+//   - Relative paths (".", "..", "./utils", "../config") → internal
+//   - Single lowercase words matching common internal module patterns → internal
+//   - Go stdlib paths (no dots, e.g. "fmt", "net/http") → external
+//   - Go third-party (contains dots: "github.com/...") → external
+//   - Python stdlib names → external
+//   - Node.js builtins → external
+//   - Package names with dots (e.g. "werkzeug.serving") → external
+//   - Default → external (conservative: assume unknown packages are third-party)
+func isLikelyExternalImport(name string) bool {
+	if name == "" {
+		return false
+	}
+	// Relative paths are always internal.
+	if name[0] == '.' || strings.HasPrefix(name, "./") || strings.HasPrefix(name, "../") {
+		return false
+	}
+	// Go-style: paths with dots are third-party (github.com/...).
+	if strings.Contains(name, "/") && strings.Contains(name, ".") {
+		return true
+	}
+	// Go stdlib: paths without dots (fmt, net/http, encoding/json).
+	if strings.Contains(name, "/") && !strings.Contains(name, ".") {
+		return true // Go stdlib or internal Go package — treat as external for graph purposes
+	}
+	// Python-style: names with dots like "werkzeug.serving" are external packages.
+	if strings.Contains(name, ".") {
+		return true
+	}
+	// Known stdlib/builtin names across languages.
+	return knownExternalPackages[strings.ToLower(name)]
+}
+
+// knownExternalPackages is a set of well-known stdlib and third-party package names
+// that should be classified as external imports.
+var knownExternalPackages = map[string]bool{
+	// Python stdlib
+	"os": true, "sys": true, "json": true, "re": true, "math": true,
+	"typing": true, "logging": true, "datetime": true, "collections": true,
+	"functools": true, "itertools": true, "pathlib": true, "io": true,
+	"abc": true, "copy": true, "enum": true, "dataclasses": true,
+	"hashlib": true, "hmac": true, "secrets": true, "base64": true,
+	"urllib": true, "http": true, "socket": true, "ssl": true,
+	"asyncio": true, "threading": true, "multiprocessing": true,
+	"unittest": true, "pytest": true, "doctest": true,
+	"inspect": true, "traceback": true, "warnings": true,
+	"pickle": true, "shelve": true, "sqlite3": true,
+	"csv": true, "xml": true, "html": true, "email": true,
+	"time": true, "calendar": true, "locale": true,
+	"struct": true, "codecs": true, "unicodedata": true,
+	"textwrap": true, "string": true, "difflib": true,
+	"contextlib": true, "weakref": true, "types": true,
+	// Popular Python third-party
+	"flask": true, "django": true, "fastapi": true, "requests": true,
+	"werkzeug": true, "click": true, "jinja2": true, "sqlalchemy": true,
+	"numpy": true, "pandas": true, "scipy": true, "matplotlib": true,
+	"pydantic": true, "starlette": true, "uvicorn": true, "celery": true,
+	// Node.js builtins
+	"fs": true, "path": true, "url": true, "crypto": true,
+	"buffer": true, "stream": true, "events": true, "util": true,
+	"assert": true, "child_process": true, "cluster": true,
+	"net": true, "tls": true, "dns": true, "dgram": true,
+	"readline": true, "repl": true, "vm": true, "zlib": true,
+	"process": true, "console": true, "querystring": true,
+	// Popular JS/TS packages
+	"express": true, "react": true, "vue": true, "angular": true,
+	"lodash": true, "axios": true, "moment": true, "dayjs": true,
+	"typescript": true, "webpack": true, "vite": true, "esbuild": true,
+	// Ruby stdlib/popular
+	"rack": true, "sinatra": true, "rails": true, "bundler": true,
+	"erb": true,
+	// Go stdlib names covered by the path-based heuristic above.
+}

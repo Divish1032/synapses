@@ -792,13 +792,19 @@ func (s *Server) handleGetContext(
 					if edge.Type == graph.EdgeImports && !seenImport[edge.To] {
 						seenImport[edge.To] = true
 						if importNode := s.graph.GetNode(edge.To); importNode != nil {
-							// Sprint 28: classify imports as internal vs external.
-							// Internal imports (file within the repo) are lower value
-							// for "what does this file depend on?" queries. External
-							// imports (stdlib, third-party packages) are the primary signal.
 							nodeCopy := *importNode
 							if prefix != "" {
 								nodeCopy.File = strings.TrimPrefix(nodeCopy.File, prefix)
+							}
+							// Sprint 28: mark import as internal/external via metadata
+							// so consumers can filter. Heuristic based on name patterns.
+							if nodeCopy.Metadata == nil {
+								nodeCopy.Metadata = make(map[string]string)
+							}
+							if isLikelyExternalImport(nodeCopy.Name) {
+								nodeCopy.Metadata["import_kind"] = "external"
+							} else {
+								nodeCopy.Metadata["import_kind"] = "internal"
 							}
 							dc.Imports = append(dc.Imports, graph.CarvedNode{
 								Node:      &nodeCopy,

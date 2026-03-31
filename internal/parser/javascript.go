@@ -433,6 +433,11 @@ func (p *JavaScriptParser) Parse(g *graph.Graph, filePath string, src []byte) er
 	// --- Call sites ---
 	collectJSCallSites(g, lang, root, src, filePath, fileNodeID)
 
+	// --- Variable type extraction (Sprint 28) ---
+	// JS lacks native type annotations but new_expression gives type info.
+	// collectTSVarTypes handles this via the new_expression fallback path.
+	collectTSVarTypes(g, root, src, filePath)
+
 	// --- Apply module.exports = X: mark the named function/variable as exported ---
 	for _, name := range moduleExportedNames {
 		nodeID := g.MakeNodeID(filePath, name)
