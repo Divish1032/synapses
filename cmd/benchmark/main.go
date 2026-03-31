@@ -7,10 +7,8 @@
 //
 //	benchmark --benchmark=contextbench --cb-data=contextbench.jsonl --limit=50
 //	benchmark --benchmark=graphbench --gb-data=graphbench.jsonl
-//	benchmark --benchmark=featurebench --fb-split=lite --mode=synapses
 //	benchmark --benchmark=driftbench --db-data=driftbench.jsonl
 //	benchmark --benchmark=recallbench --rb-data=recallbench.jsonl
-//	benchmark --benchmark=swe-verified --swe-data=swebench_pilot.jsonl  # optional sanity check
 package main
 
 import (
@@ -26,7 +24,7 @@ import (
 
 func main() {
 	var (
-		benchmarkName = flag.String("benchmark", "contextbench", "Benchmark to run: contextbench | graphbench | featurebench | compactionbench | driftbench | recallbench | nlbench | swe-verified (optional)")
+		benchmarkName = flag.String("benchmark", "contextbench", "Benchmark to run: contextbench | graphbench | compactionbench | driftbench | recallbench | nlbench")
 		endpoint      = flag.String("endpoint", "http://127.0.0.1:11435", "Synapses daemon REST endpoint")
 		project       = flag.String("project", "", "Single project path (overrides per-repo routing)")
 		outputDir     = flag.String("output-dir", "results", "Directory to write JSON and markdown results")
@@ -35,7 +33,6 @@ func main() {
 		reposDir      = flag.String("repos-dir", "/tmp/bench_repos", "Directory where repos are cloned")
 		cacheFile     = flag.String("cache-file", "/tmp/bench_index_cache.json", "JSON cache of indexed repos")
 		indexWorkers  = flag.Int("index-workers", 8, "Parallel workers for cloning+indexing")
-		// index-only removed — use indexer.Run() directly if needed.
 		skipIndex     = flag.Bool("skip-index", false, "Skip synapses index step (clone only)")
 		// ContextBench-specific flags.
 		cbDataFile  = flag.String("cb-data", "contextbench.jsonl", "Path to ContextBench JSONL dataset")
@@ -58,18 +55,15 @@ func main() {
 		dbSkipClean = flag.Bool("db-skip-clean", false, "Skip clean reindex verification (trust dataset ground truth)")
 		// RecallBench-specific flags.
 		rbDataFile = flag.String("rb-data", "recallbench.jsonl", "Path to RecallBench JSONL dataset")
-		// SWE-bench-specific flags.
-		sweDataFile = flag.String("swe-data", "swebench_pilot.jsonl", "Path to SWE-bench JSONL dataset")
-		sweMode     = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
-		sweModel    = flag.String("model", "claude-sonnet-4-6", "Claude model for SWE-bench agent")
-		// FeatureBench-specific flags.
-		fbSplit     = flag.String("fb-split", "lite", "FeatureBench split: lite | fast | full")
-		fbTaskIDs   = flag.String("fb-task-ids", "", "Comma-separated FeatureBench task IDs")
-		fbLevel     = flag.Int("fb-level", 0, "FeatureBench level filter: 1 or 2 (0 = all)")
-		fbTimeout   = flag.Int("fb-timeout", 1200, "Timeout per FeatureBench task in seconds")
-		fbDebug     = flag.Bool("fb-debug", false, "Dump raw stream-json to file for MCP tool inspection")
-		fbBothModes = flag.Bool("fb-both-modes", false, "Run both baseline and synapses modes, compute agent lift delta")
-		sweMaxTurns = flag.Int("max-turns", 25, "Max agent loop turns for SWE-bench")
+		// Shared agent flags (used by CompactionBench, LLM ContextBench).
+		agentMode  = flag.String("mode", "baseline", "Agent mode: baseline | synapses")
+		agentModel = flag.String("model", "claude-sonnet-4-6", "Claude model for agent-based benchmarks")
+		// CompactionBench-specific flags.
+		compSplit   = flag.String("comp-split", "lite", "CompactionBench split: lite | fast | full")
+		compTaskIDs = flag.String("comp-task-ids", "", "Comma-separated CompactionBench task IDs")
+		compLevel   = flag.Int("comp-level", 0, "CompactionBench level filter: 1 or 2 (0 = all)")
+		compTimeout = flag.Int("comp-timeout", 1200, "Timeout per CompactionBench task in seconds")
+		compDebug   = flag.Bool("comp-debug", false, "Dump raw stream-json to file for MCP tool inspection")
 	)
 	flag.Parse()
 
@@ -93,7 +87,7 @@ func main() {
 	case "contextbench":
 		if *cbMode == "llm" {
 			// LLM-powered ContextBench: Claude identifies relevant context.
-			llmMode := *sweMode // reuse --mode flag (baseline|synapses)
+			llmMode := *agentMode
 			if llmMode == "" {
 				llmMode = "synapses"
 			}
@@ -208,119 +202,24 @@ func main() {
 		}
 		rep.PrintNLBenchSummary(nlResult)
 
-	case "swe-verified", "swe_verified":
-		sweResult, err := benchmarks.RunSWEBench(mcpClient, benchmarks.SWEBenchOptions{
-			DataFile: *sweDataFile,
-			ReposDir: *reposDir,
-			Limit:    *limit,
-			Mode:     *sweMode,
-			Model:    *sweModel,
-			MaxTurns: *sweMaxTurns,
-			Endpoint: *endpoint,
-		})
-		if err != nil {
-			log.Fatalf("swe-bench failed: %v", err)
-		}
-		if err := rep.WriteSWEBench(sweResult); err != nil {
-			log.Fatalf("write results: %v", err)
-		}
-		rep.PrintSWEBenchSummary(sweResult)
-
-	case "featurebench", "feature-bench", "feature_bench":
-		baseOpts := benchmarks.FeatureBenchOptions{
-			Split:     *fbSplit,
-			TaskIDs:   splitComma(*fbTaskIDs),
-			Level:     *fbLevel,
-			ReposDir:  *reposDir,
-			Limit:     *limit,
-			Mode:      *sweMode,
-			Model:     *sweModel,
-			Timeout:   *fbTimeout,
-			OutputDir: *outputDir,
-			Debug:     *fbDebug,
-			BothModes: *fbBothModes,
-		}
-
-		if *fbBothModes {
-			// Run baseline first, then synapses, compute delta.
-			log.Printf("featurebench: both-modes enabled — running baseline then synapses")
-
-			baselineOpts := baseOpts
-			baselineOpts.Mode = "baseline"
-			baselineResults, err := benchmarks.RunFeatureBench(baselineOpts)
-			if err != nil {
-				log.Fatalf("featurebench baseline failed: %v", err)
-			}
-			baselineReport := benchmarks.BuildFeatureBenchReport("baseline", *sweModel, baselineResults)
-
-			synapsesOpts := baseOpts
-			synapsesOpts.Mode = "synapses"
-			synapsesResults, err := benchmarks.RunFeatureBench(synapsesOpts)
-			if err != nil {
-				log.Fatalf("featurebench synapses failed: %v", err)
-			}
-			synapsesReport := benchmarks.BuildFeatureBenchReport("synapses", *sweModel, synapsesResults)
-
-			// Compute comparison.
-			comparison := &reporter.FeatureBenchComparison{
-				BaselinePatchRate:  baselineReport.PatchRate,
-				SynapsesPatchRate:  synapsesReport.PatchRate,
-				AgentLift:          synapsesReport.PatchRate - baselineReport.PatchRate,
-				BaselineAvgCost:    baselineReport.AvgCostUSD,
-				SynapsesAvgCost:    synapsesReport.AvgCostUSD,
-				BaselineAvgTokens:  baselineReport.AvgInputTokens + baselineReport.AvgOutputTokens,
-				SynapsesAvgTokens:  synapsesReport.AvgInputTokens + synapsesReport.AvgOutputTokens,
-			}
-			if baselineReport.AvgCostUSD > 0 {
-				comparison.CostSavingsPct = (baselineReport.AvgCostUSD - synapsesReport.AvgCostUSD) / baselineReport.AvgCostUSD * 100
-			}
-			if comparison.BaselineAvgTokens > 0 {
-				comparison.TokenSavingsPct = float64(comparison.BaselineAvgTokens-comparison.SynapsesAvgTokens) / float64(comparison.BaselineAvgTokens) * 100
-			}
-
-			// Attach comparison to the synapses report (primary output).
-			synapsesReport.BothModes = comparison
-			if err := rep.WriteFeatureBench(synapsesReport); err != nil {
-				log.Fatalf("write results: %v", err)
-			}
-			rep.PrintFeatureBenchSummary(synapsesReport)
-
-			log.Printf("\n=== Both-Modes Comparison ===")
-			log.Printf("Baseline patch rate: %.1f%%", comparison.BaselinePatchRate)
-			log.Printf("Synapses patch rate: %.1f%%", comparison.SynapsesPatchRate)
-			log.Printf("Agent lift: %+.1f%%", comparison.AgentLift)
-			log.Printf("Cost savings: %.1f%%", comparison.CostSavingsPct)
-			log.Printf("Token savings: %.1f%%", comparison.TokenSavingsPct)
-		} else {
-			fbResults, err := benchmarks.RunFeatureBench(baseOpts)
-			if err != nil {
-				log.Fatalf("featurebench failed: %v", err)
-			}
-			fbReport := benchmarks.BuildFeatureBenchReport(*sweMode, *sweModel, fbResults)
-			if err := rep.WriteFeatureBench(fbReport); err != nil {
-				log.Fatalf("write results: %v", err)
-			}
-			rep.PrintFeatureBenchSummary(fbReport)
-		}
-
 	case "compactionbench", "compaction-bench", "compaction_bench":
 		cbResults, err := benchmarks.RunCompactionBench(benchmarks.CompactionBenchOptions{
-			Split:     *fbSplit,
-			TaskIDs:   splitComma(*fbTaskIDs),
-			Level:     *fbLevel,
+			Split:     *compSplit,
+			TaskIDs:   splitComma(*compTaskIDs),
+			Level:     *compLevel,
 			ReposDir:  *reposDir,
 			Limit:     *limit,
-			Mode:      *sweMode,
-			Model:     *sweModel,
+			Mode:      *agentMode,
+			Model:     *agentModel,
 			P1Timeout: 300,
-			P2Timeout: *fbTimeout,
+			P2Timeout: *compTimeout,
 			OutputDir: *outputDir,
-			Debug:     *fbDebug,
+			Debug:     *compDebug,
 		})
 		if err != nil {
 			log.Fatalf("compactionbench failed: %v", err)
 		}
-		cbReport := benchmarks.BuildCompactionBenchReport(*sweMode, *sweModel, cbResults)
+		cbReport := benchmarks.BuildCompactionBenchReport(*agentMode, *agentModel, cbResults)
 		if err := rep.WriteCompactionBench(cbReport); err != nil {
 			log.Fatalf("write results: %v", err)
 		}

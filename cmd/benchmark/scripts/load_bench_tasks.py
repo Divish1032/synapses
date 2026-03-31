@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load FeatureBench dataset from HuggingFace and output JSONL to stdout."""
+"""Load benchmark task dataset from HuggingFace and output JSONL to stdout."""
 import argparse
 import json
 import os

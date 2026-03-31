@@ -11,7 +11,7 @@
 //   - synapses+guide: Phase 2 gets compaction_recovery + compaction_guide
 //
 // Uses `claude -p` (Max subscription, no API key required).
-// Reuses FeatureBench tasks as the workload.
+// Reuses task-based benchmark dataset as the workload.
 package benchmarks
 
 import (
@@ -95,8 +95,8 @@ func RunCompactionBench(opts CompactionBenchOptions) ([]CompactionBenchTaskResul
 		opts.SynapsesBin = findSynapsesBin()
 	}
 
-	// Load FeatureBench tasks as workload.
-	tasks, err := loadFeatureBenchData(FeatureBenchOptions{
+	// Load benchmark tasks as workload.
+	tasks, err := loadBenchTasks(TaskOptions{
 		Split:    opts.Split,
 		TaskIDs:  opts.TaskIDs,
 		Level:    opts.Level,
@@ -126,7 +126,7 @@ func RunCompactionBench(opts CompactionBenchOptions) ([]CompactionBenchTaskResul
 	return results, nil
 }
 
-func runCompactionTask(claudeBin string, task FeatureBenchTask, opts CompactionBenchOptions) CompactionBenchTaskResult {
+func runCompactionTask(claudeBin string, task BenchTask, opts CompactionBenchOptions) CompactionBenchTaskResult {
 	result := CompactionBenchTaskResult{
 		InstanceID:  task.InstanceID,
 		Repo:        task.Repo,
@@ -135,7 +135,7 @@ func runCompactionTask(claudeBin string, task FeatureBenchTask, opts CompactionB
 		P2ToolCalls: make(map[string]int),
 	}
 
-	// 1. Repo setup (same as FeatureBench).
+	// 1. Repo setup.
 	repoDir, err := ensureRepo(opts.ReposDir, task.Repo, task.BaseCommit)
 	if err != nil {
 		result.Error = fmt.Sprintf("repo setup: %v", err)

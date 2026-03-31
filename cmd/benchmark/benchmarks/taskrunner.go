@@ -1,10 +1,8 @@
-// featurebench.go implements the FeatureBench benchmark runner.
-// It measures whether giving Claude Code access to Synapses MCP tools improves
-// its ability to implement features (pass@1 delta on FeatureBench tasks).
+// taskrunner.go provides shared infrastructure for benchmark runners that shell
+// out to `claude -p`. Includes dataset loading, git helpers, Synapses Docker
+// setup, Claude Code integration, and stream output parsing.
 //
-// Unlike swebench.go which uses the Go agent loop + Anthropic API directly,
-// this runner shells out to `claude -p` so it works with Max subscriptions
-// (OAuth) without requiring an API key. Synapses tools are loaded via .mcp.json.
+// Used by: CompactionBench.
 package benchmarks
 
 import (
@@ -20,28 +18,20 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/SynapsesOS/synapses/cmd/benchmark/reporter"
 )
 
-// FeatureBenchOptions configures the FeatureBench run.
-type FeatureBenchOptions struct {
-	Split       string   // HF split: "lite", "fast", "full"
-	TaskIDs     []string // optional: specific task IDs
-	Level       int      // 0 = all, 1 or 2
-	ReposDir    string   // where repos are cloned
-	Limit       int      // max tasks (0 = all)
-	Mode        string   // "baseline" or "synapses"
-	Model       string   // Claude model (passed via ANTHROPIC_MODEL env)
-	Timeout     int      // seconds per task (default 1200 = 20min)
-	SynapsesBin string   // path to synapses binary (for init + index)
-	OutputDir   string   // where to write predictions JSONL
-	Debug       bool     // dump raw stream-json to file for inspection
-	BothModes   bool     // run both baseline and synapses, compute delta
+// ─── Task Data Types ────────────────────────────────────────────────────────
+
+// TaskOptions configures dataset loading for task-based benchmarks.
+type TaskOptions struct {
+	Split    string   // HF split: "lite", "fast", "full"
+	TaskIDs  []string // optional: specific task IDs
+	Level    int      // 0 = all, 1 or 2
+	ReposDir string   // where repos are cloned
 }
 
-// FeatureBenchTask is one task from the FeatureBench dataset.
-type FeatureBenchTask struct {
+// BenchTask is one task from the task-based benchmark dataset.
+type BenchTask struct {
 	InstanceID       string          `json:"instance_id"`
 	Repo             string          `json:"repo"`
 	BaseCommit       string          `json:"base_commit"`
@@ -54,231 +44,11 @@ type FeatureBenchTask struct {
 	PassToPass       []string        `json:"PASS_TO_PASS"`
 }
 
-// FeatureBenchTaskResult is the outcome of running Claude on one task.
-type FeatureBenchTaskResult struct {
-	InstanceID      string            `json:"instance_id"`
-	Repo            string            `json:"repo"`
-	Mode            string            `json:"mode"`
-	ModelPatch      string            `json:"model_patch"`
-	ToolCalls       map[string]int    `json:"tool_calls,omitempty"`
-	Turns           int               `json:"turns"`
-	InputTokens     int               `json:"input_tokens"`      // total LLM input tokens across all turns
-	OutputTokens    int               `json:"output_tokens"`     // total LLM output tokens across all turns
-	CostEstimateUSD float64           `json:"cost_estimate_usd"` // estimated cost based on model pricing
-	Error           string            `json:"error,omitempty"`
-	Duration        string            `json:"duration"`
-	Task            *FeatureBenchTask `json:"-"` // for metadata output
-}
-
-// FeatureBenchPrediction is the JSONL format that fb eval expects.
-type FeatureBenchPrediction struct {
-	InstanceID   string                 `json:"instance_id"`
-	ModelPatch   string                 `json:"model_patch"`
-	TaskMetadata map[string]interface{} `json:"task_metadata,omitempty"`
-}
-
-// RunFeatureBench runs the FeatureBench benchmark.
-func RunFeatureBench(opts FeatureBenchOptions) ([]FeatureBenchTaskResult, error) {
-	if opts.Timeout <= 0 {
-		opts.Timeout = 1200 // 20 minutes
-	}
-
-	// Find claude binary.
-	claudeBin, err := findClaudeBin()
-	if err != nil {
-		return nil, fmt.Errorf("claude CLI not found: %w", err)
-	}
-	log.Printf("FeatureBench: using claude at %s", claudeBin)
-
-	// Find synapses binary.
-	if opts.SynapsesBin == "" {
-		opts.SynapsesBin = findSynapsesBin()
-	}
-
-	tasks, err := loadFeatureBenchData(opts)
-	if err != nil {
-		return nil, fmt.Errorf("load data: %w", err)
-	}
-
-	if opts.Limit > 0 && opts.Limit < len(tasks) {
-		tasks = tasks[:opts.Limit]
-	}
-
-	log.Printf("FeatureBench: running %d tasks in %s mode (model=%s, timeout=%ds)",
-		len(tasks), opts.Mode, opts.Model, opts.Timeout)
-
-	// Open predictions file for incremental writes (each task appended immediately).
-	var predPath string
-	var predFile *os.File
-	if opts.OutputDir != "" {
-		predPath = filepath.Join(opts.OutputDir,
-			fmt.Sprintf("featurebench_%s_%s.jsonl", opts.Mode, time.Now().UTC().Format("2006-01-02_15-04-05")))
-		os.MkdirAll(filepath.Dir(predPath), 0o755)
-		var err error
-		predFile, err = os.Create(predPath)
-		if err != nil {
-			log.Printf("WARNING: cannot create predictions file: %v", err)
-		} else {
-			defer predFile.Close()
-		}
-	}
-
-	var results []FeatureBenchTaskResult
-	for i, task := range tasks {
-		log.Printf("[%d/%d] %s (%s @ %s)", i+1, len(tasks),
-			task.InstanceID, task.Repo, task.BaseCommit[:minInt(8, len(task.BaseCommit))])
-
-		result := runFeatureBenchTask(claudeBin, task, opts)
-		results = append(results, result)
-
-		if result.Error != "" {
-			log.Printf("  ERROR: %s", result.Error)
-		} else {
-			patchLines := strings.Count(result.ModelPatch, "\n")
-			mcpCalls := countMCPToolCalls(result.ToolCalls)
-			log.Printf("  Done: %d turns, %d tool calls (%d MCP), %d patch lines, %s",
-				result.Turns, countToolCalls(result.ToolCalls), mcpCalls, patchLines, result.Duration)
-		}
-
-		// Incremental write: append this result to JSONL immediately.
-		if predFile != nil {
-			pred := FeatureBenchPrediction{
-				InstanceID: result.InstanceID,
-				ModelPatch: result.ModelPatch,
-			}
-			if result.Task != nil {
-				pred.TaskMetadata = map[string]interface{}{
-					"image_name":    result.Task.ImageName,
-					"repo_settings": json.RawMessage(result.Task.RepoSettings),
-				}
-			}
-			if err := json.NewEncoder(predFile).Encode(pred); err != nil {
-				log.Printf("WARNING: failed to write prediction: %v", err)
-			}
-		}
-	}
-
-	if predPath != "" {
-		log.Printf("Predictions written to %s", predPath)
-	}
-
-	return results, nil
-}
-
-func runFeatureBenchTask(claudeBin string, task FeatureBenchTask, opts FeatureBenchOptions) FeatureBenchTaskResult {
-	start := time.Now()
-	result := FeatureBenchTaskResult{
-		InstanceID: task.InstanceID,
-		Repo:       task.Repo,
-		Mode:       opts.Mode,
-		Task:       &task,
-		ToolCalls:  make(map[string]int),
-	}
-
-	// 1. Ensure repo is checked out.
-	repoDir, err := ensureRepo(opts.ReposDir, task.Repo, task.BaseCommit)
-	if err != nil {
-		result.Error = fmt.Sprintf("repo setup: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-
-	// Reset any leftover changes.
-	gitReset(repoDir)
-
-	// 2. Apply corruption patches (the code the agent must recreate).
-	if task.Patch != "" {
-		if err := gitApplyPatch(repoDir, task.Patch); err != nil {
-			result.Error = fmt.Sprintf("apply patch: %v", err)
-			result.Duration = time.Since(start).String()
-			return result
-		}
-	}
-	if task.TestPatch != "" {
-		if err := gitApplyPatch(repoDir, task.TestPatch); err != nil {
-			result.Error = fmt.Sprintf("apply test_patch: %v", err)
-			result.Duration = time.Since(start).String()
-			return result
-		}
-	}
-
-	// 3. CRITICAL: Commit corruption as the new baseline.
-	// fb eval applies corruption FIRST, then applies model_patch on top.
-	// So model_patch must be relative to the corrupted state, not base_commit.
-	if err := gitCommitAll(repoDir, "corruption baseline"); err != nil {
-		result.Error = fmt.Sprintf("commit corruption: %v", err)
-		result.Duration = time.Since(start).String()
-		return result
-	}
-
-	// 4. Mode-specific setup.
-	if opts.Mode == "synapses" {
-		if err := setupSynapses(opts.SynapsesBin, repoDir); err != nil {
-			log.Printf("  WARNING: synapses setup failed: %v (continuing without)", err)
-		}
-	} else {
-		// Baseline: remove any .mcp.json and .claude/ that might exist
-		os.Remove(filepath.Join(repoDir, ".mcp.json"))
-		os.RemoveAll(filepath.Join(repoDir, ".claude"))
-	}
-
-	// 5. Run claude -p.
-	allowedTools := "Bash Read Write Edit Grep Glob"
-	disallowedTools := ""
-	var systemPrompt string
-	if opts.Mode == "synapses" {
-		// Add Synapses MCP tools.
-		allowedTools += " mcp__synapses__*"
-		// Remove Grep and Glob so Claude is FORCED to use mcp__synapses__search
-		// for codebase exploration. Without this, Claude always prefers built-in tools.
-		disallowedTools = "Grep,Glob"
-		systemPrompt = synapsesSystemPrompt
-	}
-
-	streamJSON, err := runClaudeCode(claudeBin, repoDir, task.ProblemStatement, allowedTools, disallowedTools, opts.Model, systemPrompt, opts.Timeout)
-	if err != nil {
-		result.Error = fmt.Sprintf("claude: %v", err)
-		result.Duration = time.Since(start).String()
-		// Still try to capture patch even on error.
-		result.ModelPatch, _ = gitDiffExcludeBenchFiles(repoDir)
-		return result
-	}
-
-	// 6. Debug: dump raw stream-json if requested.
-	if opts.Debug && opts.OutputDir != "" {
-		debugPath := filepath.Join(opts.OutputDir,
-			fmt.Sprintf("stream_%s_%s.json", opts.Mode, task.InstanceID))
-		_ = os.WriteFile(debugPath, []byte(streamJSON), 0o644)
-		log.Printf("  Debug stream written to %s", debugPath)
-	}
-
-	// 7. Parse stats from stream output.
-	stats := parseStreamStats(streamJSON)
-	result.ToolCalls = stats.ToolCalls
-	result.Turns = stats.Turns
-	result.InputTokens = stats.InputTokens
-	result.OutputTokens = stats.OutputTokens
-	result.CostEstimateUSD = estimateCost(opts.Model, stats.InputTokens, stats.OutputTokens)
-
-	// 8. Capture patch — exclude benchmark artifacts (.mcp.json, .claude/, synapses.json).
-	// This diff is relative to corruption commit (step 3), so it contains ONLY agent changes.
-	result.ModelPatch, err = gitDiffExcludeBenchFiles(repoDir)
-	if err != nil {
-		result.Error = fmt.Sprintf("git diff: %v", err)
-	}
-
-	// 9. Reset for next task — force back to the base commit.
-	resetToCommit(repoDir, task.BaseCommit)
-
-	result.Duration = time.Since(start).String()
-	return result
-}
-
 // ─── Dataset Loading ────────────────────────────────────────────────────────
 
-func loadFeatureBenchData(opts FeatureBenchOptions) ([]FeatureBenchTask, error) {
+func loadBenchTasks(opts TaskOptions) ([]BenchTask, error) {
 	// Find the Python script relative to the benchmark binary or CWD.
-	scriptPath := findScript("load_featurebench.py")
+	scriptPath := findScript("load_bench_tasks.py")
 
 	args := []string{scriptPath, "--split", opts.Split}
 	if len(opts.TaskIDs) > 0 {
@@ -295,7 +65,7 @@ func loadFeatureBenchData(opts FeatureBenchOptions) ([]FeatureBenchTask, error) 
 		return nil, fmt.Errorf("python3 %s: %w", scriptPath, err)
 	}
 
-	var tasks []FeatureBenchTask
+	var tasks []BenchTask
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
 	scanner.Buffer(make([]byte, 0), 10*1024*1024) // 10MB line buffer
 	for scanner.Scan() {
@@ -303,7 +73,7 @@ func loadFeatureBenchData(opts FeatureBenchOptions) ([]FeatureBenchTask, error) 
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		var task FeatureBenchTask
+		var task BenchTask
 		if err := json.Unmarshal([]byte(line), &task); err != nil {
 			log.Printf("WARNING: skip malformed line: %v", err)
 			continue
@@ -337,8 +107,9 @@ func findScript(name string) string {
 	return name // fallback, will fail with clear error
 }
 
+// ─── Claude Code System Prompt ──────────────────────────────────────────────
+
 // synapsesSystemPrompt is injected via --append-system-prompt in Synapses mode.
-// It MUST be strong enough to override Claude's default behavior of using Bash/Grep.
 const synapsesSystemPrompt = `You have access to Synapses MCP tools that provide structural code intelligence (call graphs, dependency trees, symbol search). These tools have already indexed this entire codebase.
 
 CRITICAL WORKFLOW — You MUST follow this sequence:
@@ -620,7 +391,6 @@ Synapses has already indexed this entire codebase into a dependency graph. Using
 	}
 
 	// 6. Pre-warm: trigger indexing by making a search request.
-	// The daemon indexes on first request for a project.
 	warmURL := fmt.Sprintf("http://127.0.0.1:%s/v1/tools/search?project=%s",
 		daemonHostPort, url.QueryEscape(repoDir))
 	body := strings.NewReader(`{"query": "main"}`)
@@ -717,9 +487,6 @@ func gitCommitAll(repoDir, msg string) error {
 }
 
 func gitDiffExcludeBenchFiles(repoDir string) (string, error) {
-	// Diff against HEAD (corruption commit), excluding benchmark artifacts.
-	// Use --no-ext-diff to avoid external diff tools, and strip index lines
-	// since fb eval runs in a fresh git init container with different object hashes.
 	cmd := exec.Command("git", "diff", "HEAD", "--no-ext-diff",
 		"--", ".", ":!.mcp.json", ":!.claude", ":!synapses.json")
 	cmd.Dir = repoDir
@@ -728,8 +495,7 @@ func gitDiffExcludeBenchFiles(repoDir string) (string, error) {
 		return "", err
 	}
 
-	// Strip "index <hash>..<hash>" lines — fb eval's container has a fresh
-	// git init so these hashes are meaningless and can cause apply failures.
+	// Strip "index <hash>..<hash>" lines.
 	var cleaned strings.Builder
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "index ") {
@@ -740,9 +506,6 @@ func gitDiffExcludeBenchFiles(repoDir string) (string, error) {
 	}
 	return cleaned.String(), nil
 }
-
-// ─── Output ─────────────────────────────────────────────────────────────────
-// Predictions are now written incrementally in RunFeatureBench (no batch function needed).
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
@@ -778,46 +541,4 @@ func estimateCost(model string, inputTokens, outputTokens int) float64 {
 	}
 	return (float64(inputTokens) * inputPrice / 1_000_000) +
 		(float64(outputTokens) * outputPrice / 1_000_000)
-}
-
-// minInt is already defined in contextbench.go (same package).
-
-// BuildFeatureBenchReport aggregates task results into a reporter-compatible struct.
-func BuildFeatureBenchReport(mode, model string, results []FeatureBenchTaskResult) *reporter.FeatureBenchReport {
-	r := &reporter.FeatureBenchReport{
-		Timestamp:  time.Now().UTC().Format(time.RFC3339),
-		Mode:       mode,
-		Model:      model,
-		TotalTasks: len(results),
-		ToolUsage:  make(map[string]int),
-	}
-
-	totalTurns := 0
-	var totalInput, totalOutput int
-	var totalCost float64
-	for _, tr := range results {
-		if tr.ModelPatch != "" {
-			r.PatchCount++
-		}
-		totalTurns += tr.Turns
-		totalInput += tr.InputTokens
-		totalOutput += tr.OutputTokens
-		totalCost += tr.CostEstimateUSD
-		for name, count := range tr.ToolCalls {
-			r.ToolUsage[name] += count
-		}
-		r.Tasks = append(r.Tasks, tr)
-	}
-
-	if len(results) > 0 {
-		n := float64(len(results))
-		r.PatchRate = float64(r.PatchCount) / n * 100
-		r.AvgTurns = float64(totalTurns) / n
-		r.AvgInputTokens = totalInput / len(results)
-		r.AvgOutputTokens = totalOutput / len(results)
-		r.AvgCostUSD = totalCost / n
-		r.TotalCostUSD = totalCost
-	}
-
-	return r
 }
