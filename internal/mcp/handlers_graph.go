@@ -602,9 +602,11 @@ func (s *Server) handleSearch(
 		return hits[i].node.Name < hits[j].node.Name
 	})
 
-	// Cap at 25 results to stay within token budget.
-	if len(hits) > 25 {
-		hits = hits[:25]
+	// Cap results to control token budget. 8 results is sufficient for
+	// agents to find the right entity; more adds noise without value.
+	const resultCap = 8
+	if len(hits) > resultCap {
+		hits = hits[:resultCap]
 	}
 
 	type result struct {

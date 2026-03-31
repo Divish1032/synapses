@@ -110,19 +110,7 @@ func findScript(name string) string {
 // ─── Claude Code System Prompt ──────────────────────────────────────────────
 
 // synapsesSystemPrompt is injected via --append-system-prompt in Synapses mode.
-const synapsesSystemPrompt = `You have access to Synapses MCP tools that provide structural code intelligence (call graphs, dependency trees, symbol search). These tools have already indexed this entire codebase.
-
-CRITICAL WORKFLOW — You MUST follow this sequence:
-
-Step 1: BEFORE reading any files, call mcp__synapses__search with a query describing what you need to find. This returns functions, types, and files with exact locations.
-
-Step 2: For each relevant result, call mcp__synapses__get_context to understand its callers, callees, imports, and dependency graph.
-
-Step 3: Call mcp__synapses__get_impact before making changes to understand what depends on the code you're modifying.
-
-Step 4: Only THEN use Read/Edit/Bash to make your changes.
-
-These tools give you the dependency graph — who calls what, what imports what, what would break if you change something. This is impossible to get from grep/find alone. Use them.`
+const synapsesSystemPrompt = `Synapses MCP tools are available with indexed codebase. Use mcp__synapses__search for symbol lookup, mcp__synapses__get_context for callers/callees/dependencies, mcp__synapses__get_impact before editing to check blast radius.`
 
 // ─── Claude Code Integration ────────────────────────────────────────────────
 
@@ -214,16 +202,19 @@ func runClaudeCode(claudeBin, repoDir, prompt, allowedTools, disallowedTools, mo
 }
 
 type streamStats struct {
-	ToolCalls    map[string]int
-	Turns        int
-	InputTokens  int
-	OutputTokens int
+	ToolCalls               map[string]int
+	Turns                   int
+	InputTokens             int // uncached input tokens
+	OutputTokens            int
+	CacheCreationTokens     int     // tokens written to cache
+	CacheReadTokens         int     // tokens read from cache
+	TotalCostUSD            float64 // from Claude Code's own tracking
 }
 
 func parseStreamStats(streamJSON string) streamStats {
 	stats := streamStats{ToolCalls: make(map[string]int)}
 	scanner := bufio.NewScanner(strings.NewReader(streamJSON))
-	scanner.Buffer(make([]byte, 0), 1024*1024) // 1MB per line
+	scanner.Buffer(make([]byte, 0), 2*1024*1024) // 2MB per line
 
 	for scanner.Scan() {
 		var msg struct {
@@ -233,18 +224,20 @@ func parseStreamStats(streamJSON string) streamStats {
 					Type string `json:"type"`
 					Name string `json:"name"`
 				} `json:"content"`
-			} `json:"message"`
-			// Result message (final) contains usage stats.
-			Result struct {
 				Usage struct {
-					InputTokens  int `json:"input_tokens"`
-					OutputTokens int `json:"output_tokens"`
+					InputTokens             int `json:"input_tokens"`
+					OutputTokens            int `json:"output_tokens"`
+					CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+					CacheReadInputTokens    int `json:"cache_read_input_tokens"`
 				} `json:"usage"`
-			} `json:"result"`
-			// Some stream formats put usage at top level per-turn.
-			Usage struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
+			} `json:"message"`
+			// Final result message has cumulative usage + cost.
+			TotalCostUSD float64 `json:"total_cost_usd"`
+			Usage        struct {
+				InputTokens             int `json:"input_tokens"`
+				OutputTokens            int `json:"output_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens    int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
@@ -258,14 +251,14 @@ func parseStreamStats(streamJSON string) streamStats {
 				}
 			}
 		}
-		// Accumulate token usage from any message that reports it.
-		if msg.Usage.InputTokens > 0 {
-			stats.InputTokens += msg.Usage.InputTokens
-			stats.OutputTokens += msg.Usage.OutputTokens
-		}
-		if msg.Result.Usage.InputTokens > 0 {
-			stats.InputTokens += msg.Result.Usage.InputTokens
-			stats.OutputTokens += msg.Result.Usage.OutputTokens
+		// The final "result" message has cumulative totals — use those
+		// instead of summing per-turn to avoid double-counting.
+		if msg.Type == "result" {
+			stats.InputTokens = msg.Usage.InputTokens
+			stats.OutputTokens = msg.Usage.OutputTokens
+			stats.CacheCreationTokens = msg.Usage.CacheCreationInputTokens
+			stats.CacheReadTokens = msg.Usage.CacheReadInputTokens
+			stats.TotalCostUSD = msg.TotalCostUSD
 		}
 	}
 	return stats

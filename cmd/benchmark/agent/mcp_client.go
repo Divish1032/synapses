@@ -377,6 +377,66 @@ func (c *SynapsesClient) GetContextJSONWithFile(taskID, entity, detailLevel, fil
 	return raw, nil
 }
 
+// GetCallChain calls get_context with mode=path to find the call chain between
+// two entities. Returns the raw text response.
+func (c *SynapsesClient) GetCallChain(taskID, from, to string) (string, error) {
+	if c.disabled {
+		return "", nil
+	}
+	args := map[string]interface{}{
+		"mode": "path",
+		"from": from,
+		"to":   to,
+	}
+	raw, err := c.callTool("get_context", args)
+	if err != nil {
+		return "", err
+	}
+	c.recordAccess(taskID, "get_context", raw)
+	return raw, nil
+}
+
+// SearchExact calls search with mode=exact to resolve an entity by name.
+// Returns the raw JSON response.
+func (c *SynapsesClient) SearchExact(taskID, query string) (string, error) {
+	if c.disabled {
+		return "", nil
+	}
+	args := map[string]interface{}{
+		"query": query,
+		"mode":  "exact",
+	}
+	raw, err := c.callTool("search", args)
+	if err != nil {
+		return "", err
+	}
+	c.recordAccess(taskID, "search", raw)
+	return raw, nil
+}
+
+// RemoveProject calls the admin API to remove a project from the daemon.
+func (c *SynapsesClient) RemoveProject(projectPath string) error {
+	if c.disabled {
+		return nil
+	}
+	u := fmt.Sprintf("%s/api/admin/projects/remove", c.endpoint)
+	body, _ := json.Marshal(map[string]string{"path": projectPath})
+	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("remove project: %w", err)
+	}
+	resp.Body.Close()
+	return nil
+}
+
 // GetHealth calls the daemon health endpoint and returns node/edge counts.
 func (c *SynapsesClient) GetHealth() (*HealthResult, error) {
 	if c.disabled {

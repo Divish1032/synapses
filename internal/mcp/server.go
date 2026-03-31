@@ -1599,7 +1599,8 @@ func (s *Server) registerTools() {
 			mcp.WithDescription(
 				"Unified context retrieval. mode='context' (default): BFS/PPR ego-subgraph with full param control. "+
 					"mode='intent': intent-based assembly (declare intent + target, one round-trip). "+
-					"mode='path': shortest call chain between two entities (requires from + to params).",
+					"mode='path': shortest call chain between two entities (requires from + to params). "+
+					"mode='investigate': problem-aware context — describe a bug/feature and get ranked code blocks with actual source code.",
 			),
 			mcp.WithString("entity",
 				mcp.Description("Entity name for mode=context (e.g. 'AuthService'). Required for mode=context."),
@@ -1657,6 +1658,16 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("to",
 				mcp.Description("Target entity for call chain. Required for mode=path."),
+			),
+			// mode=investigate params
+			mcp.WithString("problem",
+				mcp.Description("Free-text problem/bug description. Required for mode=investigate. Returns ranked code blocks with source."),
+			),
+			mcp.WithNumber("max_blocks",
+				mcp.Description("Max code blocks to return (mode=investigate). Default 10, max 25."),
+			),
+			mcp.WithBoolean("include_tests",
+				mcp.Description("Include test files in results (mode=investigate). Default false."),
 			),
 		),
 		s.handleGetContextDispatch,

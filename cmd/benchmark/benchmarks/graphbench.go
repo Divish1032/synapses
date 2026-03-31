@@ -37,10 +37,11 @@ import (
 
 // GraphBenchOptions controls a GraphBench run.
 type GraphBenchOptions struct {
-	DataFile string // path to graphbench.jsonl
-	ReposDir string // where repos are cloned
-	Limit    int    // max test suites (0 = all)
-	Mode     string // "full" (default, curated ground truth) or "smoke" (self-validating, CI-safe)
+	DataFile   string // path to graphbench.jsonl
+	ReposDir   string // where repos are cloned
+	Limit      int    // max test suites (0 = all)
+	Mode       string // "full" (default, curated ground truth) or "smoke" (self-validating, CI-safe)
+	Sequential bool   // OOM-safe: clone→index→test→cleanup one repo at a time
 }
 
 // GraphBenchSuite is one line from the JSONL file.
@@ -62,6 +63,9 @@ type GraphBenchTest struct {
 	// Disambiguation test fields:
 	ExpectedDisambigCount int    `json:"expected_disambig_count,omitempty"` // expected number of candidates
 	DisambigFile          string `json:"disambig_file,omitempty"`           // file to pin entity with
+	// Call chain test fields:
+	ChainFrom string `json:"chain_from,omitempty"` // source entity for find_call_chain
+	ChainTo   string `json:"chain_to,omitempty"`   // target entity for find_call_chain
 }
 
 // GraphBenchTestResult holds the outcome of one test.
@@ -249,6 +253,10 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 
 		for j, test := range suite.Tests {
 			result := runGraphTest(projClient, suite, test)
+			// In sequential mode, drop raw responses to save memory.
+			if opts.Sequential {
+				result.RawResponse = ""
+			}
 			allResults = append(allResults, result)
 			status := "✓"
 			if result.Error != "" {
@@ -257,6 +265,15 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 			log.Printf("  [%d/%d] %s(%s): P=%.0f%% R=%.0f%% F1=%.0f%% %dms %s",
 				j+1, len(suite.Tests), test.QueryType, test.Query,
 				result.Precision*100, result.Recall*100, result.F1*100, result.LatencyMs, status)
+		}
+
+		// OOM-safe cleanup: remove project from daemon and delete repo directory.
+		if opts.Sequential {
+			log.Printf("  cleanup: removing %s", suite.Repo)
+			_ = client.RemoveProject(repoDir)
+			if err := os.RemoveAll(repoDir); err != nil {
+				log.Printf("  warning: failed to remove repo dir: %v", err)
+			}
 		}
 	}
 
@@ -331,6 +348,15 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 
 	case "disambiguation":
 		names, files, rawResp = queryDisambiguation(client, test)
+
+	case "find_call_chain":
+		names, files, rawResp = queryCallChain(client, test)
+
+	case "exact_entity_lookup":
+		names, files, rawResp = queryExactEntityLookup(client, test.Query)
+
+	case "file_entities":
+		names, files, rawResp = queryFileEntities(client, test.Query)
 
 	default:
 		result.Error = fmt.Sprintf("unknown query_type %q", test.QueryType)
@@ -717,6 +743,127 @@ func queryContextCrossDomain(client *agent.SynapsesClient, entity string, catego
 	collect(cr.CrossDomain.Related, "related")
 
 	return names, files, raw
+}
+
+// callChainResponse is the JSON shape of get_context(mode=path) responses.
+type callChainResponse struct {
+	Found bool `json:"found"`
+	From  struct {
+		Name string `json:"name"`
+		File string `json:"file"`
+	} `json:"from"`
+	To struct {
+		Name string `json:"name"`
+		File string `json:"file"`
+	} `json:"to"`
+	Path []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		File string `json:"file"`
+	} `json:"path"`
+	ClosestReachable struct {
+		Name string `json:"name"`
+		File string `json:"file"`
+		Hops int    `json:"hops"`
+	} `json:"closest_reachable"`
+}
+
+// queryCallChain calls get_context(mode=path) to find the call chain between two entities.
+// Expected names are the entities along the path (including from/to).
+func queryCallChain(client *agent.SynapsesClient, test GraphBenchTest) (names, files []string, raw string) {
+	from := test.ChainFrom
+	to := test.ChainTo
+	if from == "" {
+		from = test.Query
+	}
+	if to == "" {
+		return nil, nil, "error: chain_to not specified"
+	}
+
+	raw, err := client.GetCallChain("graphbench", from, to)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	var cr callChainResponse
+	if err := json.Unmarshal([]byte(raw), &cr); err != nil {
+		// Fallback to text extraction.
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	if cr.Found {
+		// Collect all nodes along the path.
+		if cr.From.Name != "" {
+			names = appendUniqueName(names, cr.From.Name)
+		}
+		for _, node := range cr.Path {
+			if node.Name != "" {
+				names = appendUniqueName(names, node.Name)
+			}
+			if node.File != "" {
+				files = appendUniqueFile(files, node.File)
+			}
+		}
+		if cr.To.Name != "" {
+			names = appendUniqueName(names, cr.To.Name)
+		}
+	}
+	// If not found, names/files will be empty → zero recall (correct behavior:
+	// the graph doesn't have this path, which is what we're measuring).
+
+	return names, files, raw
+}
+
+// queryExactEntityLookup calls search(mode=exact) to resolve an entity by name.
+// Tests that the name index correctly maps entity names to graph nodes.
+func queryExactEntityLookup(client *agent.SynapsesClient, entity string) (names, files []string, raw string) {
+	raw, err := client.SearchExact("graphbench", entity)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	// Parse JSON array of search results.
+	var results []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		File string `json:"file"`
+		Line int    `json:"line"`
+	}
+	if err := json.Unmarshal([]byte(raw), &results); err != nil {
+		// Fallback: try extracting from text.
+		return extractNamesFromText(raw), extractFilesFromText(raw), raw
+	}
+
+	for _, r := range results {
+		if r.Name != "" {
+			names = appendUniqueName(names, r.Name)
+		}
+		if r.File != "" {
+			files = appendUniqueFile(files, r.File)
+		}
+	}
+	return names, files, raw
+}
+
+// queryFileEntities calls get_file_context to list all entities in a file.
+// Tests that the parser correctly extracts all symbols from a source file.
+func queryFileEntities(client *agent.SynapsesClient, filePath string) (names, files []string, raw string) {
+	result, err := client.GetFileContext("graphbench", filePath)
+	if err != nil {
+		return nil, nil, fmt.Sprintf("error: %v", err)
+	}
+
+	for _, e := range result.Entities {
+		if e.Name != "" {
+			names = appendUniqueName(names, e.Name)
+		}
+	}
+	if result.File != "" {
+		files = append(files, result.File)
+	}
+
+	rawBytes, _ := json.Marshal(result)
+	return names, files, string(rawBytes)
 }
 
 // ─── Text fallback extractors (used when JSON parse fails) ───────────────────

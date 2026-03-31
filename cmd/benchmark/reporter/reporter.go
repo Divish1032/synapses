@@ -687,6 +687,124 @@ func Timestamp() string {
 	return time.Now().UTC().Format("2006-01-02T15-04-05Z")
 }
 
+// ── TaskBench ───────────────────────────────────────────────────────────────
+
+// TaskBenchReport holds results for the end-to-end task benchmark.
+type TaskBenchReport struct {
+	Timestamp    string              `json:"timestamp"`
+	Mode         string              `json:"mode"`
+	Model        string              `json:"model"`
+	TotalTasks   int                 `json:"total_tasks"`
+	Resolved     int                 `json:"resolved"`
+	ResolveRate  float64             `json:"resolve_rate"`
+	PatchCount   int                 `json:"patch_count"`
+	PatchRate    float64             `json:"patch_rate"`
+	AvgTurns     float64             `json:"avg_turns"`
+	AvgCostUSD   float64             `json:"avg_cost_usd"`
+	TotalCostUSD float64             `json:"total_cost_usd"`
+	ToolUsage    map[string]int      `json:"tool_usage"`
+	Tasks        []interface{}       `json:"tasks"`
+	BothModes    *TaskBenchComparison `json:"both_modes,omitempty"`
+}
+
+// TaskBenchComparison holds baseline vs synapses delta.
+type TaskBenchComparison struct {
+	BaselineResolveRate float64 `json:"baseline_resolve_rate"`
+	SynapsesResolveRate float64 `json:"synapses_resolve_rate"`
+	ResolveLift         float64 `json:"resolve_lift"`
+	BaselineAvgTurns    float64 `json:"baseline_avg_turns"`
+	SynapsesAvgTurns    float64 `json:"synapses_avg_turns"`
+	TurnsSaved          float64 `json:"turns_saved"`
+	BaselineAvgCost     float64 `json:"baseline_avg_cost"`
+	SynapsesAvgCost     float64 `json:"synapses_avg_cost"`
+	CostSavingsPct      float64 `json:"cost_savings_pct"`
+}
+
+// WriteTaskBench writes JSON + Markdown results.
+func (r *Reporter) WriteTaskBench(result *TaskBenchReport) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("taskbench_%s_%s.json", result.Mode, ts))
+	mdPath := filepath.Join(r.dir, fmt.Sprintf("taskbench_%s_%s.md", result.Mode, ts))
+	if err := writeJSON(jsonPath, result); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+	if err := os.WriteFile(mdPath, []byte(taskBenchMarkdown(result)), 0o644); err != nil {
+		return fmt.Errorf("write markdown: %w", err)
+	}
+	fmt.Printf("Results written:\n  JSON: %s\n  Markdown: %s\n", jsonPath, mdPath)
+	return nil
+}
+
+// PrintTaskBenchSummary prints a compact summary to stdout.
+func (r *Reporter) PrintTaskBenchSummary(result *TaskBenchReport) {
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Printf("  TaskBench  |  mode: %s  |  model: %s\n", result.Mode, result.Model)
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Printf("  Tasks:        %d\n", result.TotalTasks)
+	fmt.Printf("  Resolved:     %d / %d (%.1f%%)\n", result.Resolved, result.TotalTasks, result.ResolveRate)
+	fmt.Printf("  Patches:      %d (%.1f%%)\n", result.PatchCount, result.PatchRate)
+	fmt.Printf("  Avg turns:    %.1f\n", result.AvgTurns)
+	fmt.Printf("  Avg cost:     $%.4f\n", result.AvgCostUSD)
+	fmt.Printf("  Total cost:   $%.4f\n", result.TotalCostUSD)
+	if len(result.ToolUsage) > 0 {
+		fmt.Println("───────────────────────────────────────────────────────")
+		for name, count := range result.ToolUsage {
+			fmt.Printf("  %-35s %d\n", name, count)
+		}
+	}
+	if result.BothModes != nil {
+		bm := result.BothModes
+		fmt.Println("═══════════════════════════════════════════════════════")
+		fmt.Println("  BASELINE vs SYNAPSES")
+		fmt.Println("───────────────────────────────────────────────────────")
+		fmt.Printf("  Resolve rate:  baseline=%.1f%%  synapses=%.1f%%  lift=%+.1f%%\n",
+			bm.BaselineResolveRate, bm.SynapsesResolveRate, bm.ResolveLift)
+		fmt.Printf("  Avg turns:     baseline=%.1f  synapses=%.1f  saved=%.1f\n",
+			bm.BaselineAvgTurns, bm.SynapsesAvgTurns, bm.TurnsSaved)
+		fmt.Printf("  Avg cost:      baseline=$%.4f  synapses=$%.4f  savings=%.1f%%\n",
+			bm.BaselineAvgCost, bm.SynapsesAvgCost, bm.CostSavingsPct)
+	}
+	fmt.Println("═══════════════════════════════════════════════════════")
+}
+
+func taskBenchMarkdown(result *TaskBenchReport) string {
+	var sb strings.Builder
+	sb.WriteString("# TaskBench Results\n\n")
+	fmt.Fprintf(&sb, "**Mode:** %s | **Model:** %s | **Tasks:** %d\n\n", result.Mode, result.Model, result.TotalTasks)
+
+	sb.WriteString("## Summary\n\n")
+	sb.WriteString("| Metric | Value |\n|--------|-------|\n")
+	fmt.Fprintf(&sb, "| Resolved | %d / %d (%.1f%%) |\n", result.Resolved, result.TotalTasks, result.ResolveRate)
+	fmt.Fprintf(&sb, "| Patches generated | %d (%.1f%%) |\n", result.PatchCount, result.PatchRate)
+	fmt.Fprintf(&sb, "| Avg turns | %.1f |\n", result.AvgTurns)
+	fmt.Fprintf(&sb, "| Avg cost | $%.4f |\n", result.AvgCostUSD)
+	fmt.Fprintf(&sb, "| Total cost | $%.4f |\n\n", result.TotalCostUSD)
+
+	if result.BothModes != nil {
+		bm := result.BothModes
+		sb.WriteString("## Baseline vs Synapses\n\n")
+		sb.WriteString("| Metric | Baseline | Synapses | Delta |\n")
+		sb.WriteString("|--------|----------|----------|-------|\n")
+		fmt.Fprintf(&sb, "| Resolve rate | %.1f%% | %.1f%% | %+.1f%% |\n",
+			bm.BaselineResolveRate, bm.SynapsesResolveRate, bm.ResolveLift)
+		fmt.Fprintf(&sb, "| Avg turns | %.1f | %.1f | %.1f saved |\n",
+			bm.BaselineAvgTurns, bm.SynapsesAvgTurns, bm.TurnsSaved)
+		fmt.Fprintf(&sb, "| Avg cost | $%.4f | $%.4f | %.1f%% |\n\n",
+			bm.BaselineAvgCost, bm.SynapsesAvgCost, bm.CostSavingsPct)
+	}
+
+	if len(result.ToolUsage) > 0 {
+		sb.WriteString("## Tool Usage\n\n")
+		sb.WriteString("| Tool | Calls |\n|------|-------|\n")
+		for name, count := range result.ToolUsage {
+			fmt.Fprintf(&sb, "| %s | %d |\n", name, count)
+		}
+	}
+
+	return sb.String()
+}
+
 // ── CompactionBench ─────────────────────────────────────────────────────────
 
 // CompactionBenchReport holds aggregated CompactionBench results.

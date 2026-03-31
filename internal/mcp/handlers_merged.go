@@ -47,6 +47,8 @@ func (s *Server) handleGetContextDispatch(
 		return s.handleGetCallChain(ctx, req)
 	case "intent":
 		return s.handlePrepareContext(ctx, req)
+	case "investigate":
+		return s.handleInvestigate(ctx, req)
 	default:
 		return s.handleGetContext(ctx, req)
 	}
