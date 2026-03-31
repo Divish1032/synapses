@@ -2725,6 +2725,14 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 	}()
 
+	// Checkpoint WAL after large graph writes to prevent unbounded WAL growth.
+	// PASSIVE mode doesn't block concurrent readers and checkpoints as many
+	// frames as possible without waiting. For large repos (225K+ nodes) this
+	// prevents the WAL from sitting at hundreds of MB until daemon restart.
+	if _, cpErr := s.graphDB.Exec("PRAGMA wal_checkpoint(PASSIVE)"); cpErr != nil {
+		logutil.Warn("synapses: store: post-SaveGraph wal_checkpoint: %v\n", cpErr)
+	}
+
 	return nil
 }
 

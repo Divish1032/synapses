@@ -640,10 +640,19 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	// re-parses only changed files. This keeps line numbers accurate after
 	// offline edits made between sessions (when the watcher was not running).
 	// On repos with no changes the walk is cheap and returns immediately.
-	g, err := smartReindex(repoRoot, st, plugins, pluginCheck)
+	g, changedFiles, err := smartReindex(repoRoot, st, plugins, pluginCheck)
 	if err == nil {
-		if saveErr := st.SaveGraph(g); saveErr != nil {
-			logutil.Error("synapses: cache save failed: %v\n", saveErr)
+		// Use incremental SaveGraphDelta per changed file instead of full
+		// SaveGraph to avoid O(total-graph) write amplification. On large repos
+		// (e.g. vscode, 225K nodes) full SaveGraph produces an 878MB WAL and
+		// blocks for minutes; delta saves are O(changed-files) only.
+		if len(changedFiles) > 0 {
+			for _, cf := range changedFiles {
+				if saveErr := st.SaveGraphDelta(cf, g); saveErr != nil {
+					logutil.Error("synapses: delta save %s: %v\n", cf, saveErr)
+				}
+			}
+			logutil.Info("synapses: saved %d changed file(s) via delta\n", len(changedFiles))
 		}
 		emitGraphSnapshot(g, pc, projectID) // P2-7: graph topology snapshot
 		// Warm-boot: try to restore the columnar index from the snapshot blob.
@@ -1192,18 +1201,20 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 // and returns the updated graph. Used when --reindex is requested and a valid
 // cache exists, avoiding a full re-parse of unchanged files.
 // plugins registers any external parser plugins before the incremental walk.
-func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker) (*graph.Graph, error) {
+// smartReindex returns the loaded graph and the list of changed file paths
+// (relative to the repo root). An empty slice means nothing changed.
+func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker) (*graph.Graph, []string, error) {
 	g, err := st.LoadGraph()
 	if err != nil || g == nil {
-		return nil, fmt.Errorf("load cached graph: %w", err)
+		return nil, nil, fmt.Errorf("load cached graph: %w", err)
 	}
 
 	known, err := st.LoadFileMtimes()
 	if err != nil {
-		return nil, fmt.Errorf("load file mtimes: %w", err)
+		return nil, nil, fmt.Errorf("load file mtimes: %w", err)
 	}
 	if len(known) == 0 {
-		return nil, fmt.Errorf("no stored file mtimes — falling back to full reindex")
+		return nil, nil, fmt.Errorf("no stored file mtimes — falling back to full reindex")
 	}
 
 	w := parser.NewWalker()
@@ -1212,12 +1223,26 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 	}
 	fresh, changed, removed, err := w.IncrementalReindex(g, repoRoot, known)
 	if err != nil {
-		return nil, fmt.Errorf("incremental reindex: %w", err)
+		return nil, nil, fmt.Errorf("incremental reindex: %w", err)
 	}
 
 	unchanged := len(fresh) - changed
 	logutil.Info("synapses: smart reindex: %d changed, %d unchanged, %d removed\n",
 		changed, unchanged, removed)
+
+	// Derive the changed file paths by comparing fresh mtimes against known.
+	var changedFiles []string
+	for path, mtime := range fresh {
+		if stored, ok := known[path]; !ok || stored != mtime {
+			changedFiles = append(changedFiles, path)
+		}
+	}
+	// Also include removed files (present in known but not in fresh).
+	for path := range known {
+		if _, ok := fresh[path]; !ok {
+			changedFiles = append(changedFiles, path)
+		}
+	}
 
 	if changed+removed > 0 {
 		// Reload stored call sites from ALL files so ResolveCallEdges can
@@ -1247,7 +1272,7 @@ func smartReindex(repoRoot string, st *store.Store, plugins []config.PluginConfi
 	if saveErr := st.SaveFileMtimes(fresh); saveErr != nil {
 		logutil.Error("synapses: save file mtimes: %v\n", saveErr)
 	}
-	return g, nil
+	return g, changedFiles, nil
 }
 
 // mergeLinkedProject loads the pre-built index for linkedPath and merges it
@@ -2078,7 +2103,7 @@ func fetchTopNSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, s
 // mainEmbedResolver adapts embed.Client + store.Store into the resolver.EmbedResolver
 // interface for post-embed discovery passes (doc↔code linking, knowledge relations).
 type mainEmbedResolver struct {
-	ec *embed.Client
+	ec embed.Embedder
 	st *store.Store
 }
 
@@ -2103,7 +2128,7 @@ func (r *mainEmbedResolver) SearchByVector(queryVec []float32, k int) []resolver
 // background goroutine after startup so the MCP server is never delayed.
 // Rate-limited to ~10 req/s to avoid saturating a local Ollama instance.
 // Fail-silent: any error per-node is logged to stderr and skipped.
-func embedAllNodes(ctx context.Context, ec *embed.Client, g *graph.Graph, st *store.Store, onComplete ...func()) {
+func embedAllNodes(ctx context.Context, ec embed.Embedder, g *graph.Graph, st *store.Store, onComplete ...func()) {
 	if ec == nil || st == nil {
 		return
 	}
@@ -2114,6 +2139,12 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, g *graph.Graph, st *st
 	}
 
 	logutil.Info("synapses: embedding %d nodes (model: %s) …\n", len(nodeIDs), ec.Model())
+
+	// Check if embedder supports batch embedding (embed.Client, BuiltinEmbedder do).
+	type batchEmbedder interface {
+		EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
+	}
+	batcher, hasBatch := ec.(batchEmbedder)
 
 	const batchSize = 16
 	done := 0
@@ -2147,9 +2178,15 @@ func embedAllNodes(ctx context.Context, ec *embed.Client, g *graph.Graph, st *st
 		}
 
 		// Try batch embed; fall back to per-node on error or length mismatch.
-		batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		vecs, batchErr := ec.EmbedBatch(batchCtx, texts)
-		cancel()
+		var vecs [][]float32
+		var batchErr error
+		if hasBatch {
+			batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			vecs, batchErr = batcher.EmbedBatch(batchCtx, texts)
+			cancel()
+		} else {
+			batchErr = fmt.Errorf("no batch support")
+		}
 
 		if batchErr != nil || len(vecs) != len(texts) {
 			// Fallback: embed each node individually (fail-silent per node).

@@ -605,7 +605,7 @@ func TestOpen_PerformancePragmas(t *testing.T) {
 		pragma, want string
 	}{
 		{"synchronous", "1"},       // NORMAL
-		{"cache_size", "-65536"},   // 64 MB
+		{"cache_size", "-16384"},   // 16 MB
 		{"mmap_size", "268435456"}, // 256 MB
 		{"temp_store", "2"},        // MEMORY
 	} {

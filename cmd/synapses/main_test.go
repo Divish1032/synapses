@@ -1261,7 +1261,7 @@ func TestSmartReindex_NoStoredMtimes(t *testing.T) {
 	defer st.Close()
 
 	// Fresh store has no graph and no mtimes — should return error.
-	_, err = smartReindex(dir, st, nil, nil)
+	_, _, err = smartReindex(dir, st, nil, nil)
 	if err == nil {
 		t.Error("expected error when store has no cached graph")
 	}
@@ -1632,7 +1632,7 @@ func TestSmartReindex_WithData(t *testing.T) {
 	dir, st, _ := buildTestIndexedDir(t)
 	defer st.Close()
 	// buildGraph saves both graph and file mtimes, so smartReindex should succeed.
-	g2, err := smartReindex(dir, st, nil, nil)
+	g2, _, err := smartReindex(dir, st, nil, nil)
 	if err != nil {
 		t.Logf("smartReindex: %v (acceptable if no changes)", err)
 	} else if g2 == nil {

@@ -125,7 +125,7 @@ type Server struct {
 	brainClient        *brain.Client          // set via SetBrainClient; nil if brain not configured
 	webCache           *webcache.Cache        // nil if webcache not configured
 	pulseClient        *pulse.Client          // set via SetPulseClient; nil if pulse not configured
-	embedClient        *embed.Client          // nil if embedding_endpoint not configured
+	embedClient        embed.Embedder          // nil if embeddings not configured
 	memoryEmbedder     embed.Embedder         // nil if embeddings mode is "off" — set via SetMemoryEmbedder
 	techStack          []scout.TechStackEntry // set via SetTechStack after autosubscribe; nil if not detected
 	injectionScanner   *InjectionScanner      // prompt injection scanner for externally-sourced content (nil = disabled)
@@ -1069,10 +1069,11 @@ func (s *Server) SetTechStack(ts []scout.TechStackEntry) {
 	s.techStack = ts
 }
 
-// SetEmbedClient wires an embedding client so handleSemanticSearch can
+// SetEmbedClient wires an embedder so handleSemanticSearch can
 // perform vector similarity search in addition to FTS5 BM25 ranking.
+// Accepts any embed.Embedder (builtin ONNX, external HTTP client, etc.).
 // Pass nil to disable vector search (falls back to FTS5-only).
-func (s *Server) SetEmbedClient(ec *embed.Client) {
+func (s *Server) SetEmbedClient(ec embed.Embedder) {
 	s.embedClient = ec
 }
 

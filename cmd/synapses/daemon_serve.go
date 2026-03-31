@@ -629,13 +629,33 @@ func restToolsHandler(reg *projectRegistry, projectInit func(string) (*ProjectIn
 			return
 		}
 
-		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
-			return projectInit(absPath)
-		})
-		if initErr != nil {
+		type restPIResult struct {
+			pi  *ProjectInstance
+			err error
+		}
+		restCh := make(chan restPIResult, 1)
+		go func() {
+			pi, err := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+				return projectInit(absPath)
+			})
+			restCh <- restPIResult{pi, err}
+		}()
+
+		var pi *ProjectInstance
+		select {
+		case res := <-restCh:
+			if res.err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + mcpsrv.StripInternalPaths(res.err.Error())}) //nolint:errcheck
+				return
+			}
+			pi = res.pi
+		case <-time.After(60 * time.Second):
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "init project: " + mcpsrv.StripInternalPaths(initErr.Error())}) //nolint:errcheck
+			w.Header().Set("Retry-After", "10")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "project still loading — retry in a few seconds"}) //nolint:errcheck
 			return
 		}
 		if wg != nil {
@@ -1606,11 +1626,33 @@ func cmdDaemonServe(args []string) error {
 			return
 		}
 
-		pi, initErr := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
-			return initProjectInstance(appCtx, absPath, sharedPulse, reg)
-		})
-		if initErr != nil {
-			http.Error(w, "init project: "+mcpsrv.StripInternalPaths(initErr.Error()), http.StatusInternalServerError)
+		// Project init with timeout: large repos (225K+ nodes) can take
+		// minutes to load. Use a 60s deadline so the HTTP client gets a
+		// 503 instead of hanging indefinitely. The singleflight in GetOrSet
+		// continues in the background — the next request will find it warm.
+		type piResult struct {
+			pi  *ProjectInstance
+			err error
+		}
+		ch := make(chan piResult, 1)
+		go func() {
+			pi, err := reg.GetOrSet(absPath, func() (*ProjectInstance, error) {
+				return initProjectInstance(appCtx, absPath, sharedPulse, reg)
+			})
+			ch <- piResult{pi, err}
+		}()
+
+		var pi *ProjectInstance
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				http.Error(w, "init project: "+mcpsrv.StripInternalPaths(res.err.Error()), http.StatusInternalServerError)
+				return
+			}
+			pi = res.pi
+		case <-time.After(60 * time.Second):
+			w.Header().Set("Retry-After", "10")
+			http.Error(w, "project still loading — retry in a few seconds", http.StatusServiceUnavailable)
 			return
 		}
 		saveKnownProjectWg.Add(1)
@@ -2343,11 +2385,10 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		srv.SetPulseClient(sharedPulse)
 	}
 
-	// Node embeddings (semantic search).
+	// Node embeddings (semantic search) — prefer external endpoint, fall back to builtin.
+	var nodeEmbedder embed.Embedder
 	if cfg.EmbeddingEndpoint != "" {
-		embedCli := embed.NewClient(cfg.EmbeddingEndpoint, "")
-		srv.SetEmbedClient(embedCli)
-		go embedAllNodes(projCtx, embedCli, g, st)
+		nodeEmbedder = embed.NewClient(cfg.EmbeddingEndpoint, "")
 	}
 
 	// Memory embeddings (recall vector search).
@@ -2368,6 +2409,17 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 			}
 		}()
 		go embedAllMemories(projCtx, memEmbedder, st, sharedPulse)
+
+		// Use builtin embedder for node embeddings when no external endpoint is set.
+		if nodeEmbedder == nil {
+			nodeEmbedder = memEmbedder
+		}
+	}
+
+	// Wire node embedder for semantic search and kick off background embedding.
+	if nodeEmbedder != nil {
+		srv.SetEmbedClient(nodeEmbedder)
+		go embedAllNodes(projCtx, nodeEmbedder, g, st)
 	}
 
 	// File watcher.

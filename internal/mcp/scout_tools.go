@@ -310,7 +310,7 @@ func (s *Server) lookupEntityDocs(ctx context.Context, entityName string) (*mcpg
 	// Find the entity node by indexed lookup, then apply suffix filter.
 	var entityNode *graph.Node
 	for _, n := range s.graph.FindByName(entityName) {
-		if n.Name == entityName || strings.HasSuffix(n.Name, "/"+entityName) {
+		if n.Name == entityName || strings.HasSuffix(n.Name, "/"+entityName) || strings.HasSuffix(n.Name, "."+entityName) {
 			entityNode = n
 			break
 		}
@@ -319,26 +319,44 @@ func (s *Server) lookupEntityDocs(ctx context.Context, entityName string) (*mcpg
 		return mcpgo.NewToolResultError(fmt.Sprintf("entity %q not found in graph", entityName)), nil
 	}
 
-	// Collect external package nodes reachable via IMPORTS edges from this entity.
+	// Collect external package nodes reachable via IMPORTS edges.
+	// For methods/functions, walk up to the parent file node to find file-level imports.
 	seen := make(map[string]bool)
 	var packages []string
-	for _, e := range s.graph.OutEdges(entityNode.ID) {
-		if e.Type != graph.EdgeImports {
-			continue
+
+	collectImports := func(nodeID graph.NodeID) {
+		for _, e := range s.graph.OutEdges(nodeID) {
+			if e.Type != graph.EdgeImports {
+				continue
+			}
+			target := s.graph.GetNode(e.To)
+			if target == nil || target.Type != graph.NodePackage {
+				continue
+			}
+			if webcache.IsStdlib(target.Name) || seen[target.Name] {
+				continue
+			}
+			seen[target.Name] = true
+			packages = append(packages, target.Name)
 		}
-		target := s.graph.GetNode(e.To)
-		if target == nil || target.Type != graph.NodePackage {
-			continue
+	}
+
+	// First try the entity itself.
+	collectImports(entityNode.ID)
+
+	// If no imports found and entity is a method/function, walk up to the parent
+	// file node and collect its IMPORTS edges (same approach as get_context).
+	if len(packages) == 0 && entityNode.File != "" {
+		for _, fn := range s.graph.FindByFile(entityNode.File) {
+			if fn.Type == graph.NodeFile {
+				collectImports(fn.ID)
+				break
+			}
 		}
-		if webcache.IsStdlib(target.Name) || seen[target.Name] {
-			continue
-		}
-		seen[target.Name] = true
-		packages = append(packages, target.Name)
 	}
 
 	if len(packages) == 0 {
-		return mcpgo.NewToolResultError(fmt.Sprintf("no external package imports found for entity %q", entityName)), nil
+		return mcpgo.NewToolResultError(fmt.Sprintf("no external package imports found for entity %q; this entity is defined in %s but the file has no third-party imports", entityName, entityNode.File)), nil
 	}
 
 	// Parse go.mod versions once for all packages.

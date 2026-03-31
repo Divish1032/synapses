@@ -276,3 +276,6 @@ func (c *Client) Model() string {
 	}
 	return c.model
 }
+
+// Close is a no-op for the HTTP client (no resources to release).
+func (c *Client) Close() error { return nil }

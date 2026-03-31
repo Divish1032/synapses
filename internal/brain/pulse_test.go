@@ -110,9 +110,9 @@ func TestComputeHealth(t *testing.T) {
 // OllamaModelLoaded is set to "" without returning an error.
 func TestPollOllamaNoServer(t *testing.T) {
 	p := NewSystemPulse()
-	// pollOllama uses p.httpClient which has a 2-second timeout.
-	// Since no server is listening on 11434 in CI, the connection is
-	// refused immediately (not a 2-second wait).
+	// Point at a port that is guaranteed to not be running Ollama,
+	// so this test works even on dev machines with Ollama on :11434.
+	p.WithOllamaURL("http://127.0.0.1:19999/api/ps")
 	p.pollOllama()
 
 	state := p.Current()

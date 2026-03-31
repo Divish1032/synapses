@@ -520,7 +520,7 @@ func TestSmartReindex_WithCachedGraphCov(t *testing.T) {
 	}
 
 	// Now smartReindex should succeed.
-	g2, err := smartReindex(dir, st, nil, nil)
+	g2, _, err := smartReindex(dir, st, nil, nil)
 	if err != nil {
 		t.Errorf("smartReindex returned error: %v", err)
 		return

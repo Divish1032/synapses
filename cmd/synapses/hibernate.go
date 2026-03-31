@@ -524,10 +524,15 @@ func wakeProjectInstance(
 			srv.SetTechStack(entries)
 		}
 	}()
+	var wakeNodeEmbedder embed.Embedder
 	if cfg.EmbeddingEndpoint != "" {
-		embedCli := embed.NewClient(cfg.EmbeddingEndpoint, "")
-		srv.SetEmbedClient(embedCli)
-		go embedAllNodes(projCtx, embedCli, g, st)
+		wakeNodeEmbedder = embed.NewClient(cfg.EmbeddingEndpoint, "")
+	} else if memEmbedder != nil {
+		wakeNodeEmbedder = memEmbedder
+	}
+	if wakeNodeEmbedder != nil {
+		srv.SetEmbedClient(wakeNodeEmbedder)
+		go embedAllNodes(projCtx, wakeNodeEmbedder, g, st)
 	}
 	if memEmbedder != nil {
 		go func() {
