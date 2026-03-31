@@ -308,6 +308,8 @@ func wakeProjectInstance(
 		restoreHibernated("LoadGraph failed")
 		return nil, fmt.Errorf("wake: LoadGraph failed (will need cold start): %w", err)
 	}
+	// Set graph root so search/investigate handlers can read source files.
+	g.SetRoot(absPath)
 
 	// 6. Restore columnar index from snapshot blob (synchronous, ~50-100ms).
 	tryLoadSnapshot(g, st)
@@ -602,8 +604,8 @@ func startProjectSocket(ctx context.Context, srv *mcpsrv.Server, absPath string,
 
 // Sweeper defaults — used when HibernateConfig fields are zero.
 const (
-	defaultIdleMinutes     = 60
-	defaultPressureMinutes = 30
+	defaultIdleMinutes     = 10
+	defaultPressureMinutes = 5
 	defaultHeapThresholdMB = 1024 // 1 GB
 )
 
