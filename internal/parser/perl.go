@@ -118,7 +118,81 @@ func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 			p.handleExprStmt(g, child, src, filePath, fileNodeID)
 		}
 	}
+	// Sprint 28: collect call sites from function/method calls.
+	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
+		FuncTypes: map[string]bool{
+			"subroutine_declaration_statement": true,
+		},
+		CallTypes: map[string]bool{
+			"function_call_expression": true,
+			"method_call_expression":   true,
+		},
+		NameExtractor: func(n sitter.Node, src []byte) string {
+			// Extract sub name from bareword child.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if !child.IsNull() && nodeType(child) == "bareword" {
+					name := childText(child, src)
+					if currentPkg != "" {
+						return currentPkg + "::" + name
+					}
+					return name
+				}
+			}
+			return ""
+		},
+		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (string, string) {
+			nt := nodeType(n)
+			switch nt {
+			case "function_call_expression":
+				// function_call_expression: function child = callee name.
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					child := n.Child(i)
+					if !child.IsNull() && nodeType(child) == "function" {
+						name := childText(child, src)
+						// Qualified: Foo::helper → alias="Foo", callee="helper"
+						if idx := strings.LastIndex(name, "::"); idx >= 0 {
+							return name[:idx], name[idx+2:]
+						}
+						return "", name
+					}
+				}
+			case "method_call_expression":
+				// method_call_expression: receiver -> method(args)
+				var method string
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					child := n.Child(i)
+					if !child.IsNull() && nodeType(child) == "method" {
+						method = childText(child, src)
+					}
+				}
+				if method != "" {
+					return "self", method // treat as self-call for resolver
+				}
+			}
+			return "", ""
+		},
+		IsBuiltin: isPerlBuiltin,
+	})
+
 	return nil
+}
+
+// isPerlBuiltin returns true for common Perl built-in functions.
+func isPerlBuiltin(name string) bool {
+	switch name {
+	case "print", "say", "warn", "die", "croak", "confess",
+		"push", "pop", "shift", "unshift", "splice",
+		"chomp", "chop", "length", "substr", "index", "join", "split",
+		"open", "close", "read", "write", "seek", "tell",
+		"defined", "exists", "delete", "ref", "bless",
+		"keys", "values", "each", "sort", "reverse", "map", "grep",
+		"require", "eval", "local", "return", "my", "our",
+		"chmod", "chown", "mkdir", "rmdir", "rename", "unlink",
+		"scalar", "wantarray":
+		return true
+	}
+	return false
 }
 
 // handleSubDecl emits a NodeFunction for a sub declaration.

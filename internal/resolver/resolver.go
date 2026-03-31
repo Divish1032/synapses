@@ -201,34 +201,15 @@ func ResolveCallEdges(g *graph.Graph) int {
 			}
 
 			// Fallback: alias was not an import, typed var, or class name — treat as var.Method().
-			// Search the caller's own package and all imported packages
-			// for a method matching ".FuncName" (e.g. Graph.CarveEgoGraph).
+			// Only search the caller's own package. Cross-package method search by suffix
+			// was removed in Sprint 28 because it created too many false CALLS edges
+			// (e.g., Flask.run → _AppCtxGlobals.get) by guessing targets across packages
+			// without type information. High-confidence paths (import, type map, class name,
+			// capitalization heuristic) already cover correct cross-package resolutions.
 			if len(targets) == 0 {
 				callerNode := g.GetNode(site.CallerID)
 				if callerNode != nil {
 					targets = findInPackage(nameIdx, callerNode.Package, site.FuncName, instantiated)
-				}
-				if len(targets) == 0 {
-					if aliases, ok := importMap[site.CallerFile]; ok {
-						sortedPaths := make([]string, 0, len(aliases))
-						for _, p := range aliases {
-							sortedPaths = append(sortedPaths, p)
-						}
-						sort.Strings(sortedPaths)
-						for _, importPath := range sortedPaths {
-							shortPkg := path.Base(importPath)
-							ids := findInPackage(nameIdx, shortPkg, site.FuncName, instantiated)
-							if len(ids) == 0 {
-								if actualPkg, ok2 := dirBaseToPkg[shortPkg]; ok2 {
-									ids = findInPackage(nameIdx, actualPkg, site.FuncName, instantiated)
-								}
-							}
-							if len(ids) > 0 {
-								targets = ids
-								break
-							}
-						}
-					}
 				}
 			}
 		} else {

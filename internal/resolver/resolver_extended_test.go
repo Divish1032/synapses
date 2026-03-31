@@ -270,7 +270,7 @@ func TestResolveCallEdges_PrePopulateSeenFromExistingEdges(t *testing.T) {
 // qualified alias is not found in the caller's own package but IS found through
 // scanning all of the file's imports, the correct CALLS edge is created.
 // This covers the inner loop at resolver.go lines 70-78.
-func TestResolveCallEdges_QualifiedFallbackThroughAllImports(t *testing.T) {
+func TestResolveCallEdges_QualifiedFallbackNoLongerCrossPackage(t *testing.T) {
 	g := graph.New("testrepo")
 
 	// util package.
@@ -294,16 +294,17 @@ func TestResolveCallEdges_QualifiedFallbackThroughAllImports(t *testing.T) {
 
 	// Qualified call: alias "u" is NOT the import alias ("util" is), so
 	// aliases["u"] won't be found directly. "Process" is also NOT in "svc".
-	// The fallback loop scanning all imports finds "Process" in "util".
+	// Sprint 28: cross-package fallback removed to reduce false CALLS edges.
+	// This call should NOT resolve — the alias is unknown.
 	g.AddCallSite(graph.CallSite{
 		CallerID:   svcFuncID,
 		CallerFile: "svc.go",
-		PkgAlias:   "u", // alias not in importMap — triggers fallback scan
+		PkgAlias:   "u", // alias not in importMap — no longer triggers cross-pkg fallback
 		FuncName:   "Process",
 	})
 
 	n := resolver.ResolveCallEdges(g)
-	if n == 0 {
-		t.Error("expected CALLS edge via qualified fallback through all imports")
+	if n != 0 {
+		t.Error("expected no CALLS edge — cross-package qualified fallback was removed (Sprint 28)")
 	}
 }

@@ -2488,7 +2488,8 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 	// Wire: routeNode --HANDLES--> handler
 	g.AddEdge(&graph.Edge{From: routeID, To: handlerID, Type: graph.EdgeHandles})
 
-	// --- include_inferred=true (default): route node should appear in callers ---
+	// Sprint 28: HANDLES edges now route to Related (not callers) to reduce
+	// callee/caller noise. Route nodes should appear in "related" instead.
 	resTrue, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":           "GetUsers",
 		"include_inferred": true,
@@ -2498,9 +2499,11 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 		t.Fatalf("include_inferred=true: unexpected error: %v", err)
 	}
 	mTrue := mustResult(t, resTrue, nil)
-	callers, _ := mTrue["callers"].([]any)
+
+	// Route node should appear in related (not callers) after Sprint 28.
+	related, _ := mTrue["related"].([]any)
 	foundRoute := false
-	for _, c := range callers {
+	for _, c := range related {
 		cm, _ := c.(map[string]any)
 		node, _ := cm["node"].(map[string]any)
 		if node["type"] == "route" {
@@ -2508,10 +2511,20 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 		}
 	}
 	if !foundRoute {
-		t.Error("include_inferred=true: expected route node in callers, got none")
+		t.Error("include_inferred=true: expected route node in related, got none")
 	}
 
-	// --- include_inferred=false: route node must be absent ---
+	// Route node should NOT be in callers.
+	callers, _ := mTrue["callers"].([]any)
+	for _, c := range callers {
+		cm, _ := c.(map[string]any)
+		node, _ := cm["node"].(map[string]any)
+		if node["type"] == "route" {
+			t.Error("include_inferred=true: route node should not appear in callers (Sprint 28)")
+		}
+	}
+
+	// --- include_inferred=false: route node must be absent from all buckets ---
 	resFalse, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity":           "GetUsers",
 		"include_inferred": false,
@@ -2521,12 +2534,12 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 		t.Fatalf("include_inferred=false: unexpected error: %v", err)
 	}
 	mFalse := mustResult(t, resFalse, nil)
-	callersFalse, _ := mFalse["callers"].([]any)
-	for _, c := range callersFalse {
+	relatedFalse, _ := mFalse["related"].([]any)
+	for _, c := range relatedFalse {
 		cm, _ := c.(map[string]any)
 		node, _ := cm["node"].(map[string]any)
 		if node["type"] == "route" {
-			t.Error("include_inferred=false: route node must not appear in callers")
+			t.Error("include_inferred=false: route node must not appear in related")
 		}
 	}
 }

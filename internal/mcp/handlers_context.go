@@ -792,6 +792,10 @@ func (s *Server) handleGetContext(
 					if edge.Type == graph.EdgeImports && !seenImport[edge.To] {
 						seenImport[edge.To] = true
 						if importNode := s.graph.GetNode(edge.To); importNode != nil {
+							// Sprint 28: classify imports as internal vs external.
+							// Internal imports (file within the repo) are lower value
+							// for "what does this file depend on?" queries. External
+							// imports (stdlib, third-party packages) are the primary signal.
 							nodeCopy := *importNode
 							if prefix != "" {
 								nodeCopy.File = strings.TrimPrefix(nodeCopy.File, prefix)
@@ -807,6 +811,10 @@ func (s *Server) handleGetContext(
 				break
 			}
 		}
+		// Sort imports alphabetically for stable output.
+		sort.Slice(dc.Imports, func(i, j int) bool {
+			return dc.Imports[i].Node.Name < dc.Imports[j].Node.Name
+		})
 	}
 
 	// Canonical Documentation field: for code roots, merge CrossDomain.DocumentedIn
@@ -1546,6 +1554,26 @@ func matchRulesForFile(cfg *config.Config, file string) []brain.RuleInput {
 
 // toDirectionalContext reshapes a flat SubGraph into the directional form.
 // Classification is based on direct CALLS edges incident on the root node.
+// isCalleeCallerNoise returns true for node types that should not appear in
+// callee/caller lists — they are structural graph artifacts, not meaningful
+// call relationships. These nodes are routed to Related instead.
+func isCalleeCallerNoise(nodeType graph.NodeType) bool {
+	switch nodeType {
+	case graph.NodeFile, graph.NodePackage, graph.NodeVariable, graph.NodeRoute:
+		return true
+	}
+	return false
+}
+
+// maxCallees and maxCallers cap the number of callees/callers returned in
+// get_context JSON responses. Beyond these limits, low-relevance entries are
+// noise that confuses LLM agents. The lists are already sorted by relevance
+// descending, so truncation removes the least relevant entries.
+const (
+	maxCallees = 15
+	maxCallers = 20
+)
+
 func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	// Build sets of nodes directly called by / directly calling the root.
 	// R1: also include HANDLES edges so route nodes surface as callees.
@@ -1566,13 +1594,18 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			if e.From == sg.Root {
 				containedByRoot[e.To] = true
 			}
-		case graph.EdgeCalls, graph.EdgeHandles:
+		case graph.EdgeCalls:
 			if e.From == sg.Root {
 				calleesOfRoot[e.To] = true
 			}
 			if e.To == sg.Root {
 				callersOfRoot[e.From] = true
 			}
+		case graph.EdgeHandles:
+			// HANDLES edges (inferred route→handler) are lower confidence than
+			// CALLS edges. Route to Related instead of callees/callers to reduce
+			// noise in callee/caller lists (Sprint 28 — GraphBench precision fix).
+			// The route node still appears in the context, just in Related.
 		case graph.EdgeImplements:
 			// IMPLEMENTS edges: From = Implementor, To = Interface.
 			// Surface both directions in Related for find_implementations queries.
@@ -1647,9 +1680,20 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 		case knowledgeOfRoot[id]:
 			dc.Knowledge = append(dc.Knowledge, cn)
 		case calleesOfRoot[id]:
-			dc.Callees = append(dc.Callees, cn)
+			// Sprint 28: filter non-code types from callee list — NodeFile,
+			// NodePackage, NodeVariable, and NodeRoute are structural artifacts,
+			// not meaningful callees.
+			if cn.Node != nil && isCalleeCallerNoise(cn.Node.Type) {
+				dc.Related = append(dc.Related, cn)
+			} else {
+				dc.Callees = append(dc.Callees, cn)
+			}
 		case callersOfRoot[id]:
-			dc.Callers = append(dc.Callers, cn)
+			if cn.Node != nil && isCalleeCallerNoise(cn.Node.Type) {
+				dc.Related = append(dc.Related, cn)
+			} else {
+				dc.Callers = append(dc.Callers, cn)
+			}
 		case containedByRoot[id]:
 			// Doc file children (sections) go into Documentation for better
 			// discoverability; code file children stay in Related.
@@ -1704,6 +1748,13 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	}
 	sort.Slice(dc.Callees, func(i, j int) bool { return byRelevance(dc.Callees[i], dc.Callees[j]) < 0 })
 	sort.Slice(dc.Callers, func(i, j int) bool { return byRelevance(dc.Callers[i], dc.Callers[j]) < 0 })
+	// Sprint 28: cap callees/callers to reduce noise in agent responses.
+	if len(dc.Callees) > maxCallees {
+		dc.Callees = dc.Callees[:maxCallees]
+	}
+	if len(dc.Callers) > maxCallers {
+		dc.Callers = dc.Callers[:maxCallers]
+	}
 	sort.Slice(dc.Related, func(i, j int) bool { return byRelevance(dc.Related[i], dc.Related[j]) < 0 })
 	sort.Slice(dc.Documentation, func(i, j int) bool { return byRelevance(dc.Documentation[i], dc.Documentation[j]) < 0 })
 	sort.Slice(dc.Knowledge, func(i, j int) bool { return byRelevance(dc.Knowledge[i], dc.Knowledge[j]) < 0 })
