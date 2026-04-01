@@ -46,7 +46,19 @@ func extractRustDeclInfo(root sitter.Node, src []byte, lines []string) map[strin
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
 			}
-		case "type_item", "const_item", "static_item":
+		case "type_item":
+			// Type aliases: full normalized declaration IS the signature (no body to strip).
+			// e.g. "type Callback = fn(Event) -> Result<(), Error>" — consistent with Go type aliases.
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
+				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				sl := int(n.StartPoint().Row) + 1
+				result[name] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{}),
+					Doc:       extractLineDoc(lines, sl, "///"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+			}
+		case "const_item", "static_item":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1

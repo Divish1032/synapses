@@ -238,3 +238,27 @@ func TestRustParser_TraitSignature(t *testing.T) {
 		t.Errorf("trait signature %q should contain 'Authenticatable'", sig)
 	}
 }
+
+func TestRustParser_TypeAliasSignature(t *testing.T) {
+	src := `
+/// A handler function type.
+pub type Handler = fn(event: &Event) -> Result<(), Error>;
+`
+	g := graph.New("testrepo")
+	p := parser.NewRustParser()
+	if err := p.Parse(g, "handler.rs", []byte(src)); err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	n := findNodeByName(g, "Handler", graph.NodeStruct)
+	if n == nil {
+		t.Fatal("Handler type alias not found")
+	}
+	sig := n.Metadata["signature"]
+	if sig == "" {
+		t.Fatal("Handler type alias should have a signature")
+	}
+	if !strings.Contains(sig, "Handler") || !strings.Contains(sig, "fn") {
+		t.Errorf("type alias signature %q should contain 'Handler' and 'fn'", sig)
+	}
+}
