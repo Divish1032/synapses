@@ -72,10 +72,15 @@ func (s *Server) handleFindEntity(
 	// Optional: search sibling projects when projects= is specified.
 	projectsRaw, _ := req.GetArguments()["projects"].(string)
 
-	// Exact match first, then substring.
+	// Exact match first, then substring. Track which path found the results so
+	// the "why" field accurately describes how the entity was located.
+	matchReason := "exact match"
 	nodes := s.graph.FindByName(query)
 	if len(nodes) == 0 {
 		nodes = s.graph.FindByPatternLimit(query, 50)
+		if len(nodes) > 0 {
+			matchReason = "pattern match"
+		}
 	}
 	// Dotted method name fallback: "Store.Close" → search "Close", filter by "Store".
 	// Go method nodes are stored by their short name (e.g. "Close") without the
@@ -92,6 +97,9 @@ func (s *Server) handleFindEntity(
 				strings.Contains(strings.ToLower(n.File), prefix) {
 				nodes = append(nodes, n)
 			}
+		}
+		if len(nodes) > 0 {
+			matchReason = "method name match"
 		}
 	}
 
@@ -135,7 +143,7 @@ func (s *Server) handleFindEntity(
 		}
 		m.Callers = s.graph.Fanin(n.ID)
 		m.Callees = s.graph.Fanout(n.ID)
-		m.Why = buildSearchWhy("exact match", m.Callers, m.Callees)
+		m.Why = buildSearchWhy(matchReason, m.Callers, m.Callees)
 		results = append(results, m)
 	}
 

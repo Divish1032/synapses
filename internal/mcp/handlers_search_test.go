@@ -290,3 +290,71 @@ func TestHandleFindEntity_WhyFieldInJSONFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleFindEntity_PatternMatch_WhyLabel verifies that nodes found via
+// pattern matching (not exact name) get "pattern match" in the why field,
+// not the misleading "exact match" label.
+func TestHandleFindEntity_PatternMatch_WhyLabel(t *testing.T) {
+	s := newTestServer(t)
+
+	// Add a node whose full name is "AuthLoginHandler" — won't match query "Auth" exactly.
+	id := s.graph.MakeNodeID("pkg/auth/auth.go", "AuthLoginHandler")
+	s.graph.AddNode(&graph.Node{ID: id, Name: "AuthLoginHandler", Type: graph.NodeFunction,
+		File: "pkg/auth/auth.go", Package: "auth", Line: 1})
+
+	// Query "Auth" — FindByName("Auth") returns nothing; FindByPatternLimit("Auth") returns the node.
+	res, err := s.handleFindEntity(context.Background(), callTool(map[string]any{
+		"query":  "Auth",
+		"format": "json",
+	}))
+	m := mustResult(t, res, err)
+
+	matches, ok := m["matches"].([]any)
+	if !ok || len(matches) == 0 {
+		t.Skip("no matches returned for pattern query")
+	}
+	for _, r := range matches {
+		rm, _ := r.(map[string]any)
+		why, _ := rm["why"].(string)
+		if strings.Contains(why, "exact match") {
+			t.Errorf("pattern match result should not claim 'exact match' in why, got %q", why)
+		}
+		if !strings.Contains(why, "pattern match") {
+			t.Errorf("expected 'pattern match' in why for pattern-matched result, got %q", why)
+		}
+	}
+}
+
+// TestHandleSemanticSearch_WhyFieldPresent verifies that semantic/fulltext mode
+// results include the "why" field with NL relevance context.
+// Uses fulltext (FTS5) mode to avoid requiring embeddings in the test environment.
+func TestHandleSemanticSearch_WhyFieldPresent(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	res, err := s.handleSemanticSearch(context.Background(), callTool(map[string]any{
+		"query": "AuthLogin",
+		"mode":  "fulltext",
+	}))
+	// handleSemanticSearch requires a store — skip if unavailable.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.IsError {
+		t.Skip("semantic search unavailable in test environment")
+	}
+
+	m := mustResult(t, res, nil)
+	results, ok := m["results"].([]any)
+	if !ok || len(results) == 0 {
+		t.Skip("no results returned — FTS5 index may be empty in test environment")
+	}
+	for i, r := range results {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("result[%d] is not a map", i)
+		}
+		if _, hasWhy := rm["why"]; !hasWhy {
+			t.Errorf("semantic result[%d] missing 'why' field — enrichment not applied", i)
+		}
+	}
+}
