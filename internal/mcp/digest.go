@@ -77,6 +77,19 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 	}
 
+	// Sprint 23.1: entity memories — institutional knowledge attached to this entity.
+	// Rendered near the beginning (high-attention zone) so agents never miss prior
+	// session findings. "summary" level skips these to respect the ~50-token budget.
+	if detailLevel != "summary" {
+		for _, m := range dc.EntityMemories {
+			content := m.Content
+			if len(content) > 200 {
+				content = content[:200] + "…"
+			}
+			fmt.Fprintf(&b, "💡 %s\n", content)
+		}
+	}
+
 	// === MIDDLE: Supplementary content (lower LLM attention zone) ===
 
 	// R3: Git blame line — who last touched this function and how stale it is.
@@ -320,9 +333,14 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		renderCDBucket("Cross-domain related", dc.CrossDomain.Related)
 	}
 
-	// Show related nodes with brain summaries (often interface implementations, types).
+	// Show related nodes with brain summaries or nl_description fallback.
+	// Sprint 23.1: use nl_description (computed by enrichNodesWithNL) when brain
+	// is unavailable so agents still get a meaningful description of related entities.
 	for _, r := range dc.Related {
 		depSummary := getDepSummary(r.Node.Name, dc.ContextPacket)
+		if depSummary == "" {
+			depSummary = r.Node.Metadata["nl_description"]
+		}
 		if depSummary == "" {
 			continue // only show related nodes if we have a summary for them
 		}
@@ -332,11 +350,14 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 
 	// Callee detail blocks: always show all callees in "full" mode so the output
 	// is visibly richer than "neighbors" even when the brain cache is cold.
-	// Without summaries, only the entity header line is written (no Summary line).
-	// Placed at end — actionable details agents act on immediately.
+	// Sprint 23.1: use nl_description as fallback when brain DependencySummaries
+	// is empty — enrichNodesWithNL pre-populates this for all code nodes.
 	if len(dc.Callees) > 0 {
 		for _, c := range dc.Callees {
 			depSummary := getDepSummary(c.Node.Name, dc.ContextPacket)
+			if depSummary == "" {
+				depSummary = c.Node.Metadata["nl_description"]
+			}
 			b.WriteString("\n")
 			writeNodeHeader(&b, c.Node, depSummary)
 		}
@@ -412,6 +433,23 @@ func writeNodeHeader(b *strings.Builder, n *graph.Node, summary string) {
 		b.WriteString("⚡ inferred: " + header + "\n")
 	} else {
 		b.WriteString(header + "\n")
+	}
+
+	// Sprint 23.1: entity signatures — the ONE piece of "code" Synapses provides.
+	// Shown for function/method/struct/interface/class nodes only; skipped for
+	// route, file, and package nodes where a signature is meaningless.
+	// Caps at 120 chars to prevent enormous generic signatures from flooding output.
+	if n.Metadata != nil {
+		if sig := n.Metadata["signature"]; sig != "" {
+			switch n.Type {
+			case graph.NodeFunction, graph.NodeMethod, graph.NodeStruct,
+				graph.NodeInterface:
+				if len(sig) > 120 {
+					sig = sig[:120] + "…"
+				}
+				fmt.Fprintf(b, "Signature: %s\n", sig)
+			}
+		}
 	}
 
 	if summary != "" {

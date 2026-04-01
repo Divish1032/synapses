@@ -702,6 +702,147 @@ func TestSerializeCompact_SandwichOrdering_Summary(t *testing.T) {
 	}
 }
 
+// ── Sprint 23.1: signature + entity memories + nl_description fallback ─────────
+
+// TestWriteNodeHeader_Signature verifies that a function node's signature
+// is rendered as a "Signature:" line after the header.
+func TestWriteNodeHeader_Signature(t *testing.T) {
+	var b strings.Builder
+	n := &graph.Node{
+		Name: "handleLogin", Type: graph.NodeFunction, File: "auth/handler.go", Line: 42,
+		Metadata: map[string]string{"signature": "func handleLogin(w http.ResponseWriter, r *http.Request)"},
+	}
+	writeNodeHeader(&b, n, "handles user login")
+	out := b.String()
+	if !strings.Contains(out, "Signature: func handleLogin") {
+		t.Errorf("expected Signature: line in output, got %q", out)
+	}
+	// Summary must appear after signature.
+	sigPos := strings.Index(out, "Signature:")
+	sumPos := strings.Index(out, "Summary:")
+	if sigPos < 0 || sumPos < 0 || sigPos > sumPos {
+		t.Errorf("Signature: must appear before Summary:, got:\n%s", out)
+	}
+}
+
+// TestWriteNodeHeader_SignatureSkippedForRouteNode verifies that route nodes
+// do not emit a Signature: line (route nodes have no meaningful signature).
+func TestWriteNodeHeader_SignatureSkippedForRouteNode(t *testing.T) {
+	var b strings.Builder
+	n := &graph.Node{
+		Name: "GET /api/users", Type: graph.NodeRoute, File: "router.go", Line: 10,
+		Metadata: map[string]string{
+			"signature": "GET /api/users",
+			"inferred":  "true",
+		},
+	}
+	writeNodeHeader(&b, n, "")
+	out := b.String()
+	if strings.Contains(out, "Signature:") {
+		t.Errorf("route node should not emit Signature:, got %q", out)
+	}
+}
+
+// TestWriteNodeHeader_SignatureLongTruncated verifies signatures longer than
+// 120 chars are truncated with an ellipsis.
+func TestWriteNodeHeader_SignatureLongTruncated(t *testing.T) {
+	var b strings.Builder
+	longSig := "func VeryLongFunctionName(paramOne string, paramTwo int, paramThree bool, paramFour float64, paramFive []byte) (string, error)"
+	n := &graph.Node{
+		Name: "VeryLong", Type: graph.NodeFunction, File: "svc.go", Line: 1,
+		Metadata: map[string]string{"signature": longSig},
+	}
+	writeNodeHeader(&b, n, "")
+	out := b.String()
+	if !strings.Contains(out, "Signature:") {
+		t.Fatalf("expected Signature: line, got %q", out)
+	}
+	if !strings.Contains(out, "…") {
+		t.Errorf("expected ellipsis for long signature, got %q", out)
+	}
+}
+
+// TestSerializeCompact_EntityMemories verifies that entity memories are
+// rendered in compact output for "full" and "neighbors" levels, but not "summary".
+func TestSerializeCompact_EntityMemories(t *testing.T) {
+	dc := newTestDC()
+	dc.EntityMemories = []entityMemoryHint{
+		{Content: "Previous session found redirect_uri not validated", Source: "auto"},
+	}
+
+	// full: memory must appear
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "💡") {
+		t.Error("full level: expected 💡 memory line in output")
+	}
+	if !strings.Contains(out, "redirect_uri") {
+		t.Errorf("full level: expected memory content, got:\n%s", out)
+	}
+
+	// neighbors: memory must appear
+	out = serializeCompact(dc, "neighbors")
+	if !strings.Contains(out, "💡") {
+		t.Error("neighbors level: expected 💡 memory line in output")
+	}
+
+	// summary: memory must NOT appear (budget constraint)
+	out = serializeCompact(dc, "summary")
+	if strings.Contains(out, "💡") {
+		t.Error("summary level: must not render entity memories (too verbose for ~50-token budget)")
+	}
+}
+
+// TestSerializeCompact_CalleeNLDescriptionFallback verifies that when brain
+// DependencySummaries is absent, callee detail blocks use nl_description
+// from node metadata as a fallback summary.
+func TestSerializeCompact_CalleeNLDescriptionFallback(t *testing.T) {
+	dc := newTestDC()
+	// Set nl_description on the callee node (normally set by enrichNodesWithNL).
+	dc.Callees[0].Node.Metadata = map[string]string{
+		"nl_description": "validates incoming login request fields",
+	}
+	// No brain ContextPacket — fallback must fire.
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "validates incoming login request fields") {
+		t.Errorf("expected nl_description fallback in callee block, got:\n%s", out)
+	}
+}
+
+// TestSerializeCompact_BrainSummaryWinsOverNLDescription verifies that brain
+// DependencySummaries takes priority over nl_description metadata when both exist.
+func TestSerializeCompact_BrainSummaryWinsOverNLDescription(t *testing.T) {
+	dc := newTestDC()
+	dc.Callees[0].Node.Metadata = map[string]string{
+		"nl_description": "NL description from graph",
+	}
+	dc.ContextPacket = &brain.ContextPacket{
+		DependencySummaries: map[string]string{
+			"ValidateToken": "brain summary for token validation",
+		},
+	}
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "brain summary for token validation") {
+		t.Errorf("expected brain summary in callee block, got:\n%s", out)
+	}
+	if strings.Contains(out, "NL description from graph") {
+		t.Errorf("nl_description must be suppressed when brain summary is available, got:\n%s", out)
+	}
+}
+
+// TestSerializeCompact_SignatureAtSummaryLevel verifies that entity signatures
+// appear even in "summary" detail level (they're written by writeNodeHeader
+// before any level branching occurs).
+func TestSerializeCompact_SignatureAtSummaryLevel(t *testing.T) {
+	dc := newTestDC()
+	dc.Root.Metadata = map[string]string{
+		"signature": "func AuthLogin(ctx context.Context, creds Credentials) (*Token, error)",
+	}
+	out := serializeCompact(dc, "summary")
+	if !strings.Contains(out, "Signature:") {
+		t.Errorf("signature must appear at summary level, got:\n%s", out)
+	}
+}
+
 // TestSerializeCompact_NilMetadata verifies no panic when Root.Metadata is nil.
 func TestSerializeCompact_NilMetadata(t *testing.T) {
 	dc := &directionalContext{
