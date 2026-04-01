@@ -472,6 +472,66 @@ func TestHandleGetImpact_ReviewScope_HasNLSummary(t *testing.T) {
 	}
 }
 
+// TestHandleGetImpact_FilesParam_HasNLSummary verifies the files= (changeset)
+// path also receives NL blast radius fields after Sprint 23.3.
+func TestHandleGetImpact_FilesParam_HasNLSummary(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	// Pass the file that contains AuthLogin — any callers of entities in that
+	// file should be reflected in the blast radius.
+	req := callTool(map[string]any{"files": "pkg/auth/auth.go"})
+	result, err := s.handleGetImpact(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	// blast_radius_summary must be present on the files= path.
+	summary, ok := m["blast_radius_summary"].(string)
+	if !ok || summary == "" {
+		t.Fatalf("expected non-empty blast_radius_summary for files= path, got %v", m["blast_radius_summary"])
+	}
+	// packages_affected must be present and non-negative.
+	pa, ok := m["packages_affected"].(float64)
+	if !ok || pa < 0 {
+		t.Errorf("expected packages_affected >= 0 for files= path, got %v", m["packages_affected"])
+	}
+}
+
+// TestBuildImpactNLText_TransitiveOnlyNoDirect verifies the edge case where
+// direct=0 but transitive>0 (rare: depth-1 callers tombstoned after analysis).
+// The output must not say "0 direct callers" — just "N transitive callers".
+func TestBuildImpactNLText_TransitiveOnlyNoDirect(t *testing.T) {
+	summary := buildImpactNLText("MyFunc", 0, 5, 2, nil, false)
+	if strings.Contains(summary, "0 direct caller") {
+		t.Errorf("should not mention '0 direct callers' when direct=0, got: %q", summary)
+	}
+	if !strings.Contains(summary, "5 transitive caller") {
+		t.Errorf("expected '5 transitive callers' in summary, got: %q", summary)
+	}
+	if !strings.Contains(summary, "MyFunc") {
+		t.Errorf("expected entity name in summary, got: %q", summary)
+	}
+}
+
+// TestBuildImpactNLText_BothDirectAndTransitive verifies the typical case with
+// both direct and transitive callers.
+func TestBuildImpactNLText_BothDirectAndTransitive(t *testing.T) {
+	summary := buildImpactNLText("PayService", 3, 9, 4, []string{"payment"}, false)
+	if !strings.Contains(summary, "3 direct caller") {
+		t.Errorf("expected '3 direct callers', got: %q", summary)
+	}
+	if !strings.Contains(summary, "9 transitive caller") {
+		t.Errorf("expected '9 transitive callers', got: %q", summary)
+	}
+	if !strings.Contains(summary, "4 package") {
+		t.Errorf("expected '4 packages', got: %q", summary)
+	}
+	if !strings.Contains(summary, "payment-path") {
+		t.Errorf("expected domain mention, got: %q", summary)
+	}
+}
+
 // loadTestConfig loads a config from a temp directory.
 func loadTestConfig(t *testing.T) (*config.Config, error) {
 	t.Helper()

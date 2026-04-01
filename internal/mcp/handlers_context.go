@@ -2135,6 +2135,12 @@ func detectCriticalPathDomains(result *graph.ImpactResult, rootName, rootFile st
 }
 
 // buildImpactNLText produces the human-readable blast radius sentence.
+// Examples:
+//   - "Changing AuthService affects 5 direct callers and 12 transitive callers
+//     across 4 packages. Callers include auth/payment-path components."
+//   - "Changing AuthService affects 12 transitive callers across 2 packages."
+//     (when direct=0, omitted rather than "0 direct callers" which is confusing)
+//   - "AuthService has no callers — safe to change in isolation."
 func buildImpactNLText(rootName string, direct, transitive, packages int, domains []string, truncated bool) string {
 	total := direct + transitive
 	if total == 0 {
@@ -2142,16 +2148,30 @@ func buildImpactNLText(rootName string, direct, transitive, packages int, domain
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Changing %s affects %d direct caller", rootName, direct))
-	if direct != 1 {
-		sb.WriteByte('s')
-	}
-	if transitive > 0 {
+	sb.WriteString(fmt.Sprintf("Changing %s affects ", rootName))
+
+	switch {
+	case direct > 0 && transitive > 0:
+		sb.WriteString(fmt.Sprintf("%d direct caller", direct))
+		if direct != 1 {
+			sb.WriteByte('s')
+		}
 		sb.WriteString(fmt.Sprintf(" and %d transitive caller", transitive))
 		if transitive != 1 {
 			sb.WriteByte('s')
 		}
+	case direct > 0:
+		sb.WriteString(fmt.Sprintf("%d direct caller", direct))
+		if direct != 1 {
+			sb.WriteByte('s')
+		}
+	default: // transitive only (direct=0, rare but possible when depth-1 nodes are tombstoned)
+		sb.WriteString(fmt.Sprintf("%d transitive caller", transitive))
+		if transitive != 1 {
+			sb.WriteByte('s')
+		}
 	}
+
 	sb.WriteString(fmt.Sprintf(" across %d package", packages))
 	if packages != 1 {
 		sb.WriteByte('s')

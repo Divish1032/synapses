@@ -369,6 +369,10 @@ func TestGetImpact_ProjectsParameter(t *testing.T) {
 	if !strings.Contains(text, "Validate") {
 		t.Error("expected Validate in cross_project_deps")
 	}
+	// Sprint 23.3: NL fields must be present even on the federation path.
+	if !strings.Contains(text, "blast_radius_summary") {
+		t.Error("expected blast_radius_summary in federation impact response (Sprint 23.3)")
+	}
 }
 
 // ── Test 9: recall with projects= (cross-project found) ─────────────────────
