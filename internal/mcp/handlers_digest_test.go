@@ -885,6 +885,129 @@ func TestSerializeCompact_SignatureAtSummaryLevel(t *testing.T) {
 }
 
 // TestSerializeCompact_NilMetadata verifies no panic when Root.Metadata is nil.
+// ── calleeShortPurpose + firstClause ─────────────────────────────────────────
+
+func TestFirstClause_StopsAtPeriod(t *testing.T) {
+	got := firstClause("validate input. Returns error.", 60)
+	if got != "validate input" {
+		t.Errorf("expected %q, got %q", "validate input", got)
+	}
+}
+
+func TestFirstClause_StopsAtComma(t *testing.T) {
+	got := firstClause("validate input, given req", 60)
+	if got != "validate input" {
+		t.Errorf("expected %q, got %q", "validate input", got)
+	}
+}
+
+func TestFirstClause_CapsAtMaxLen(t *testing.T) {
+	got := firstClause("this is a very long description without any punctuation at all", 10)
+	if got != "this is a " {
+		t.Errorf("expected %q, got %q", "this is a ", got)
+	}
+}
+
+func TestFirstClause_ShortString(t *testing.T) {
+	got := firstClause("ok", 40)
+	if got != "ok" {
+		t.Errorf("expected %q, got %q", "ok", got)
+	}
+}
+
+func TestFirstClause_Empty(t *testing.T) {
+	got := firstClause("", 40)
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestCalleeShortPurpose_NilMetadata(t *testing.T) {
+	n := &graph.Node{Name: "Foo", Type: graph.NodeFunction}
+	if got := calleeShortPurpose(n); got != "" {
+		t.Errorf("expected empty for nil metadata, got %q", got)
+	}
+}
+
+func TestCalleeShortPurpose_NLDescription(t *testing.T) {
+	n := &graph.Node{
+		Name:     "validateInput",
+		Type:     graph.NodeFunction,
+		Metadata: map[string]string{"nl_description": "validate input, given req. Returns error"},
+	}
+	got := calleeShortPurpose(n)
+	if got != "validate input" {
+		t.Errorf("expected %q, got %q", "validate input", got)
+	}
+}
+
+func TestCalleeShortPurpose_DocFallback(t *testing.T) {
+	n := &graph.Node{
+		Name:     "checkPassword",
+		Type:     graph.NodeFunction,
+		Metadata: map[string]string{"doc": "check password strength. Returns bool."},
+	}
+	got := calleeShortPurpose(n)
+	if got != "check password strength" {
+		t.Errorf("expected %q, got %q", "check password strength", got)
+	}
+}
+
+func TestCalleeShortPurpose_NoMetadataEntries(t *testing.T) {
+	n := &graph.Node{
+		Name:     "doSomething",
+		Type:     graph.NodeFunction,
+		Metadata: map[string]string{},
+	}
+	if got := calleeShortPurpose(n); got != "" {
+		t.Errorf("expected empty when metadata has no nl_description or doc, got %q", got)
+	}
+}
+
+func TestSerializeCompact_CallsLineWithPurpose(t *testing.T) {
+	dc := &directionalContext{
+		Root: &graph.Node{ID: "r", Name: "HandleLogin", Type: graph.NodeFunction, File: "auth.go", Line: 1},
+		Callees: []graph.CarvedNode{
+			{Node: &graph.Node{
+				ID: "c1", Name: "validateInput", Type: graph.NodeFunction, File: "validate.go",
+				Metadata: map[string]string{"nl_description": "validate input, given req. Returns error"},
+			}},
+			{Node: &graph.Node{
+				ID: "c2", Name: "hashPassword", Type: graph.NodeFunction, File: "crypto.go",
+				Metadata: map[string]string{},
+			}},
+		},
+	}
+	out := serializeCompact(dc, "full")
+	// validateInput should have purpose in parens; hashPassword has no metadata so name only.
+	if !strings.Contains(out, "validateInput (validate input)") {
+		t.Errorf("expected 'validateInput (validate input)' in Calls line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "hashPassword") {
+		t.Errorf("expected 'hashPassword' in Calls line, got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_CallsLineWithoutPurpose(t *testing.T) {
+	dc := &directionalContext{
+		Root: &graph.Node{ID: "r", Name: "DoWork", Type: graph.NodeFunction, File: "work.go", Line: 1},
+		Callees: []graph.CarvedNode{
+			{Node: &graph.Node{
+				ID: "c1", Name: "helperA", Type: graph.NodeFunction, File: "helper.go",
+				// no metadata — falls back to name only
+			}},
+		},
+	}
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "Calls: helperA") {
+		t.Errorf("expected 'Calls: helperA' (name only) in output, got:\n%s", out)
+	}
+	// No parenthetical purpose when metadata is nil.
+	if strings.Contains(out, "helperA (") {
+		t.Errorf("unexpected purpose fragment for node with nil metadata, got:\n%s", out)
+	}
+}
+
 func TestSerializeCompact_NilMetadata(t *testing.T) {
 	dc := &directionalContext{
 		Root: &graph.Node{

@@ -277,13 +277,29 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 
 	// === END: Actionable items (second-highest LLM attention) ===
 
-	// Calls: list callee names.
+	// Calls: list callee names with inline purpose fragments.
+	// Sprint 23.1: "relationship descriptions" — include a brief purpose clause for
+	// each callee when nl_description or doc is available (e.g. from enrichNodesWithNL).
+	// Format: "Calls: validateInput (validate input) · checkPassword (check password)"
+	// This is the deterministic, zero-LLM version of "A calls B which calls C".
 	if len(dc.Callees) > 0 {
-		names := make([]string, 0, len(dc.Callees))
+		parts := make([]string, 0, len(dc.Callees))
 		for _, c := range dc.Callees {
-			names = append(names, c.Node.Name)
+			// Priority: brain summary first clause > nl_description first clause > doc first clause > name only.
+			// Mirrors the callee detail block priority so the Calls: line and block are consistent.
+			var purpose string
+			if bs := getDepSummary(c.Node.Name, dc.ContextPacket); bs != "" {
+				purpose = firstClause(bs, 40)
+			} else {
+				purpose = calleeShortPurpose(c.Node)
+			}
+			if purpose != "" {
+				parts = append(parts, c.Node.Name+" ("+purpose+")")
+			} else {
+				parts = append(parts, c.Node.Name)
+			}
 		}
-		fmt.Fprintf(&b, "Calls: %s\n", strings.Join(names, " · "))
+		fmt.Fprintf(&b, "Calls: %s\n", strings.Join(parts, " · "))
 	}
 
 	// Called by: list caller names.
@@ -499,6 +515,41 @@ func getRootSummary(n *graph.Node, pkt *brain.ContextPacket) string {
 		}
 	}
 	return ""
+}
+
+// calleeShortPurpose extracts a brief purpose fragment for inline use in Calls: lines.
+// Tries nl_description first clause, then doc first sentence. Returns "" when neither
+// is available so the caller can fall back to name-only.
+// Example: nl_description "validate input, given req. Returns error" → "validate input"
+func calleeShortPurpose(n *graph.Node) string {
+	if n.Metadata == nil {
+		return ""
+	}
+	if nl := n.Metadata["nl_description"]; nl != "" {
+		return firstClause(nl, 40)
+	}
+	if doc := n.Metadata["doc"]; doc != "" {
+		return firstClause(doc, 40)
+	}
+	return ""
+}
+
+// firstClause returns the first clause of s — truncates at '.', ',', or maxLen chars.
+// Used to extract brief purpose fragments from nl_description and doc strings.
+func firstClause(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	for i, r := range s {
+		if i >= maxLen {
+			return s[:maxLen]
+		}
+		if r == '.' || r == ',' {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	if len(s) > maxLen {
+		return s[:maxLen]
+	}
+	return s
 }
 
 // getDepSummary returns the brain dependency summary for a named entity, or "".
