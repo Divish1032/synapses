@@ -2068,7 +2068,24 @@ func (s *Server) handleGetImpact(
 	// For struct/interface nodes, aggregate impact across all their methods.
 	// A struct itself has no incoming CALLS edges — its methods do.
 	if root.Type == graph.NodeStruct || root.Type == graph.NodeInterface {
-		methods := s.graph.FindByPatternLimit(root.Name, 100)
+		// Use DEFINES edges to find only this type's actual methods.
+		// Previously used FindByPatternLimit which matches by substring and returns
+		// methods from unrelated types (e.g. "Command" matching "SubCommand.*",
+		// "CommandParser.run", etc.) causing precision collapse on central types.
+		// OutEdges(root.ID, EdgeDefines) is exact: only methods explicitly defined
+		// on this struct/interface, including cross-file methods added by
+		// ResolveGoMethodDefinesEdges.
+		var methods []*graph.Node
+		for _, e := range s.graph.OutEdges(root.ID) {
+			if e.Type != graph.EdgeDefines {
+				continue
+			}
+			m := s.graph.GetNode(e.To)
+			if m == nil || m.Type != graph.NodeMethod {
+				continue
+			}
+			methods = append(methods, m)
+		}
 		merged := &graph.ImpactResult{Tiers: []graph.ImpactTier{}}
 		seen := make(map[graph.NodeID]bool)
 		methodsTraversed := 0

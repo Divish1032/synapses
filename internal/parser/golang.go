@@ -126,7 +126,11 @@ func extractGoStructFields(root sitter.Node, src []byte) map[string][]string {
 }
 
 func extractInterfaceMethods(root sitter.Node, src []byte) map[string][]string {
-	result := make(map[string][]string)
+	// First pass: collect all declared method names per interface (own methods only).
+	// Second pass: resolve embedded interfaces and merge their methods in.
+	ownMethods := make(map[string][]string)
+	embeds := make(map[string][]string) // ifaceName → list of embedded interface names
+
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
 		if child.IsNull() || nodeType(child) != "type_declaration" {
@@ -145,26 +149,63 @@ func extractInterfaceMethods(root sitter.Node, src []byte) map[string][]string {
 			ifaceName := string(src[nameNode.StartByte():nameNode.EndByte()])
 			var methods []string
 			for k := uint32(0); k < typeNode.ChildCount(); k++ {
-				// Interface method declarations are "method_elem" nodes in the
-				// tree-sitter Go grammar. The method name is the first
-				// field_identifier child of the method_elem.
-				methodElem := typeNode.Child(k)
-				if methodElem.IsNull() || nodeType(methodElem) != "method_elem" {
+				elem := typeNode.Child(k)
+				if elem.IsNull() {
 					continue
 				}
-				for l := uint32(0); l < methodElem.ChildCount(); l++ {
-					nameNode := methodElem.Child(l)
-					if !nameNode.IsNull() && nodeType(nameNode) == "field_identifier" {
-						if m := string(src[nameNode.StartByte():nameNode.EndByte()]); m != "" {
-							methods = append(methods, m)
+				switch nodeType(elem) {
+				case "method_elem":
+					// Directly declared method: first field_identifier is the name.
+					for l := uint32(0); l < elem.ChildCount(); l++ {
+						nc := elem.Child(l)
+						if !nc.IsNull() && nodeType(nc) == "field_identifier" {
+							if m := string(src[nc.StartByte():nc.EndByte()]); m != "" {
+								methods = append(methods, m)
+							}
+							break
 						}
-						break
+					}
+				case "type_elem":
+					// Embedded interface (Go 1.18+ union elements also use type_elem).
+					// Find a type_identifier child — that is the embedded interface name.
+					for l := uint32(0); l < elem.ChildCount(); l++ {
+						nc := elem.Child(l)
+						if nc.IsNull() {
+							continue
+						}
+						if nodeType(nc) == "type_identifier" {
+							embedded := string(src[nc.StartByte():nc.EndByte()])
+							if embedded != "" && embedded != ifaceName {
+								embeds[ifaceName] = append(embeds[ifaceName], embedded)
+							}
+						}
 					}
 				}
 			}
-			if len(methods) > 0 {
-				result[ifaceName] = methods
+			ownMethods[ifaceName] = methods
+		}
+	}
+
+	// Merge embedded methods (one level deep; avoids circular-embed infinite loops
+	// which are illegal in Go anyway).
+	result := make(map[string][]string, len(ownMethods))
+	for name, methods := range ownMethods {
+		merged := make([]string, 0, len(methods)+4)
+		merged = append(merged, methods...)
+		seen := make(map[string]bool, len(methods))
+		for _, m := range methods {
+			seen[m] = true
+		}
+		for _, embeddedName := range embeds[name] {
+			for _, m := range ownMethods[embeddedName] {
+				if !seen[m] {
+					seen[m] = true
+					merged = append(merged, m)
+				}
 			}
+		}
+		if len(merged) > 0 {
+			result[name] = merged
 		}
 	}
 	return result
@@ -306,15 +347,35 @@ func extractReceiverType(receiverNode sitter.Node, src []byte) string {
 		}
 		switch nodeType(typeNode) {
 		case "pointer_type":
-			// *T — find the inner type_identifier
+			// *T or *T[E] — find the inner type_identifier (may be inside generic_type)
+			for j := uint32(0); j < typeNode.ChildCount(); j++ {
+				inner := typeNode.Child(j)
+				if inner.IsNull() {
+					continue
+				}
+				if nodeType(inner) == "type_identifier" {
+					return string(src[inner.StartByte():inner.EndByte()])
+				}
+				if nodeType(inner) == "generic_type" {
+					// *T[E] — first type_identifier child of generic_type is the base name
+					for k := uint32(0); k < inner.ChildCount(); k++ {
+						gc := inner.Child(k)
+						if !gc.IsNull() && nodeType(gc) == "type_identifier" {
+							return string(src[gc.StartByte():gc.EndByte()])
+						}
+					}
+				}
+			}
+		case "type_identifier":
+			return string(src[typeNode.StartByte():typeNode.EndByte()])
+		case "generic_type":
+			// T[E] — first type_identifier child is the base name
 			for j := uint32(0); j < typeNode.ChildCount(); j++ {
 				inner := typeNode.Child(j)
 				if !inner.IsNull() && nodeType(inner) == "type_identifier" {
 					return string(src[inner.StartByte():inner.EndByte()])
 				}
 			}
-		case "type_identifier":
-			return string(src[typeNode.StartByte():typeNode.EndByte()])
 		}
 	}
 	return ""
@@ -593,62 +654,11 @@ func (p *GoParser) extractDeclarations(
 		return err
 	}
 
-	// --- Method declarations ---
-	// receiver type can be *T or T; we capture the type identifier.
-	methodQuery := `
-(method_declaration
-  receiver: (parameter_list
-    (parameter_declaration
-      type: [
-        (pointer_type (type_identifier) @receiver_type)
-        (type_identifier) @receiver_type
-      ]
-    )
-  )
-  name: (field_identifier) @method_name
-)`
-	if err := runQuery(lang, root, src, methodQuery, func(captures map[string]string, startLine int) {
-		methodName := captures["method_name"]
-		receiverType := captures["receiver_type"]
-		if methodName == "" {
-			return
-		}
-		qualifiedName := receiverType + "." + methodName
-		nodeID := g.MakeNodeID(filePath, qualifiedName)
-		info := declInfo[qualifiedName]
-		g.AddNode(&graph.Node{
-			ID:       nodeID,
-			Type:     graph.NodeMethod,
-			Name:     qualifiedName,
-			Package:  pkg,
-			File:     filePath,
-			Line:     startLine,
-			Exported: isExported(methodName),
-			Metadata: buildMeta(info),
-		})
-		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
-
-		// If the receiver struct is in this graph, add a DEFINES edge from it.
-		if receiverType != "" {
-			structID := g.MakeNodeID(filePath, receiverType)
-			if g.GetNode(structID) != nil {
-				g.AddEdge(&graph.Edge{From: structID, To: nodeID, Type: graph.EdgeDefines})
-			}
-		}
-		// Collect call sites for bulk registration.
-		for _, cs := range info.callSites {
-			callSiteBatch = append(callSiteBatch, graph.CallSite{
-				CallerID:   nodeID,
-				CallerFile: filePath,
-				PkgAlias:   cs.pkgAlias,
-				FuncName:   cs.funcName,
-			})
-		}
-	}); err != nil {
-		return err
-	}
-
-	// --- Struct type declarations ---
+	// --- Struct type declarations (BEFORE methods so struct→method DEFINES edges work) ---
+	// Must be processed before method declarations. The method query below checks
+	// g.GetNode(structID) to add struct→method DEFINES edges. If struct nodes are
+	// added AFTER methods (original order), GetNode always returns nil and no
+	// DEFINES edges are emitted — breaking impact_analysis for struct types.
 	structQuery := `
 (type_declaration
   (type_spec
@@ -684,7 +694,7 @@ func (p *GoParser) extractDeclarations(
 		return err
 	}
 
-	// --- Interface type declarations ---
+	// --- Interface type declarations (BEFORE methods so interface→method DEFINES edges work) ---
 	ifaceQuery := `
 (type_declaration
   (type_spec
@@ -738,6 +748,64 @@ func (p *GoParser) extractDeclarations(
 				g.AddEdge(&graph.Edge{From: fileNodeID, To: methID, Type: graph.EdgeDefines})
 				g.AddEdge(&graph.Edge{From: nodeID, To: methID, Type: graph.EdgeDefines})
 			}
+		}
+	}); err != nil {
+		return err
+	}
+
+	// --- Method declarations ---
+	// receiver type can be *T, T, *T[E] (generic pointer), or T[E] (generic value).
+	// The generic forms use a generic_type node wrapping the type_identifier.
+	methodQuery := `
+(method_declaration
+  receiver: (parameter_list
+    (parameter_declaration
+      type: [
+        (pointer_type (type_identifier) @receiver_type)
+        (pointer_type (generic_type (type_identifier) @receiver_type))
+        (type_identifier) @receiver_type
+        (generic_type (type_identifier) @receiver_type)
+      ]
+    )
+  )
+  name: (field_identifier) @method_name
+)`
+	if err := runQuery(lang, root, src, methodQuery, func(captures map[string]string, startLine int) {
+		methodName := captures["method_name"]
+		receiverType := captures["receiver_type"]
+		if methodName == "" {
+			return
+		}
+		qualifiedName := receiverType + "." + methodName
+		nodeID := g.MakeNodeID(filePath, qualifiedName)
+		info := declInfo[qualifiedName]
+		g.AddNode(&graph.Node{
+			ID:       nodeID,
+			Type:     graph.NodeMethod,
+			Name:     qualifiedName,
+			Package:  pkg,
+			File:     filePath,
+			Line:     startLine,
+			Exported: isExported(methodName),
+			Metadata: buildMeta(info),
+		})
+		g.AddEdge(&graph.Edge{From: fileNodeID, To: nodeID, Type: graph.EdgeDefines})
+
+		// If the receiver struct is in this graph, add a DEFINES edge from it.
+		if receiverType != "" {
+			structID := g.MakeNodeID(filePath, receiverType)
+			if g.GetNode(structID) != nil {
+				g.AddEdge(&graph.Edge{From: structID, To: nodeID, Type: graph.EdgeDefines})
+			}
+		}
+		// Collect call sites for bulk registration.
+		for _, cs := range info.callSites {
+			callSiteBatch = append(callSiteBatch, graph.CallSite{
+				CallerID:   nodeID,
+				CallerFile: filePath,
+				PkgAlias:   cs.pkgAlias,
+				FuncName:   cs.funcName,
+			})
 		}
 	}); err != nil {
 		return err

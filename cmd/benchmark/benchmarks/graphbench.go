@@ -43,6 +43,7 @@ type GraphBenchOptions struct {
 	Limit      int    // max test suites (0 = all)
 	Mode       string // "full" (default, curated ground truth) or "smoke" (self-validating, CI-safe)
 	Sequential bool   // OOM-safe: clone→index→test→cleanup one repo at a time
+	RepoFilter string // if non-empty, only run suites whose repo contains this substring
 }
 
 // GraphBenchSuite is one line from the JSONL file.
@@ -202,6 +203,15 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 	}
 	if opts.Limit > 0 && len(suites) > opts.Limit {
 		suites = suites[:opts.Limit]
+	}
+	if opts.RepoFilter != "" {
+		filtered := suites[:0]
+		for _, s := range suites {
+			if strings.Contains(s.Repo, opts.RepoFilter) {
+				filtered = append(filtered, s)
+			}
+		}
+		suites = filtered
 	}
 
 	log.Printf("graphbench: %d repo suites loaded", len(suites))

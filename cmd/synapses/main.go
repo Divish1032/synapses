@@ -889,20 +889,20 @@ func enrichMetricsIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	}
 }
 
-// applyGoTypesIfEnabled runs the type-checked CALLS resolver when
-// cfg.UseGoTypes is true. Errors are logged but never fatal — the graph
-// already has tree-sitter CALLS edges and remains usable.
+// applyGoTypesIfEnabled runs the type-checked CALLS and IMPLEMENTS resolvers
+// when cfg.UseGoTypes is true. A single packages.Load call handles both passes.
+// Errors are logged but never fatal — the graph already has tree-sitter edges.
 func applyGoTypesIfEnabled(g *graph.Graph, root string, cfg *config.Config) {
 	if !cfg.UseGoTypes {
 		return
 	}
 	logutil.Info("synapses: running go/types resolver (use_go_types=true)...\n")
-	n, err := resolver.ResolveGoTypesCallEdges(g, root)
+	calls, impls, err := resolver.ResolveGoTypesBoth(g, root)
 	if err != nil {
 		logutil.Warn("synapses: go/types resolver failed (falling back to tree-sitter results): %v\n", err)
 		return
 	}
-	logutil.Info("synapses: go/types added %d new CALLS edges\n", n)
+	logutil.Info("synapses: go/types added %d new CALLS edges, %d new IMPLEMENTS edges\n", calls, impls)
 }
 
 // applyTSTypesIfEnabled runs the TypeScript compiler-API resolver when
@@ -1092,6 +1092,9 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 	ni := resolver.ResolveImplementsEdges(g)
 	if ni > 0 {
 		logutil.Info("synapses: resolved %d structural IMPLEMENTS edges\n", ni)
+	}
+	if nd := resolver.ResolveGoMethodDefinesEdges(g); nd > 0 {
+		logutil.Info("synapses: resolved %d cross-file Go struct→method DEFINES edges\n", nd)
 	}
 	// Proto/GraphQL cross-file type reference resolution.
 	if npt := parser.ResolveProtoTypeRefs(g); npt > 0 {

@@ -1162,6 +1162,7 @@ func TestHandleGetImpact_StructNode_TestCoverageField(t *testing.T) {
 	g.AddNode(&graph.Node{ID: callerID, Name: "HandleGet", Type: graph.NodeFunction, File: "pkg/api/handler.go", Line: 1, Package: "api"})
 	g.AddNode(&graph.Node{ID: testID, Name: "TestUserStore_Get", Type: graph.NodeFunction, File: "pkg/store/store_test.go", Line: 1, Package: "store"})
 
+	g.AddEdge(&graph.Edge{From: structID, To: methodID, Type: graph.EdgeDefines}) // parser always emits this
 	g.AddEdge(&graph.Edge{From: callerID, To: methodID, Type: graph.EdgeCalls})
 	g.AddEdge(&graph.Edge{From: testID, To: methodID, Type: graph.EdgeCalls})
 

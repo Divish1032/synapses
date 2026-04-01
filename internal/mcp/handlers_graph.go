@@ -725,14 +725,10 @@ func (s *Server) handleGetCallChain(
 		return mcp.NewToolResultError("from and to are required"), nil
 	}
 
-	// resolve maps a name to a graph node, preferring code nodes over doc sections.
-	// Always combines exact-name matches and pattern matches so that a doc section
-	// with a matching header (e.g. "## session_init") does not win over a code
-	// function that has the same term in its identifier.
-	resolve := func(name string) *graph.Node {
+	// resolveAll returns all candidate nodes for a name (exact + pattern, deduped).
+	resolveAll := func(name string) []*graph.Node {
 		exact := s.graph.FindByName(name)
 		pattern := s.graph.FindByPatternLimit(name, 50)
-		// Combine, deduplicating by node ID, exact matches first.
 		seen := make(map[graph.NodeID]bool, len(exact)+len(pattern))
 		combined := make([]*graph.Node, 0, len(exact)+len(pattern))
 		for _, n := range exact {
@@ -747,26 +743,26 @@ func (s *Server) handleGetCallChain(
 				combined = append(combined, n)
 			}
 		}
-		if len(combined) == 0 {
-			return nil
-		}
-		return pickBestNode(combined, s.graph)
+		return combined
 	}
 
-	fromNode := resolve(fromName)
-	if fromNode == nil {
+	fromCandidates := resolveAll(fromName)
+	if len(fromCandidates) == 0 {
 		return jsonResult(map[string]interface{}{
 			"error": fmt.Sprintf("entity not found: %q", fromName),
 			"hint":  "Use find_entity or semantic_search to discover the correct entity name.",
 		})
 	}
-	toNode := resolve(toName)
-	if toNode == nil {
+	toCandidates := resolveAll(toName)
+	if len(toCandidates) == 0 {
 		return jsonResult(map[string]interface{}{
 			"error": fmt.Sprintf("entity not found: %q", toName),
 			"hint":  "Use find_entity or semantic_search to discover the correct entity name.",
 		})
 	}
+	// Best single node for display/warnings (pick by quality heuristic).
+	fromNode := pickBestNode(fromCandidates, s.graph, fromName)
+	toNode := pickBestNode(toCandidates, s.graph, toName)
 
 	// Warn when resolution picked a doc section instead of a code node — the
 	// caller probably meant the function/handler, not the documentation heading.
@@ -784,7 +780,21 @@ func (s *Server) handleGetCallChain(
 			toName, toNode.File))
 	}
 
-	if fromNode.ID == toNode.ID {
+	// Check if any from-candidate overlaps with any to-candidate (trivial path).
+	toIDSet := make(map[graph.NodeID]bool, len(toCandidates))
+	for _, tc := range toCandidates {
+		toIDSet[tc.ID] = true
+	}
+	sameNode := fromNode.ID == toNode.ID
+	if !sameNode {
+		for _, fc := range fromCandidates {
+			if toIDSet[fc.ID] {
+				sameNode = true
+				break
+			}
+		}
+	}
+	if sameNode {
 		resp := map[string]interface{}{
 			"found": true,
 			"chain": []string{fromNode.Name},
@@ -809,17 +819,32 @@ func (s *Server) handleGetCallChain(
 	}
 	const maxBFSHops = 15 // per-direction (30 total reach with bidirectional)
 
-	// Forward search state (from→to).
-	fwdPrev := map[graph.NodeID]graph.NodeID{fromNode.ID: ""}
-	fwdQueue := []bfsEntry{{fromNode.ID, 0}}
-	// Backward search state (to→from).
-	bwdPrev := map[graph.NodeID]graph.NodeID{toNode.ID: ""}
-	bwdQueue := []bfsEntry{{toNode.ID, 0}}
+	// Forward search state (from→to). Seed with all from-candidates so that
+	// any alias/overload of the from-entity is a valid starting point.
+	fwdPrev := make(map[graph.NodeID]graph.NodeID, len(fromCandidates))
+	fwdQueue := make([]bfsEntry, 0, len(fromCandidates))
+	for _, fc := range fromCandidates {
+		if _, ok := fwdPrev[fc.ID]; !ok {
+			fwdPrev[fc.ID] = ""
+			fwdQueue = append(fwdQueue, bfsEntry{fc.ID, 0})
+		}
+	}
+	// Backward search state (to→from). Seed with all to-candidates so that
+	// whichever to-node the forward BFS reaches first counts as a match.
+	bwdPrev := make(map[graph.NodeID]graph.NodeID, len(toCandidates))
+	bwdQueue := make([]bfsEntry, 0, len(toCandidates))
+	for _, tc := range toCandidates {
+		if _, ok := bwdPrev[tc.ID]; !ok {
+			bwdPrev[tc.ID] = ""
+			bwdQueue = append(bwdQueue, bfsEntry{tc.ID, 0})
+		}
+	}
 
 	viaImpl := make(map[graph.NodeID]bool)
 	viaHandles := make(map[graph.NodeID]bool)
 
-	var meetNode graph.NodeID // node where forward and backward searches meet
+	var meetNode graph.NodeID   // node where forward and backward searches meet
+	var metToNode graph.NodeID  // which to-candidate was actually reached
 	found := false
 	var closestReachableID graph.NodeID
 	maxHop := 0
@@ -946,15 +971,24 @@ func (s *Server) handleGetCallChain(
 	// Reconstruct prev map for path building: merge fwd and bwd paths through meetNode.
 	prev := fwdPrev
 	if found && meetNode != "" {
-		// Build backward chain from meetNode to toNode and append to prev.
+		// Walk backward from meetNode to the seeded to-candidate (bwdPrev[x]=="").
+		// Record metToNode so path reconstruction starts from the correct endpoint.
 		curr := meetNode
-		for curr != toNode.ID {
+		for {
 			next := bwdPrev[curr]
 			if next == "" {
+				// curr is a seeded to-candidate: the actual destination reached.
+				metToNode = curr
 				break
 			}
 			prev[next] = curr
 			curr = next
+		}
+		// Also update toNode to the actual reached candidate for display purposes.
+		if metToNode != toNode.ID {
+			if n := s.graph.GetNode(metToNode); n != nil {
+				toNode = n
+			}
 		}
 	}
 
@@ -1011,9 +1045,13 @@ func (s *Server) handleGetCallChain(
 		return jsonResult(notFound)
 	}
 
-	// Reconstruct path.
+	// Reconstruct path starting from the actual to-candidate reached by BFS.
+	startID := metToNode
+	if startID == "" {
+		startID = toNode.ID
+	}
 	var chainIDs []graph.NodeID
-	curr := toNode.ID
+	curr := startID
 	for curr != "" {
 		chainIDs = append([]graph.NodeID{curr}, chainIDs...)
 		curr = prev[curr]
@@ -1065,12 +1103,26 @@ func (s *Server) handleGetCallChain(
 		})
 	}
 
+	// Build from/to/path fields in addition to chain so parsers that expect
+	// the path/from/to shape (e.g. GraphBench) can read the response correctly.
+	var fromStep, toStep chainStep
+	var pathSteps []chainStep
+	if len(chain) > 0 {
+		fromStep = chain[0]
+	}
+	if len(chain) > 1 {
+		toStep = chain[len(chain)-1]
+		pathSteps = chain[1:] // intermediate + destination
+	}
 	resp := map[string]interface{}{
 		"found":         true,
 		"hops":          len(chain) - 1,
 		"via_interface": usedInterface,
-		"via_handles":   usedHandles, // R1: true when path crossed a synthetic routing edge
-		"chain":         chain,
+		"via_handles":   usedHandles,
+		"chain":         chain,  // full list (from + intermediates + to)
+		"from":          fromStep,
+		"to":            toStep,
+		"path":          pathSteps, // intermediates + destination (matches callChainResponse.Path)
 	}
 	if len(resolveWarnings) > 0 {
 		resp["resolve_warnings"] = resolveWarnings

@@ -49,6 +49,7 @@ func main() {
 		gbDataFile   = flag.String("gb-data", "graphbench.jsonl", "Path to GraphBench JSONL dataset")
 		gbMode       = flag.String("gb-mode", "full", "GraphBench mode: full (curated ground truth) | smoke (self-validating, CI-safe)")
 		gbSequential = flag.Bool("gb-sequential", true, "OOM-safe: clone→index→test→cleanup one repo at a time")
+		gbRepoFilter = flag.String("gb-repo", "", "Only run suites whose repo name contains this substring")
 		// NLBench-specific flags.
 		nlDataFile = flag.String("nl-data", "nlbench.jsonl", "Path to NLBench JSONL dataset")
 		// DriftBench-specific flags.
@@ -187,6 +188,7 @@ func main() {
 			Limit:      *limit,
 			Mode:       *gbMode,
 			Sequential: *gbSequential,
+				RepoFilter:  *gbRepoFilter,
 		}
 		gbResult, err := benchmarks.RunGraphBench(mcpClient, gbOpts)
 		if err != nil {
