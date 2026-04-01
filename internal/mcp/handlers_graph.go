@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -143,7 +144,7 @@ func (s *Server) handleFindEntity(
 		}
 		m.Callers = s.graph.Fanin(n.ID)
 		m.Callees = s.graph.Fanout(n.ID)
-		m.Why = buildSearchWhy(matchReason, m.Callers, m.Callees)
+		m.Why = buildSearchWhy(matchReason, m.Callers, m.Callees, s.buildSearchTags(n.File, file)...)
 		results = append(results, m)
 	}
 
@@ -286,10 +287,11 @@ func (s *Server) handleFindEntity(
 // get_impact, tasks, end_session, memory.
 
 // buildSearchWhy produces a natural-language "why" string for a search result.
-// It combines the match reason (how the entity was found) with relationship
-// context (how many callers/callees it has). This gives agents actionable
-// relevance intelligence instead of a raw numeric score.
-func buildSearchWhy(matchReason string, fanin, fanout int) string {
+// It combines the match reason (how the entity was found), relationship context
+// (fan-in/fan-out), and any extra tags (e.g. "recently modified", "has
+// architectural rule"). Tags come from buildSearchTags and are appended after
+// the structural context.
+func buildSearchWhy(matchReason string, fanin, fanout int, tags ...string) string {
 	var parts []string
 	if matchReason != "" {
 		parts = append(parts, matchReason)
@@ -303,10 +305,45 @@ func buildSearchWhy(matchReason string, fanin, fanout int) string {
 	if fanout >= 10 {
 		parts = append(parts, fmt.Sprintf("high fan-out (%d callees)", fanout))
 	}
+	for _, tag := range tags {
+		if tag != "" {
+			parts = append(parts, tag)
+		}
+	}
 	if len(parts) == 0 {
 		return "matched"
 	}
 	return strings.Join(parts, "; ")
+}
+
+// buildSearchTags returns extra NL tags for a search result based on file
+// metadata observable without reading source:
+//   - "recently modified" — file mtime within the last 7 days (only when
+//     absPath is an absolute path that can be stat'd)
+//   - "has architectural rule" — at least one architectural rule targets this
+//     file (only when s.store is non-nil and relPath is non-empty)
+func (s *Server) buildSearchTags(absPath, relPath string) []string {
+	var tags []string
+
+	// Recently modified: use os.Stat on the absolute path. We check for an
+	// absolute path first to avoid misleading results in test environments where
+	// node File paths are relative.
+	if absPath != "" && strings.HasPrefix(absPath, "/") {
+		if fi, err := os.Stat(absPath); err == nil {
+			if time.Since(fi.ModTime()) <= 7*24*time.Hour {
+				tags = append(tags, "recently modified")
+			}
+		}
+	}
+
+	// Has architectural rule: query the store for rules that match this file.
+	if s.store != nil && relPath != "" {
+		if rules, err := s.store.GetRulesForFiles([]string{relPath}); err == nil && len(rules) > 0 {
+			tags = append(tags, "has architectural rule")
+		}
+	}
+
+	return tags
 }
 
 // searchModeLabel converts an internal search_mode identifier to a short
@@ -564,7 +601,7 @@ func (s *Server) handleSearch(
 			Line:      h.node.Line,
 			Doc:       h.node.Metadata["doc"],
 			Signature: h.node.Metadata["signature"],
-			Why:       buildSearchWhy(h.matchType, fanin, fanout),
+			Why:       buildSearchWhy(h.matchType, fanin, fanout, s.buildSearchTags(h.node.File, rel)...),
 			Callers:   fanin,
 			Callees:   fanout,
 		}
@@ -1177,15 +1214,19 @@ func (s *Server) handleSemanticSearch(
 			Signature: r.Signature,
 		}
 		// Look up the node in the graph to get type, line, and relationship counts.
+		// absFile is the absolute path from the graph node, used for os.Stat.
+		// r.File (from the store) is already relative, used for rule lookups.
+		absFile := ""
 		if s.graph != nil {
 			if n := s.graph.GetNode(graph.NodeID(r.ID)); n != nil {
 				er.Type = string(n.Type)
 				er.Line = n.Line
 				er.Callers = s.graph.Fanin(n.ID)
 				er.Callees = s.graph.Fanout(n.ID)
+				absFile = n.File
 			}
 		}
-		er.Why = buildSearchWhy(searchModeLabel(searchMode), er.Callers, er.Callees)
+		er.Why = buildSearchWhy(searchModeLabel(searchMode), er.Callers, er.Callees, s.buildSearchTags(absFile, r.File)...)
 		enriched = append(enriched, er)
 	}
 

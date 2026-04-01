@@ -2,14 +2,18 @@ package mcp
 
 // Sprint 23.2 — Redesign search response format.
 // Tests verify: no raw source code in results, "why" field present and meaningful,
-// relationship context (callers/callees) included, search mode labels correct.
+// relationship context (callers/callees) included, search mode labels correct,
+// "recently modified" and "has architectural rule" tags surfaced in why field.
 
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
@@ -356,5 +360,223 @@ func TestHandleSemanticSearch_WhyFieldPresent(t *testing.T) {
 		if _, hasWhy := rm["why"]; !hasWhy {
 			t.Errorf("semantic result[%d] missing 'why' field — enrichment not applied", i)
 		}
+	}
+}
+
+// ── buildSearchTags ───────────────────────────────────────────────────────────
+
+// TestBuildSearchTags_RecentlyModified verifies that a file modified within the
+// last 7 days produces the "recently modified" tag.
+func TestBuildSearchTags_RecentlyModified(t *testing.T) {
+	s := newTestServer(t)
+
+	// Create a temp file and immediately stat it — mtime is now.
+	f, err := os.CreateTemp(t.TempDir(), "recent-*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	tags := s.buildSearchTags(f.Name(), "internal/some/file.go")
+	found := false
+	for _, tag := range tags {
+		if tag == "recently modified" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'recently modified' tag for file modified just now, got %v", tags)
+	}
+}
+
+// TestBuildSearchTags_OldFile verifies that a file older than 7 days does NOT
+// produce the "recently modified" tag.
+func TestBuildSearchTags_OldFile(t *testing.T) {
+	s := newTestServer(t)
+
+	f, err := os.CreateTemp(t.TempDir(), "old-*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	// Backdate mtime to 10 days ago.
+	oldTime := time.Now().Add(-10 * 24 * time.Hour)
+	if err := os.Chtimes(f.Name(), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	tags := s.buildSearchTags(f.Name(), "internal/some/file.go")
+	for _, tag := range tags {
+		if tag == "recently modified" {
+			t.Errorf("file 10 days old should NOT have 'recently modified' tag, got %v", tags)
+		}
+	}
+}
+
+// TestBuildSearchTags_RelativePathSkipsStatCheck verifies that a relative path
+// (test environment) does not produce "recently modified" via a failed stat.
+func TestBuildSearchTags_RelativePathSkipsStatCheck(t *testing.T) {
+	s := newTestServer(t)
+	// A relative path — os.Stat may or may not succeed, but we must not panic.
+	// We only verify no "recently modified" leaks for non-absolute paths.
+	tags := s.buildSearchTags("pkg/auth/auth.go", "pkg/auth/auth.go")
+	for _, tag := range tags {
+		if tag == "recently modified" {
+			t.Errorf("relative path should not produce 'recently modified' tag, got %v", tags)
+		}
+	}
+}
+
+// TestBuildSearchTags_HasArchitecturalRule verifies that a file covered by a
+// dynamic rule produces the "has architectural rule" tag.
+func TestBuildSearchTags_HasArchitecturalRule(t *testing.T) {
+	s := newTestServer(t)
+
+	// Insert a rule that matches "internal/api/*.go".
+	rule := config.Rule{
+		ID:          "test-rule-api-isolation",
+		Description: "API layer must not import storage directly",
+		ForbiddenEdge: config.ForbiddenEdge{
+			FromFilePattern: "internal/api/*.go",
+			ToFilePattern:   "internal/store/*.go",
+		},
+		Severity: "error",
+	}
+	if err := s.store.UpsertDynamicRule(rule); err != nil {
+		t.Fatalf("UpsertDynamicRule: %v", err)
+	}
+
+	tags := s.buildSearchTags("", "internal/api/handler.go")
+	found := false
+	for _, tag := range tags {
+		if tag == "has architectural rule" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'has architectural rule' tag for file matching a dynamic rule, got %v", tags)
+	}
+}
+
+// TestBuildSearchTags_NoRule verifies that a file NOT covered by any rule does
+// not produce the "has architectural rule" tag.
+func TestBuildSearchTags_NoRule(t *testing.T) {
+	s := newTestServer(t)
+	// No rules in store — fresh server.
+	tags := s.buildSearchTags("", "internal/graph/graph.go")
+	for _, tag := range tags {
+		if tag == "has architectural rule" {
+			t.Errorf("file with no matching rule should not have 'has architectural rule' tag, got %v", tags)
+		}
+	}
+}
+
+// TestHandleSearch_WhyRecentlyModified verifies that a search result for a node
+// whose file was recently modified includes "recently modified" in the why field.
+func TestHandleSearch_WhyRecentlyModified(t *testing.T) {
+	s := newTestServer(t)
+
+	// Create a fresh temp file and register a node pointing at it.
+	f, err := os.CreateTemp(t.TempDir(), "recentnode-*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	nodeID := s.graph.MakeNodeID(f.Name(), "RecentHandler")
+	s.graph.AddNode(&graph.Node{
+		ID:      nodeID,
+		Name:    "RecentHandler",
+		Type:    graph.NodeFunction,
+		File:    f.Name(), // absolute path — enables os.Stat check
+		Package: "recent",
+		Line:    1,
+	})
+
+	res, err := s.handleSearch(context.Background(), callTool(map[string]any{
+		"query": "RecentHandler",
+		"mode":  "keyword",
+	}))
+	m := mustResult(t, res, err)
+
+	results, ok := m["results"].([]any)
+	if !ok || len(results) == 0 {
+		t.Skip("no results returned")
+	}
+	found := false
+	for _, r := range results {
+		rm, _ := r.(map[string]any)
+		if name, _ := rm["name"].(string); name == "RecentHandler" {
+			why, _ := rm["why"].(string)
+			if strings.Contains(why, "recently modified") {
+				found = true
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'recently modified' in why field for node in a just-created file")
+	}
+}
+
+// TestHandleSearch_WhyHasArchitecturalRule verifies that a search result for a
+// node in a rule-covered file includes "has architectural rule" in the why field.
+func TestHandleSearch_WhyHasArchitecturalRule(t *testing.T) {
+	s := newTestServer(t)
+
+	// Add a rule covering "internal/ruletest/*.go".
+	rule := config.Rule{
+		ID:          "test-rule-ruletest",
+		Description: "ruletest must not import db",
+		ForbiddenEdge: config.ForbiddenEdge{
+			FromFilePattern: "internal/ruletest/*.go",
+			ToFilePattern:   "internal/db/*.go",
+		},
+		Severity: "error",
+	}
+	if err := s.store.UpsertDynamicRule(rule); err != nil {
+		t.Fatalf("UpsertDynamicRule: %v", err)
+	}
+
+	// Add a node in the covered path.
+	// The graph root is empty in newTestServer, so File is used as-is for the
+	// relative path passed to buildSearchTags.
+	relFile := "internal/ruletest/handler.go"
+	nodeID := s.graph.MakeNodeID(relFile, "RuleTestHandler")
+	s.graph.AddNode(&graph.Node{
+		ID:      nodeID,
+		Name:    "RuleTestHandler",
+		Type:    graph.NodeFunction,
+		File:    relFile,
+		Package: "ruletest",
+		Line:    1,
+	})
+
+	res, err := s.handleSearch(context.Background(), callTool(map[string]any{
+		"query": "RuleTestHandler",
+		"mode":  "keyword",
+	}))
+	m := mustResult(t, res, err)
+
+	results, ok := m["results"].([]any)
+	if !ok || len(results) == 0 {
+		t.Skip("no results returned")
+	}
+	found := false
+	for _, r := range results {
+		rm, _ := r.(map[string]any)
+		if name, _ := rm["name"].(string); name == "RuleTestHandler" {
+			why, _ := rm["why"].(string)
+			if strings.Contains(why, "has architectural rule") {
+				found = true
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'has architectural rule' in why field for node in rule-covered file")
 	}
 }
