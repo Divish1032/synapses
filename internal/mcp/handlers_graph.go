@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -112,6 +111,7 @@ func (s *Server) handleFindEntity(
 		Signature string         `json:"signature,omitempty"`
 		Callers   int            `json:"callers,omitempty"`
 		Callees   int            `json:"callees,omitempty"`
+		Why       string         `json:"why,omitempty"`
 	}
 	results := make([]entityMatch, 0, len(nodes))
 	for _, n := range nodes {
@@ -135,6 +135,7 @@ func (s *Server) handleFindEntity(
 		}
 		m.Callers = s.graph.Fanin(n.ID)
 		m.Callees = s.graph.Fanout(n.ID)
+		m.Why = buildSearchWhy("exact match", m.Callers, m.Callees)
 		results = append(results, m)
 	}
 
@@ -276,6 +277,47 @@ func (s *Server) handleFindEntity(
 // The 8 active MCP tools are: session_init, get_context, validate, search,
 // get_impact, tasks, end_session, memory.
 
+// buildSearchWhy produces a natural-language "why" string for a search result.
+// It combines the match reason (how the entity was found) with relationship
+// context (how many callers/callees it has). This gives agents actionable
+// relevance intelligence instead of a raw numeric score.
+func buildSearchWhy(matchReason string, fanin, fanout int) string {
+	var parts []string
+	if matchReason != "" {
+		parts = append(parts, matchReason)
+	}
+	switch {
+	case fanin >= 10:
+		parts = append(parts, fmt.Sprintf("high fan-in (%d callers)", fanin))
+	case fanin > 0:
+		parts = append(parts, fmt.Sprintf("%d caller(s)", fanin))
+	}
+	if fanout >= 10 {
+		parts = append(parts, fmt.Sprintf("high fan-out (%d callees)", fanout))
+	}
+	if len(parts) == 0 {
+		return "matched"
+	}
+	return strings.Join(parts, "; ")
+}
+
+// searchModeLabel converts an internal search_mode identifier to a short
+// natural-language phrase used in the "why" field of semantic search results.
+func searchModeLabel(mode string) string {
+	switch mode {
+	case "vector_cosine":
+		return "semantic match"
+	case "fts5_bm25":
+		return "keyword match"
+	case "hybrid_rrf":
+		return "hybrid semantic+keyword match"
+	case "hybrid_rrf+hyde":
+		return "semantic match (hypothesis-augmented)"
+	default:
+		return "keyword match"
+	}
+}
+
 // handleSearch performs a keyword search across entity names and doc comments.
 // Results are ranked: exact name > name prefix > name substring > doc match.
 func (s *Server) handleSearch(
@@ -311,8 +353,9 @@ func (s *Server) handleSearch(
 	lower := strings.ToLower(query)
 
 	type hit struct {
-		node  *graph.Node
-		score int
+		node      *graph.Node
+		score     int
+		matchType string // why this result matched — used for the "why" field
 	}
 	var hits []hit
 	const maxResults = 25
@@ -328,13 +371,17 @@ func (s *Server) handleSearch(
 		}
 		nameLow := strings.ToLower(n.Name)
 		score := 0
+		matchType := ""
 		switch {
 		case nameLow == lower:
 			score = 30
+			matchType = "exact name match"
 		case strings.HasPrefix(nameLow, lower):
 			score = 20
+			matchType = "name prefix match"
 		case strings.Contains(nameLow, lower):
 			score = 10
+			matchType = "name contains query"
 		default:
 			// Skip expensive file-path, doc, and multi-word checks if we
 			// already have enough high-quality hits to fill the results.
@@ -347,8 +394,10 @@ func (s *Server) handleSearch(
 			if strings.HasSuffix(fileLow, "/"+lower+".go") ||
 				strings.Contains(fileLow, "/"+lower+"/") {
 				score = 8
+				matchType = "in package matching query"
 			} else if doc, ok := n.Metadata["doc"]; ok && strings.Contains(strings.ToLower(doc), lower) {
 				score = 5
+				matchType = "doc comment match"
 			}
 		}
 		// Multi-word AND query: each query word must appear in the name components
@@ -381,15 +430,17 @@ func (s *Server) handleSearch(
 				if matchCount == len(words) {
 					if inNameCount > 0 {
 						score = 6 // partial name + doc match
+						matchType = "multi-word name match"
 					} else {
 						score = 3 // all words only in doc
+						matchType = "doc keyword match"
 					}
 				}
 			}
 		}
 
 		if score > 0 {
-			hits = append(hits, hit{n, score})
+			hits = append(hits, hit{n, score, matchType})
 			if score >= 20 {
 				highScoreCount++
 				// Early termination: enough exact/prefix matches found —
@@ -430,10 +481,12 @@ func (s *Server) handleSearch(
 					// Score 7: semantic match — above doc-only (5) but below
 					// name-contains (10). High-similarity vectors get +2 boost.
 					score := 7
+					mt := "semantic match"
 					if sr.Score > 0.7 {
 						score = 9
+						mt = "strong semantic match"
 					}
-					hits = append(hits, hit{n, score})
+					hits = append(hits, hit{n, score, mt})
 				}
 			}
 		}
@@ -484,72 +537,28 @@ func (s *Server) handleSearch(
 		Name      string `json:"name"`
 		File      string `json:"file"`
 		Line      int    `json:"line"`
-		EndLine   int    `json:"end_line,omitempty"`
 		Doc       string `json:"doc,omitempty"`
 		Signature string `json:"signature,omitempty"`
-		Source    string `json:"source,omitempty"`
-	}
-
-	// Source snippet injection: read entity bodies inline so the LLM
-	// doesn't need a separate Read call. Cap at 15 lines per snippet.
-	const snippetLines = 15
-	// Resolve project root for source snippet extraction.
-	repoRoot := s.graph.Root()
-	if repoRoot == "" {
-		repoRoot = s.projectPath
-	}
-	if repoRoot == "" {
-		repoRoot = s.getProjectRoot()
-	}
-	srcCache := newSourceCache(repoRoot)
-
-	// Build per-file node lists for end-line computation.
-	fileNodes := make(map[string][]*graph.Node)
-	for _, h := range hits {
-		rel := strings.TrimPrefix(h.node.File, prefix)
-		fileNodes[rel] = append(fileNodes[rel], h.node)
-	}
-	// Add neighboring nodes from the graph for better end-line estimates.
-	for file := range fileNodes {
-		for _, n := range s.graph.FindByFile(file) {
-			fileNodes[file] = append(fileNodes[file], n)
-		}
-		sort.Slice(fileNodes[file], func(i, j int) bool {
-			return fileNodes[file][i].Line < fileNodes[file][j].Line
-		})
+		Why       string `json:"why"`
+		Callers   int    `json:"callers,omitempty"`
+		Callees   int    `json:"callees,omitempty"`
 	}
 
 	results := make([]result, len(hits))
 	for i, h := range hits {
 		rel := strings.TrimPrefix(h.node.File, prefix)
-
-		// Compute end line from neighboring nodes.
-		lineCount, _ := strconv.Atoi(h.node.Metadata["line_count"])
-		nextStart := 0
-		for _, fn := range fileNodes[rel] {
-			if fn.Line > h.node.Line {
-				nextStart = fn.Line
-				break
-			}
-		}
-		fileTotal := srcCache.TotalLines(rel)
-		endLine := computeEndLine(h.node.Line, nextStart, lineCount, fileTotal)
-
-		// Cap snippet at snippetLines.
-		snippetEnd := endLine
-		if snippetEnd-h.node.Line+1 > snippetLines {
-			snippetEnd = h.node.Line + snippetLines - 1
-		}
-
+		fanin := s.graph.Fanin(h.node.ID)
+		fanout := s.graph.Fanout(h.node.ID)
 		results[i] = result{
 			Type:      string(h.node.Type),
 			Name:      h.node.Name,
 			File:      rel,
 			Line:      h.node.Line,
-			EndLine:   endLine,
 			Doc:       h.node.Metadata["doc"],
 			Signature: h.node.Metadata["signature"],
-			Source:    srcCache.Extract(rel, h.node.Line, snippetEnd),
+			Why:       buildSearchWhy(h.matchType, fanin, fanout),
+			Callers:   fanin,
+			Callees:   fanout,
 		}
 	}
 
@@ -1137,10 +1146,45 @@ func (s *Server) handleSemanticSearch(
 		results = ftsResults
 	}
 
+	// Enrich store.SearchResult with relationship context and a natural-language
+	// "why" field. This replaces the raw score with intelligence the agent can
+	// act on — relationship counts and how the result was matched.
+	type enrichedResult struct {
+		Name      string `json:"name"`
+		Type      string `json:"type,omitempty"`
+		File      string `json:"file,omitempty"`
+		Line      int    `json:"line,omitempty"`
+		Doc       string `json:"doc,omitempty"`
+		Signature string `json:"signature,omitempty"`
+		Why       string `json:"why"`
+		Callers   int    `json:"callers,omitempty"`
+		Callees   int    `json:"callees,omitempty"`
+	}
+	enriched := make([]enrichedResult, 0, len(results))
+	for _, r := range results {
+		er := enrichedResult{
+			Name:      r.Name,
+			File:      r.File,
+			Doc:       r.Doc,
+			Signature: r.Signature,
+		}
+		// Look up the node in the graph to get type, line, and relationship counts.
+		if s.graph != nil {
+			if n := s.graph.GetNode(graph.NodeID(r.ID)); n != nil {
+				er.Type = string(n.Type)
+				er.Line = n.Line
+				er.Callers = s.graph.Fanin(n.ID)
+				er.Callees = s.graph.Fanout(n.ID)
+			}
+		}
+		er.Why = buildSearchWhy(searchModeLabel(searchMode), er.Callers, er.Callees)
+		enriched = append(enriched, er)
+	}
+
 	resp := map[string]interface{}{
 		"query":       query,
-		"count":       len(results),
-		"results":     results,
+		"count":       len(enriched),
+		"results":     enriched,
 		"search_mode": searchMode,
 	}
 
