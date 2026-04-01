@@ -219,7 +219,7 @@ func (s *Server) handleFindEntity(
 	if format == "compact" {
 		var sb strings.Builder
 		if len(results) == 0 && len(fedResults) == 0 {
-			fmt.Fprintf(&sb, "No matches for %q.\nHint: try search(query=%q, mode=\"semantic\") for concept-based lookup, or get_file_context(file=\"...\") for a specific file.", query, query)
+			fmt.Fprintf(&sb, "No matches for %q.\nHint: try search(query=%q, mode=\"semantic\") for concept-based lookup, or read the file directly if you know the path.", query, query)
 			return mcp.NewToolResultText(sb.String()), nil
 		}
 		localCount := len(results)
