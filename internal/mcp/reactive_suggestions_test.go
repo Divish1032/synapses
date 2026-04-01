@@ -127,9 +127,9 @@ func TestSessionToolTracker(t *testing.T) {
 func TestSessionToolTracker_MetaToolsExcluded(t *testing.T) {
 	tracker := newSessionToolTracker()
 
+	// Sprint 23.9: get_compaction_guide removed from metaTools.
 	tracker.record("s1", "session_init")
 	tracker.record("s1", "end_session")
-	tracker.record("s1", "get_compaction_guide")
 	tracker.record("s1", "get_context") // only this should count
 
 	if tracker.totalCalls("s1") != 1 {

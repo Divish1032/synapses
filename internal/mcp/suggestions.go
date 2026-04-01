@@ -16,45 +16,45 @@ type ToolSuggestion struct {
 // intentKeywords maps keywords found in the agent's intent string to tool
 // suggestions. Multiple keywords can match — results are deduplicated by
 // tool name. Ordering within each slice determines display priority.
-// Sprint 24: all suggestions use the consolidated 12-tool names.
+// Sprint 23.9: all suggestions use the consolidated 8-tool names.
 var intentKeywords = map[string][]ToolSuggestion{
 	"implement": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
-		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find all entities in files you'll change", Example: `search(query="auth", mode="exact")`},
 	},
 	"build": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
-		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find all entities in files you'll change", Example: `search(query="auth", mode="exact")`},
 	},
 	"add": {
 		{Tool: "get_impact", Reason: "Check what depends on entities you'll modify", Example: `get_impact(symbol="AuthService")`},
-		{Tool: "get_file_context", Reason: "See all entities in files you'll change", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find all entities in files you'll change", Example: `search(query="auth", mode="exact")`},
 	},
 	"debug": {
 		{Tool: "get_context", Reason: "Trace execution path to find the bug", Example: `get_context(mode="path", from="Handler", to="Repository")`},
-		{Tool: "get_file_context", Reason: "Understand full file structure", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find entities by name or concept", Example: `search(query="auth", mode="keyword")`},
 	},
 	"fix": {
 		{Tool: "get_context", Reason: "Trace execution path to find the bug", Example: `get_context(mode="path", from="Handler", to="Repository")`},
-		{Tool: "get_file_context", Reason: "Understand full file structure", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find entities by name or concept", Example: `search(query="auth", mode="keyword")`},
 	},
 	"investigate": {
 		{Tool: "get_context", Reason: "Trace execution path to find the bug", Example: `get_context(mode="path", from="Handler", to="Repository")`},
-		{Tool: "get_file_context", Reason: "Understand full file structure", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find entities by name or concept", Example: `search(query="auth", mode="keyword")`},
 	},
 	"review": {
 		{Tool: "validate", Reason: "Check architecture rule compliance", Example: `validate(phase="list")`},
-		{Tool: "annotate", Reason: "View known quality issues", Example: `annotate(action="list_gaps")`},
-		{Tool: "rules", Reason: "See past architectural decisions", Example: `rules(action="list_adrs")`},
+		{Tool: "memory", Reason: "View known quality issues", Example: `memory(action="list_gaps")`},
+		{Tool: "validate", Reason: "See past architectural decisions", Example: `validate(phase="list_adrs")`},
 	},
 	"audit": {
 		{Tool: "validate", Reason: "Check architecture rule compliance", Example: `validate(phase="list")`},
-		{Tool: "annotate", Reason: "View known quality issues", Example: `annotate(action="list_gaps")`},
-		{Tool: "rules", Reason: "See past architectural decisions", Example: `rules(action="list_adrs")`},
+		{Tool: "memory", Reason: "View known quality issues", Example: `memory(action="list_gaps")`},
+		{Tool: "validate", Reason: "See past architectural decisions", Example: `validate(phase="list_adrs")`},
 	},
 	"refactor": {
 		{Tool: "get_impact", Reason: "Blast radius analysis before refactoring", Example: `get_impact(symbol="AuthService")`},
-		{Tool: "get_file_context", Reason: "See all entities in scope", Example: `get_file_context(file="internal/auth/service.go")`},
+		{Tool: "search", Reason: "Find all entities in scope", Example: `search(query="auth", mode="exact")`},
 	},
 	"explore": {
 		{Tool: "get_context", Reason: "Navigate codebase structure", Example: `get_context(entity="main", intent="understand")`},
@@ -65,33 +65,33 @@ var intentKeywords = map[string][]ToolSuggestion{
 		{Tool: "search", Reason: "Find entities by name or concept", Example: `search(query="auth", mode="keyword")`},
 	},
 	"plan": {
-		{Tool: "rules", Reason: "Review past architectural decisions", Example: `rules(action="list_adrs")`},
+		{Tool: "validate", Reason: "Review past architectural decisions", Example: `validate(phase="list_adrs")`},
 		{Tool: "validate", Reason: "Current rule state", Example: `validate(phase="list")`},
 		{Tool: "tasks", Reason: "See existing plans", Example: `tasks(action="list_plans")`},
 	},
 	"design": {
-		{Tool: "rules", Reason: "Review past architectural decisions", Example: `rules(action="list_adrs")`},
+		{Tool: "validate", Reason: "Review past architectural decisions", Example: `validate(phase="list_adrs")`},
 		{Tool: "validate", Reason: "Current rule state", Example: `validate(phase="list")`},
 		{Tool: "tasks", Reason: "See existing plans", Example: `tasks(action="list_plans")`},
 	},
 	"test": {
 		{Tool: "validate", Reason: "Check files against architectural rules", Example: `validate(phase="post", files_written=["file.go"])`},
-		{Tool: "annotate", Reason: "View known quality issues to prioritize test coverage", Example: `annotate(action="list_gaps")`},
+		{Tool: "memory", Reason: "View known quality issues to prioritize test coverage", Example: `memory(action="list_gaps")`},
 		{Tool: "get_impact", Reason: "Find what depends on the code under test", Example: `get_impact(symbol="FunctionName")`},
 	},
 	"document": {
 		{Tool: "get_context", Reason: "Get full context for the entity you're documenting", Example: `get_context(entity="FunctionName")`},
-		{Tool: "rules", Reason: "Review past architectural decisions to document rationale", Example: `rules(action="list_adrs")`},
+		{Tool: "validate", Reason: "Review past architectural decisions to document rationale", Example: `validate(phase="list_adrs")`},
 	},
 	"optimize": {
 		{Tool: "get_impact", Reason: "Understand blast radius before optimizing", Example: `get_impact(symbol="SlowFunction")`},
-		{Tool: "get_file_context", Reason: "See all entities in files you're optimizing", Example: `get_file_context(file="internal/hot/path.go")`},
-		{Tool: "annotate", Reason: "View known performance issues", Example: `annotate(action="list_gaps")`},
+		{Tool: "search", Reason: "Find all entities in files you're optimizing", Example: `search(query="SlowFunction", mode="exact")`},
+		{Tool: "memory", Reason: "View known performance issues", Example: `memory(action="list_gaps")`},
 	},
 	"profile": {
 		{Tool: "get_impact", Reason: "Identify high-fanin hot paths worth profiling", Example: `get_impact(symbol="HotFunction")`},
-		{Tool: "get_file_context", Reason: "See all entities in the hot path", Example: `get_file_context(file="internal/hot/path.go")`},
-		{Tool: "annotate", Reason: "View known performance issues", Example: `annotate(action="list_gaps")`},
+		{Tool: "search", Reason: "Find all entities in the hot path", Example: `search(query="HotFunction", mode="exact")`},
+		{Tool: "memory", Reason: "View known performance issues", Example: `memory(action="list_gaps")`},
 	},
 }
 

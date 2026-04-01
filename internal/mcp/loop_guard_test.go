@@ -447,7 +447,8 @@ func TestLoopGuard_resetOnFingerprintChange(t *testing.T) {
 
 	// Call a DIFFERENT tool — this changes the fingerprint, which auto-resets
 	// the loop guard window (proving the agent made progress).
-	s.DispatchTool(context.Background(), "get_file_context", map[string]interface{}{"file": "test.go"}) //nolint:errcheck
+	// Sprint 23.9: get_file_context removed; use get_context as fingerprint-change tool.
+	s.DispatchTool(context.Background(), "get_context", map[string]interface{}{"entity": "test"}) //nolint:errcheck
 
 	// After fingerprint change, the original call should succeed.
 	result, err := s.DispatchTool(context.Background(), "search", args)

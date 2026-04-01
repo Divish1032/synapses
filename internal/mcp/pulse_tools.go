@@ -31,7 +31,7 @@ type contextDeliveryExtras struct {
 }
 
 // emitContextDelivery fires a ContextDeliveryEvent to the pulse sidecar for
-// a get_context / get_file_context / prepare_context call. It is called
+// a get_context / prepare_context call. It is called
 // asynchronously (via goroutine) so it never blocks the MCP response path.
 //
 // responsePayload is the value being returned (marshaled to JSON to measure bytes).
@@ -111,55 +111,7 @@ func (s *Server) emitContextDelivery(
 	pc.RecordContextDelivery(evt)
 }
 
-// emitFileContextDelivery fires a ContextDeliveryEvent for get_file_context.
-// nodes is the raw slice of graph.Node from the file lookup.
-func (s *Server) emitFileContextDelivery(
-	agentID, filePath string,
-	nodes []*graph.Node,
-	responsePayload interface{},
-	durationMs int64,
-	sessionID string,
-	truncated bool,
-	nodesPruned int,
-) {
-	pc := s.getPulseClient()
-	if pc == nil {
-		return
-	}
-	b, _ := json.Marshal(responsePayload)
-	responseBytes := len(b)
-
-	// Collect unique files and compute baseline.
-	seen := make(map[string]bool, len(nodes))
-	var total int64
-	for _, n := range nodes {
-		if n.File == "" || seen[n.File] {
-			continue
-		}
-		seen[n.File] = true
-		if fi, err := os.Stat(n.File); err == nil {
-			total += fi.Size()
-		}
-	}
-
-	evt := pulse.ContextDeliveryEvent{
-		ToolName:       "get_file_context",
-		AgentID:        agentID,
-		ProjectID:      s.projectID,
-		File:           filePath,
-		ResponseBytes:  responseBytes,
-		ResponseTokens: responseBytes / 4,
-		BaselineTokens: int(total / 4),
-		NodesDelivered: len(nodes),
-		DurationMs:     durationMs,
-		SessionID:      sessionID,
-		// P6-2: populate fields that were previously always zero/empty.
-		EntityFound: len(nodes) > 0,
-		Truncated:   truncated,
-		NodesPruned: nodesPruned,
-	}
-	s.goBackground(func() { pc.RecordContextDelivery(evt) })
-}
+// Sprint 23.9: emitFileContextDelivery removed — get_file_context tool removed.
 
 // fileBaselineTokens computes the baseline token count for a subgraph.
 // Baseline = sum of actual on-disk sizes / 4 for all unique source files

@@ -1,7 +1,7 @@
 package mcp
 
 // Tests for scout_tools.go handlers.
-// Covers handleWebAnnotate and handleLookupDocs.
+// Covers handleWebAnnotate. (Sprint 23.9: handleLookupDocs removed with lookup_docs tool.)
 
 import (
 	"testing"
@@ -67,17 +67,3 @@ func TestHandleWebAnnotate_InvalidHitsJSON(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-// ── handleLookupDocs ──────────────────────────────────────────────────────────
-
-func TestHandleLookupDocs_NilWebCache(t *testing.T) {
-	s := newTestServer(t)
-	// webCache not set → should return tool error
-	res, err := s.handleLookupDocs(ctx, callTool(map[string]any{"package": "github.com/foo/bar"}))
-	mustErrorResult(t, res, err)
-}
-
-func TestHandleLookupDocs_NoParams(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleLookupDocs(ctx, callTool(map[string]any{}))
-	mustErrorResult(t, res, err)
-}

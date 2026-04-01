@@ -703,41 +703,7 @@ func TestHandleSearch_EmptyQuery_ReturnsError(t *testing.T) {
 	mustErrorResult(t, res, err)
 }
 
-// ── handleGetFileContext ──────────────────────────────────────────────────────
-
-func TestHandleGetFileContext_KnownFile(t *testing.T) {
-	s, _, _ := newPopulatedServer(t)
-	res, err := s.handleGetFileContext(ctx, callTool(map[string]any{
-		"file": "pkg/auth/auth.go",
-	}))
-	m := mustResult(t, res, err)
-	// Response uses "entities" key (or "count" + "entities").
-	entities, ok := m["entities"].([]any)
-	if !ok {
-		t.Fatalf("expected entities list in response, keys: %v", mapKeys(m))
-	}
-	if len(entities) < 2 {
-		t.Errorf("expected ≥2 entities in pkg/auth/auth.go, got %d", len(entities))
-	}
-}
-
-func TestHandleGetFileContext_UnknownFile(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleGetFileContext(ctx, callTool(map[string]any{
-		"file": "pkg/nonexistent/file.go",
-	}))
-	// Unknown file returns a tool error (file not indexed).
-	if err != nil {
-		t.Fatalf("unexpected Go error: %v", err)
-	}
-	_ = res // error or empty result — both acceptable
-}
-
-func TestHandleGetFileContext_MissingParam_ReturnsError(t *testing.T) {
-	s := newTestServer(t)
-	res, err := s.handleGetFileContext(ctx, callTool(nil))
-	mustErrorResult(t, res, err)
-}
+// Sprint 23.9: TestHandleGetFileContext_* removed — get_file_context tool removed.
 
 // ── handleGetCallChain ────────────────────────────────────────────────────────
 

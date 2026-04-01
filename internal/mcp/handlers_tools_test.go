@@ -378,40 +378,6 @@ func TestHandleValidatePlan_InvalidJSON(t *testing.T) {
 	_ = result
 }
 
-// ── handleGetFileContext ──────────────────────────────────────────────────────
-
-func TestHandleGetFileContext_NoFile(t *testing.T) {
-	s := newTestServer(t)
-	req := callTool(map[string]any{})
-	result, err := s.handleGetFileContext(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !result.IsError {
-		t.Error("expected error when file param is missing")
-	}
-}
-
-func TestHandleGetFileContext_FoundFile(t *testing.T) {
-	s, _, _ := newPopulatedServer(t)
-	req := callTool(map[string]any{"file": "pkg/auth/auth.go"})
-	result, err := s.handleGetFileContext(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = result
-}
-
-func TestHandleGetFileContext_NotFound(t *testing.T) {
-	s := newTestServer(t)
-	req := callTool(map[string]any{"file": "nonexistent/file.go"})
-	result, err := s.handleGetFileContext(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = result
-}
-
 // ── handleGetContext additional coverage ──────────────────────────────────────
 
 func TestHandleGetContext_NoEntity(t *testing.T) {

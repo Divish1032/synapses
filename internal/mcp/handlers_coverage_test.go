@@ -320,18 +320,6 @@ func TestHandleAnnotateNode_ValidNodeID(t *testing.T) {
 	_ = result
 }
 
-// ── handleGetFileContext (additional paths) ───────────────────────────────────
-
-func TestHandleGetFileContext_WithSummary(t *testing.T) {
-	s, _, _ := newPopulatedServer(t)
-	req := callTool(map[string]any{"file": "pkg/auth/auth.go", "include_summary": true})
-	result, err := s.handleGetFileContext(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	_ = result
-}
-
 // ── handleGetContext (additional paths) ───────────────────────────────────────
 
 func TestHandleGetContext_WithTaskID(t *testing.T) {
@@ -1601,27 +1589,6 @@ func TestPickBestNode_PrefersNonTestFunctions(t *testing.T) {
 	if best != prodNode {
 		t.Error("expected non-test function to be preferred")
 	}
-}
-
-// ── handleGetFileContext (multiple files) ─────────────────────────────────────
-
-func TestHandleGetFileContext_MultipleFilesMatched(t *testing.T) {
-	s := newTestServer(t)
-	// Create two nodes in different files both named "handler.go".
-	id1 := s.graph.MakeNodeID("pkg/api/handler.go", "HandleRequest")
-	id2 := s.graph.MakeNodeID("pkg/admin/handler.go", "HandleAdmin")
-	s.graph.AddNode(&graph.Node{ID: id1, Name: "HandleRequest", Type: graph.NodeFunction, File: "pkg/api/handler.go", Package: "api", Line: 1})
-	s.graph.AddNode(&graph.Node{ID: id2, Name: "HandleAdmin", Type: graph.NodeFunction, File: "pkg/admin/handler.go", Package: "admin", Line: 1})
-
-	// Query "handler.go" matches both files.
-	req := callTool(map[string]any{"file": "handler.go"})
-	result, err := s.handleGetFileContext(ctx, req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	m := mustResult(t, result, nil)
-	// Should have "entities_by_file" key (grouped response for multiple matches).
-	hasKey(t, m, "entities_by_file")
 }
 
 // ── handleValidatePlan (check_safety, skipped edges) ─────────────────────────

@@ -21,9 +21,8 @@ import (
 
 // metaTools are session management tools excluded from suggestion suppression.
 var metaTools = map[string]bool{
-	"session_init":         true,
-	"end_session":          true,
-	"get_compaction_guide": true,
+	"session_init": true,
+	"end_session":  true,
 }
 
 // sessionToolEntry holds per-session tool counts with a creation timestamp.

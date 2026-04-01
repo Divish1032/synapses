@@ -45,9 +45,10 @@ func TestHiddenTools_SetContainsExpectedTools(t *testing.T) {
 
 func TestHiddenTools_CoreToolsNotHidden(t *testing.T) {
 	// Core tools must never be hidden.
+	// Sprint 23.9: 8-tool surface — rules and annotate merged into validate and memory.
 	coreNames := []string{
 		"session_init", "get_context", "search", "validate",
-		"memory", "tasks", "rules", "annotate", "end_session",
+		"memory", "tasks", "end_session", "get_impact",
 	}
 	for _, name := range coreNames {
 		if hiddenTools[name] {

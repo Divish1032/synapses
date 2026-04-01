@@ -267,12 +267,13 @@ func runCompactionBenchmark(t *testing.T, scenario scenarioData) {
 	compactionMap := mustResult(t, compactionResult, err)
 	compactionMetrics := scoreRecovery(t, scenario, compactionMap, "compaction")
 
-	// ── Guide ────────────────────────────────────────────────────────────
-	guideResult, err := srv.handleGetCompactionGuide(ctx, callTool(map[string]any{
-		"agent_id": scenario.AgentID,
-	}))
-	guideMap := mustResult(t, guideResult, err)
-	guideCompleteness := scoreGuide(t, scenario, guideMap)
+	// ── Guide (Sprint 23.9: get_compaction_guide removed; entity_importance
+	// is now embedded in session_init(scope="compaction").compaction_recovery) ──
+	compactionRecovery, _ := compactionMap["compaction_recovery"].(map[string]any)
+	if compactionRecovery == nil {
+		compactionRecovery = compactionMap
+	}
+	guideCompleteness := scoreGuide(t, scenario, compactionRecovery)
 
 	// ── Report ───────────────────────────────────────────────────────────
 	t.Logf("\n=== Compaction Benchmark: %s ===", scenario.Name)

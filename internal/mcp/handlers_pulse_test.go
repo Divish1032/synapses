@@ -83,25 +83,4 @@ func TestGetContextAgentIDExplicit(t *testing.T) {
 	}
 }
 
-// TestGetFileContextAgentIDFallback: same scenario for get_file_context.
-func TestGetFileContextAgentIDFallback(t *testing.T) {
-	srv, _, _ := newPopulatedServer(t)
-
-	pulseCli := newPulseClient(t)
-	defer pulseCli.Close()
-	srv.SetPulseClient(pulseCli)
-
-	srv.setLastAgent("cursor-agent")
-
-	// Call get_file_context without agent_id.
-	req := callTool(map[string]any{"file": "auth.go"})
-	_, err := srv.handleGetFileContext(ctx, req)
-	if err != nil {
-		t.Fatalf("handleGetFileContext: %v", err)
-	}
-
-	// lastAgent should be preserved.
-	if got := srv.getLastAgent(); got != "cursor-agent" {
-		t.Errorf("lastAgent = %q after handleGetFileContext, want \"cursor-agent\"", got)
-	}
-}
+// Sprint 23.9: TestGetFileContextAgentIDFallback removed — get_file_context tool removed.

@@ -1023,14 +1023,14 @@ func (s *Server) SetProjectID(id string) {
 	s.rl.projectID = id
 }
 
-// SetWebCache wires a *webcache.Cache into the server so that lookup_docs
-// can serve version-pinned package documentation and URL caching.
+// SetWebCache wires a *webcache.Cache into the server for optional doc-cache operations.
+// The lookup_docs tool has been removed (Sprint 23.9) but webCache is retained for
+// future use and daemon compatibility.
 func (s *Server) SetWebCache(wc *webcache.Cache) {
 	s.webCache = wc
 }
 
-// SetProjectPath stores the absolute project root path so that lookup_docs
-// can parse go.mod for version-pinned package documentation, and search
+// SetProjectPath stores the absolute project root path so that search
 // can inject source snippets from the filesystem.
 func (s *Server) SetProjectPath(path string) {
 	s.projectPath = path
@@ -1309,38 +1309,28 @@ func (s *Server) embedSweepLoop(embedder embed.Embedder, st *store.Store) {
 // and finish. Always available regardless of repo size.
 // Phase 6 (Proactive Context Engine): updated to match the design doc's core set.
 // All other tools are deferred and auto-promoted on first call.
-// Sprint 24 Phase 6: final 12-tool set. All tools are core — no tiers needed.
+// Sprint 23.9: consolidated to 8 tools. No tiers needed — all tools are always available.
 var coreTierTools = map[string]bool{
-	"session_init":         true,
-	"search":               true,
-	"get_context":          true,
-	"get_file_context":     true,
-	"get_impact":           true,
-	"validate":             true,
-	"memory":               true,
-	"end_session":          true,
-	"tasks":                true,
-	"rules":                true,
-	"annotate":             true,
-	"lookup_docs":          true,
-	"get_compaction_guide": true,
+	"session_init": true,
+	"search":       true,
+	"get_context":  true,
+	"get_impact":   true,
+	"validate":     true,
+	"memory":       true,
+	"end_session":  true,
+	"tasks":        true,
 }
 
-// standardTierTools = coreTierTools (all 13 tools are core after consolidation).
+// standardTierTools = coreTierTools (all 8 tools are core after Sprint 23.9 consolidation).
 var standardTierTools = map[string]bool{
-	"session_init":         true,
-	"search":               true,
-	"get_context":          true,
-	"get_file_context":     true,
-	"get_impact":           true,
-	"validate":             true,
-	"memory":               true,
-	"end_session":          true,
-	"tasks":                true,
-	"rules":                true,
-	"annotate":             true,
-	"lookup_docs":          true,
-	"get_compaction_guide": true,
+	"session_init": true,
+	"search":       true,
+	"get_context":  true,
+	"get_impact":   true,
+	"validate":     true,
+	"memory":       true,
+	"end_session":  true,
+	"tasks":        true,
 }
 
 // knowledgeTools are the tools available when the server runs in knowledge mode
@@ -1575,24 +1565,8 @@ func (s *Server) registerTools() {
 		s.handleSessionInit,
 	)
 
-	// get_compaction_guide: returns structured hints for efficient context compaction.
-	// Pure graph + ledger queries — no LLM dependency.
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_compaction_guide",
-			mcp.WithDescription(
-				"Returns structured hints for efficient context compaction. "+
-					"Call before compacting to get: must_preserve (task approach, decisions, blockers, violations), "+
-					"safe_to_forget (things Synapses can re-provide), entity_importance (ranked by signal strength + graph connectivity), "+
-					"and relationship_map (edges between work-set entities). No LLM required — pure graph + ledger queries.",
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Agent identifier. Required to look up session state and work ledger."),
-				mcp.Required(),
-			),
-		),
-		s.handleGetCompactionGuide,
-	)
+	// Sprint 23.9: get_compaction_guide removed — replaced by automatic compaction recovery
+	// via session_init(scope="compaction"). See Sprint 24.2 for recovery packet design.
 
 	// Sprint 24: report_usage absorbed into end_session.
 	// Sprint 24: get_my_analytics moved to MCP Resource synapses://analytics.
@@ -1690,13 +1664,20 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"validate",
 			mcp.WithDescription(
-				"Unified validation tool. phase='pre' (default): check proposed changes against rules. "+
+				"Unified validation and rule management. "+
+					"phase='pre' (default): check proposed changes against rules. "+
 					"phase='post': verify files after writing. phase='list': list current violations. "+
 					"phase='full': compound pre-implementation gate (safety+rules+scope). "+
-					"phase='safety': search failure episodes for similar past failures.",
+					"phase='safety': search failure episodes for similar past failures. "+
+					"phase='upsert_rule': create/update architectural rule. "+
+					"phase='delete_rule': remove a rule. "+
+					"phase='candidates': failure episodes not yet promoted to rules. "+
+					"phase='upsert_adr': create/update an architectural decision record. "+
+					"phase='list_adrs': query ADRs.",
 			),
 			mcp.WithString("phase",
-				mcp.Description("'pre' (default), 'post', 'list', 'full', or 'safety'."),
+				mcp.Description("'pre' (default), 'post', 'list', 'full', 'safety', "+
+					"'upsert_rule', 'delete_rule', 'candidates', 'upsert_adr', 'list_adrs'."),
 			),
 			// phase=pre params
 			mcp.WithString("changes",
@@ -1742,6 +1723,54 @@ func (s *Server) registerTools() {
 			mcp.WithString("project_id",
 				mcp.Description("Repo context for scoping failure search. Phase=safety only."),
 			),
+			// phase=upsert_rule params (absorbed from rules tool)
+			mcp.WithString("description",
+				mcp.Description("Rule description. Required for phase=upsert_rule. Gap description for phase=upsert_adr context."),
+			),
+			mcp.WithString("severity",
+				mcp.Description("'error' or 'warning' for phase=upsert_rule. 'low|medium|high|critical' for memory gaps."),
+			),
+			mcp.WithString("edge_type",
+				mcp.Description("Edge type to forbid. phase=upsert_rule."),
+			),
+			mcp.WithString("from_file_pattern",
+				mcp.Description("Source file glob. phase=upsert_rule."),
+			),
+			mcp.WithString("to_file_pattern",
+				mcp.Description("Target file glob. phase=upsert_rule."),
+			),
+			mcp.WithString("to_name_pattern",
+				mcp.Description("Target entity name substring. phase=upsert_rule."),
+			),
+			mcp.WithString("path_pattern",
+				mcp.Description("Comma-separated edge sequence for multi-hop checks. phase=upsert_rule."),
+			),
+			mcp.WithString("context_source",
+				mcp.Description("Provenance. Rejects 'external'/'generated'. phase=upsert_rule."),
+			),
+			// phase=upsert_adr / list_adrs params
+			mcp.WithString("id",
+				mcp.Description("ADR ID (kebab-case). Required for phase=upsert_adr."),
+			),
+			mcp.WithString("title",
+				mcp.Description("ADR title. Required for phase=upsert_adr."),
+			),
+			mcp.WithString("decision",
+				mcp.Description("The decision made. Required for phase=upsert_adr."),
+			),
+			mcp.WithString("adr_status",
+				mcp.Description("proposed|accepted|deprecated|superseded. phase=upsert_adr."),
+			),
+			mcp.WithString("context",
+				mcp.Description("Problem context. phase=upsert_adr."),
+			),
+			mcp.WithString("consequences",
+				mcp.Description("Trade-offs. phase=upsert_adr."),
+			),
+			mcp.WithArray("linked_files",
+				mcp.Description("File patterns for ADR. phase=upsert_adr."),
+				mcp.Items(map[string]any{"type": "string"}),
+			),
 		),
 		s.handleValidateDispatch,
 	)
@@ -1749,25 +1778,8 @@ func (s *Server) registerTools() {
 	// Sprint 25: upsert_gap absorbed into annotate(action="add_gap").
 	// Sprint 25: get_gaps absorbed into annotate(action="list_gaps").
 
-	// get_file_context
-	s.addOrDefer(
-		mcp.NewTool(
-			"get_file_context",
-			mcp.WithDescription(
-				"Returns all entities (functions, methods, structs, interfaces) defined in a file, "+
-					"ordered by line number. Accepts a partial path suffix (e.g. 'store/tasks.go'). "+
-					"Use this when working on a specific file to get an instant overview.",
-			),
-			mcp.WithString("file",
-				mcp.Required(),
-				mcp.Description("File path or suffix, e.g. 'internal/store/tasks.go' or 'tasks.go'."),
-			),
-			mcp.WithNumber("token_budget",
-				mcp.Description("Max response size in tokens (default 4000). When exceeded, entities are dropped from the bottom of the file (highest line numbers first). Response includes truncated=true and total_entities=N when trimmed."),
-			),
-		),
-		s.handleGetFileContext,
-	)
+	// Sprint 23.9: get_file_context removed — agent reads files directly; entity lookup
+	// is served by search(mode="exact") and get_context.
 
 	// search (absorbs semantic_search via mode param, find_entity via mode=exact)
 	s.addOrDefer(
@@ -1800,63 +1812,9 @@ func (s *Server) registerTools() {
 	)
 
 	// Sprint 25: get_call_chain absorbed into get_context(mode="path").
-
-	// annotate (merges annotate_node, web_annotate, upsert_gap, get_gaps, get_entity_history)
-	s.addOrDefer(
-		mcp.NewTool(
-			"annotate",
-			mcp.WithDescription(
-				"Unified annotation tool. action='add' (default): attach note to node. "+
-					"action='add_web': persist web findings as annotation. action='add_gap': record quality gap. "+
-					"action='list_gaps': query gaps. action='history': entity timeline.",
-			),
-			mcp.WithString("action",
-				mcp.Description("'add' (default), 'add_web', 'add_gap', 'list_gaps', 'history'."),
-			),
-			// add / add_web params
-			mcp.WithString("node_id",
-				mcp.Description("Node ID. Required for action=add/add_web/add_gap."),
-			),
-			mcp.WithString("note",
-				mcp.Description("Annotation text. Required for action=add, optional for add_web."),
-			),
-			mcp.WithString("agent_id",
-				mcp.Description("Agent identifier for attribution."),
-			),
-			// add_web params
-			mcp.WithString("hits",
-				mcp.Description("JSON array of {title,url,snippet} web hits. action=add_web."),
-			),
-			// add_gap params
-			mcp.WithString("gap_id",
-				mcp.Description("Short stable slug for gap dedup. Required for action=add_gap."),
-			),
-			mcp.WithString("description",
-				mcp.Description("Gap description. Required for action=add_gap."),
-			),
-			mcp.WithString("severity",
-				mcp.Description("low|medium|high|critical. action=add_gap/list_gaps."),
-			),
-			mcp.WithString("status",
-				mcp.Description("open|fixed|wontfix. action=add_gap. list_gaps: open|fixed|wontfix|all."),
-			),
-			mcp.WithString("fix_notes",
-				mcp.Description("How the gap was fixed. action=add_gap with status=fixed."),
-			),
-			// list_gaps params
-			mcp.WithString("file",
-				mcp.Description("Filter gaps by file path. action=list_gaps. Disambiguate for action=history."),
-			),
-			// history params
-			mcp.WithString("entity",
-				mcp.Description("Entity name. Required for action=history."),
-			),
-			mcp.WithNumber("limit",
-				mcp.Description("Max timeline events. action=history. Default 50."),
-			),
-		),
-		s.handleAnnotateDispatch,
-	)
+	// Sprint 23.9: annotate merged into memory. Annotation actions are now memory(action="annotate"),
+	// memory(action="annotate_web"), memory(action="add_gap"), memory(action="list_gaps"),
+	// memory(action="history").
 
 	// Sprint 24: link_entities, unlink_entities, confirm_edge removed.
 	// Graph edge management is no longer agent-facing.
@@ -2053,79 +2011,9 @@ func (s *Server) registerTools() {
 	// Sprint 24: get_agents, get_events, send_message, get_messages removed.
 	// Cross-session awareness is now handled by the Work Ledger (ambient coordination).
 
-	// ── Rule Management Tools ────────────────────────────────────────────────
-
-	// rules (merges upsert_rule, delete_rule, get_rule_candidates, upsert_adr, get_adrs)
-	s.addOrDefer(
-		mcp.NewTool(
-			"rules",
-			mcp.WithDescription(
-				"Unified rule and ADR management. action='upsert': create/update architectural rule. "+
-					"action='delete': remove rule. action='candidates': failure episodes not yet promoted. "+
-					"action='upsert_adr': create/update ADR. action='list_adrs': query ADRs.",
-			),
-			mcp.WithString("action",
-				mcp.Required(),
-				mcp.Description("'upsert', 'delete', 'candidates', 'upsert_adr', 'list_adrs'."),
-			),
-			// upsert params
-			mcp.WithString("rule_id",
-				mcp.Description("Rule ID. Required for action=upsert/delete."),
-			),
-			mcp.WithString("description",
-				mcp.Description("Rule/gap description. Required for action=upsert."),
-			),
-			mcp.WithString("severity",
-				mcp.Description("'error' or 'warning'. Required for action=upsert."),
-			),
-			mcp.WithString("edge_type",
-				mcp.Description("Edge type to forbid. action=upsert."),
-			),
-			mcp.WithString("from_file_pattern",
-				mcp.Description("Source file glob. action=upsert."),
-			),
-			mcp.WithString("to_file_pattern",
-				mcp.Description("Target file glob. action=upsert."),
-			),
-			mcp.WithString("to_name_pattern",
-				mcp.Description("Target entity name substring. action=upsert."),
-			),
-			mcp.WithString("path_pattern",
-				mcp.Description("Comma-separated edge sequence for multi-hop checks. action=upsert."),
-			),
-			mcp.WithString("context_source",
-				mcp.Description("Provenance. Rejects 'external'/'generated'. action=upsert."),
-			),
-			// upsert_adr params
-			mcp.WithString("id",
-				mcp.Description("ADR ID (kebab-case). Required for action=upsert_adr."),
-			),
-			mcp.WithString("title",
-				mcp.Description("ADR title. Required for action=upsert_adr."),
-			),
-			mcp.WithString("decision",
-				mcp.Description("The decision made. Required for action=upsert_adr."),
-			),
-			mcp.WithString("status",
-				mcp.Description("proposed|accepted|deprecated|superseded. action=upsert_adr."),
-			),
-			mcp.WithString("context",
-				mcp.Description("Problem context. action=upsert_adr."),
-			),
-			mcp.WithString("consequences",
-				mcp.Description("Trade-offs. action=upsert_adr."),
-			),
-			mcp.WithArray("linked_files",
-				mcp.Description("File patterns for ADR. action=upsert_adr."),
-				mcp.Items(map[string]any{"type": "string"}),
-			),
-			// list_adrs params
-			mcp.WithString("file",
-				mcp.Description("File path to filter ADRs. action=list_adrs."),
-			),
-		),
-		s.handleRulesDispatch,
-	)
+	// Sprint 23.9: rules merged into validate. Rule/ADR management is now via:
+	// validate(phase="upsert_rule"), validate(phase="delete_rule"),
+	// validate(phase="candidates"), validate(phase="upsert_adr"), validate(phase="list_adrs").
 
 	// ── Session Awareness Tools ──────────────────────────────────────────────
 
@@ -2133,40 +2021,8 @@ func (s *Server) registerTools() {
 
 	// ── Web Tools ─────────────────────────────────────────────────────────────
 
-	// Sprint 25: web_annotate absorbed into annotate(action="add_web").
-
-	// lookup_docs
-	s.addOrDefer(
-		mcp.NewTool(
-			"lookup_docs",
-			mcp.WithDescription(
-				"Returns cached Go package documentation or arbitrary URL content from the "+
-					"local Synapses doc cache. Package docs are version-pinned from go.mod and "+
-					"never expire — re-fetched only when go.mod changes. URL content is cached "+
-					"for 24 hours. Use this to verify API signatures before writing code. "+
-					"Provide exactly one of: package=, url=, or entity=.",
-			),
-			mcp.WithString("package",
-				mcp.Description(
-					"Go import path to look up, e.g. 'github.com/mark3labs/mcp-go'. "+
-						"Returns docs at the version pinned in go.mod.",
-				),
-			),
-			mcp.WithString("url",
-				mcp.Description("Arbitrary URL to fetch and cache (24h TTL)."),
-			),
-			mcp.WithString("entity",
-				mcp.Description(
-					"Code entity name (function, struct, file). Returns docs for all external "+
-						"packages imported by that entity.",
-				),
-			),
-		),
-		s.handleLookupDocs,
-	)
-
-	// Sprint 25: upsert_adr absorbed into rules(action="upsert_adr").
-
+	// Sprint 23.9: lookup_docs removed — agent browses docs itself.
+	// Sprint 23.9: web_annotate absorbed into memory(action="annotate_web").
 	// Sprint 25: prepare_context absorbed into get_context(mode="intent").
 
 	// ── Agent Message Bus ────────────────────────────────────────────────────
@@ -2177,13 +2033,19 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"memory",
 			mcp.WithDescription(
-				"Unified episodic memory. action='save': record a decision/failure episode. "+
+				"Unified episodic memory and annotation. "+
+					"action='save': record a decision/failure episode. "+
 					"action='search': FTS5/semantic search across memories (with query) or chronological browse (without). "+
-					"action='list': chronological episode browser with filters.",
+					"action='list': chronological episode browser with filters. "+
+					"action='annotate': attach a note to a graph node. "+
+					"action='annotate_web': persist web search findings as a node annotation. "+
+					"action='add_gap': record a quality gap against a node. "+
+					"action='list_gaps': query recorded quality gaps. "+
+					"action='history': entity change timeline.",
 			),
 			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("'save', 'search', or 'list'."),
+				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history'."),
 			),
 			// action=save params
 			mcp.WithString("agent_id",
@@ -2254,14 +2116,47 @@ func (s *Server) registerTools() {
 			mcp.WithNumber("since_days",
 				mcp.Description("Only episodes from last N days. action=list."),
 			),
+			// action=annotate / annotate_web params (absorbed from annotate tool)
+			mcp.WithString("node_id",
+				mcp.Description("Node ID. Required for action=annotate/annotate_web/add_gap."),
+			),
+			mcp.WithString("note",
+				mcp.Description("Annotation text. Required for action=annotate, optional for annotate_web."),
+			),
+			mcp.WithString("hits",
+				mcp.Description("JSON array of {title,url,snippet} web hits. action=annotate_web."),
+			),
+			// action=add_gap params
+			mcp.WithString("gap_id",
+				mcp.Description("Short stable slug for gap dedup. Required for action=add_gap."),
+			),
+			mcp.WithString("gap_description",
+				mcp.Description("Gap description. Required for action=add_gap."),
+			),
+			mcp.WithString("gap_severity",
+				mcp.Description("low|medium|high|critical. action=add_gap/list_gaps."),
+			),
+			mcp.WithString("gap_status",
+				mcp.Description("open|fixed|wontfix. action=add_gap. list_gaps: open|fixed|wontfix|all."),
+			),
+			mcp.WithString("fix_notes",
+				mcp.Description("How the gap was fixed. action=add_gap with gap_status=fixed."),
+			),
+			// action=list_gaps / history params
+			mcp.WithString("file",
+				mcp.Description("Filter gaps by file path. action=list_gaps. Disambiguate for action=history."),
+			),
+			mcp.WithString("entity",
+				mcp.Description("Entity name. Required for action=history."),
+			),
 		),
 		s.handleMemoryDispatch,
 	)
 
 	// Sprint 25: check_plan_safety absorbed into validate(phase="safety").
 
-	// Sprint 25: get_rule_candidates absorbed into rules(action="candidates").
-	// Sprint 25: get_adrs absorbed into rules(action="list_adrs").
+	// Sprint 25→23.9: get_rule_candidates → rules(action="candidates") → validate(phase="candidates").
+	// Sprint 25→23.9: get_adrs → rules(action="list_adrs") → validate(phase="list_adrs").
 
 	// Sprint 24: get_decision_log moved to MCP Resource synapses://decision-log
 

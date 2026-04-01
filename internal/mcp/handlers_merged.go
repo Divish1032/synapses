@@ -89,8 +89,20 @@ func (s *Server) handleValidateDispatch(
 		result, err = s.handlePlanContext(ctx, req)
 	case "safety":
 		result, err = s.handleCheckPlanSafety(ctx, req)
+	// Sprint 23.9: rules management merged into validate.
+	case "upsert_rule":
+		result, err = s.handleUpsertRule(ctx, req)
+	case "delete_rule":
+		result, err = s.handleDeleteRule(ctx, req)
+	case "candidates":
+		result, err = s.handleGetRuleCandidates(ctx, req)
+	case "upsert_adr":
+		result, err = s.handleUpsertADR(ctx, req)
+	case "list_adrs":
+		result, err = s.handleGetADRs(ctx, req)
 	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown validate phase: %q (valid: pre, post, list, full, safety)", phase)), nil
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"unknown validate phase: %q (valid: pre, post, list, full, safety, upsert_rule, delete_rule, candidates, upsert_adr, list_adrs)", phase)), nil
 	}
 	if err == nil && result != nil {
 		// Sprint 27.3: inject reactive suggestions into validate results.
@@ -107,7 +119,7 @@ func (s *Server) handleMemoryDispatch(
 ) (*mcp.CallToolResult, error) {
 	action, _ := req.GetArguments()["action"].(string)
 	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: save, search, list)"), nil
+		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history)"), nil
 	}
 	switch action {
 	case "save":
@@ -116,8 +128,20 @@ func (s *Server) handleMemoryDispatch(
 		return s.handleRecall(ctx, req)
 	case "list":
 		return s.handleGetEpisodes(ctx, req)
+	// Sprint 23.9: annotate actions merged into memory.
+	case "annotate":
+		return s.handleAnnotateNode(ctx, req)
+	case "annotate_web":
+		return s.handleWebAnnotate(ctx, req)
+	case "add_gap":
+		return s.handleUpsertGap(ctx, req)
+	case "list_gaps":
+		return s.handleGetGaps(ctx, req)
+	case "history":
+		return s.handleGetEntityHistory(ctx, req)
 	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown memory action: %q (valid: save, search, list)", action)), nil
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history)", action)), nil
 	}
 }
 
@@ -151,54 +175,5 @@ func (s *Server) handleTasksDispatch(
 	}
 }
 
-// ── Merge 6: rules ─────────────────────────────────────────────────────────
-
-func (s *Server) handleRulesDispatch(
-	ctx context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	action, _ := req.GetArguments()["action"].(string)
-	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: upsert, delete, candidates, upsert_adr, list_adrs)"), nil
-	}
-	switch action {
-	case "upsert":
-		return s.handleUpsertRule(ctx, req)
-	case "delete":
-		return s.handleDeleteRule(ctx, req)
-	case "candidates":
-		return s.handleGetRuleCandidates(ctx, req)
-	case "upsert_adr":
-		return s.handleUpsertADR(ctx, req)
-	case "list_adrs":
-		return s.handleGetADRs(ctx, req)
-	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown rules action: %q (valid: upsert, delete, candidates, upsert_adr, list_adrs)", action)), nil
-	}
-}
-
-// ── Merge 7: annotate ──────────────────────────────────────────────────────
-
-func (s *Server) handleAnnotateDispatch(
-	ctx context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	action, _ := req.GetArguments()["action"].(string)
-	if action == "" {
-		action = "add"
-	}
-	switch action {
-	case "add":
-		return s.handleAnnotateNode(ctx, req)
-	case "add_web":
-		return s.handleWebAnnotate(ctx, req)
-	case "add_gap":
-		return s.handleUpsertGap(ctx, req)
-	case "list_gaps":
-		return s.handleGetGaps(ctx, req)
-	case "history":
-		return s.handleGetEntityHistory(ctx, req)
-	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown annotate action: %q (valid: add, add_web, add_gap, list_gaps, history)", action)), nil
-	}
-}
+// Sprint 23.9: handleRulesDispatch removed — rules management merged into handleValidateDispatch.
+// Sprint 23.9: handleAnnotateDispatch removed — annotation merged into handleMemoryDispatch.

@@ -78,7 +78,7 @@ func TestSuggestTools_ReviewIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("reviewing code quality")
 	names := toolNames(suggestions)
 	assertContains(t, names, "validate")
-	assertContains(t, names, "annotate")
+	assertContains(t, names, "memory")
 }
 
 func TestSuggestTools_ExploreIntent(t *testing.T) {
@@ -88,7 +88,7 @@ func TestSuggestTools_ExploreIntent(t *testing.T) {
 
 func TestSuggestTools_PlanIntent(t *testing.T) {
 	suggestions := suggestToolsForIntent("planning the architecture")
-	assertContains(t, toolNames(suggestions), "rules")
+	assertContains(t, toolNames(suggestions), "validate")
 }
 
 func TestSuggestTools_RefactorIntent(t *testing.T) {
@@ -141,7 +141,7 @@ func TestSuggestTools_StemMatch(t *testing.T) {
 		{"investigated the bug", "get_context"},
 		{"reviewed the PR", "validate"},
 		{"refactoring module", "get_impact"},
-		{"designing system", "rules"},
+		{"designing system", "validate"},
 	}
 	for _, tc := range cases {
 		suggestions := suggestToolsForIntent(tc.intent)

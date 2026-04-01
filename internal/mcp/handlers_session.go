@@ -944,11 +944,7 @@ func (s *Server) handleSessionInit(
 		resp["sidecars"] = map[string]interface{}{
 			"brain": map[string]interface{}{
 				"available": s.getBrainClient() != nil,
-				"note":      "enriches get_context with LLM summaries; required by upsert_adr, get_adrs",
-			},
-			"doc_cache": map[string]interface{}{
-				"available": s.webCache != nil,
-				"note":      "enables lookup_docs with version-pinned package documentation",
+				"note":      "enriches get_context with LLM summaries; required by validate(phase=upsert_adr/list_adrs)",
 			},
 			"pulse": map[string]interface{}{
 				"available": s.getPulseClient() != nil,

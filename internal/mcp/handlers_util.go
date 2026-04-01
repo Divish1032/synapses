@@ -210,8 +210,6 @@ func normalizeSubgraph(sg *graph.SubGraph, repoRoot string) *graph.SubGraph {
 	}
 }
 
-// handleGetFileContext returns all entities defined in a file, ordered by line.
-// Accepts a partial path (e.g. "store/tasks.go" matches the full absolute path).
 func isTestFile(filePath string) bool {
 	base := filePath
 	if i := strings.LastIndex(filePath, "/"); i >= 0 {

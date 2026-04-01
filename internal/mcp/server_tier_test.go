@@ -4,15 +4,13 @@ import (
 	"testing"
 )
 
-// TestToolInTier_AllToolsAlwaysAvailable verifies that all tools are
-// registered at all scales (ADR: mcp-go has no custom dispatch).
+// TestToolInTier_AllToolsAlwaysAvailable verifies that all 8 consolidated tools are
+// registered at all scales (ADR: mcp-go has no custom dispatch). Sprint 23.9.
 func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 	s := &Server{}
 	tools := []string{
-		"session_init", "search", "get_context", "get_file_context",
-		"get_impact", "validate", "memory", "end_session",
-		"tasks", "rules", "annotate", "lookup_docs",
-		"get_compaction_guide",
+		"session_init", "search", "get_context",
+		"get_impact", "validate", "memory", "end_session", "tasks",
 	}
 	for _, name := range tools {
 		if !s.toolInTier(name) {
@@ -22,13 +20,11 @@ func TestToolInTier_AllToolsAlwaysAvailable(t *testing.T) {
 }
 
 // TestCoreTierTools_DesignDocSet verifies core categorization matches
-// the final 13-tool set after Sprint 24 consolidation + compaction guide.
+// the 8-tool set after Sprint 23.9 consolidation.
 func TestCoreTierTools_DesignDocSet(t *testing.T) {
 	expected := []string{
-		"session_init", "search", "get_context", "get_file_context",
-		"get_impact", "validate", "memory", "end_session",
-		"tasks", "rules", "annotate", "lookup_docs",
-		"get_compaction_guide",
+		"session_init", "search", "get_context",
+		"get_impact", "validate", "memory", "end_session", "tasks",
 	}
 	for _, name := range expected {
 		if !coreTierTools[name] {

@@ -1354,8 +1354,8 @@ These 13 core tools cover 95% of workflows. All 40+ tools remain available — c
 
 ### Need more?
 
-` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`get_file_context`" + `).
-Synapses exposes 12 tools — read their descriptions via ` + "`tools/list`" + ` to find what you need.
+` + "`session_init`" + ` suggests specialized tools based on your declared intent (e.g. ` + "`get_impact`" + `, ` + "`search(mode=\"exact\")`" + `).
+Synapses exposes 8 tools — read their descriptions via ` + "`tools/list`" + ` to find what you need.
 
 ### Cross-Project Queries
 When multiple projects are registered with the daemon, query knowledge across them:

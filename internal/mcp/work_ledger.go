@@ -52,7 +52,7 @@ var signalSpecs = map[string]signalSpec{
 	"search":                {entityKeys: nil, fileKeys: nil}, // search queries are free-text, NOT entity IDs
 	"get_context":           {entityKeys: []string{"entity", "from", "to"}, fileKeys: []string{"file"}},
 	"prepare_context":       {entityKeys: []string{"target"}, fileKeys: []string{"file"}},
-	"get_file_context":      {entityKeys: nil, fileKeys: []string{"file"}},
+	// get_file_context removed (Sprint 23.9)
 	"get_impact":            {entityKeys: []string{"symbol"}, fileKeys: []string{"files"}},
 	"get_call_chain":        {entityKeys: []string{"from", "to"}, fileKeys: nil},
 	"validate_plan":         {entityKeys: nil, fileKeys: nil}, // changes are structural, not file signals
@@ -83,14 +83,14 @@ var signalSpecs = map[string]signalSpec{
 	"get_adrs":              {entityKeys: nil, fileKeys: []string{"file"}},
 	"end_session":           {entityKeys: nil, fileKeys: nil},
 	"report_usage":          {entityKeys: nil, fileKeys: nil},
-	"lookup_docs":           {entityKeys: []string{"entity"}, fileKeys: nil},
-	// Future merged tool names (Phase 5) — pre-registered so signals work after merge
+	// lookup_docs removed (Sprint 23.9)
+	// get_compaction_guide removed (Sprint 23.9)
+	// rules merged into validate (Sprint 23.9)
+	// annotate merged into memory (Sprint 23.9)
+	// Sprint 23.9: consolidated 8-tool signal specs
 	"validate": {entityKeys: nil, fileKeys: []string{"files_written"}},
-	"memory":   {entityKeys: nil, fileKeys: []string{"affected_files"}},
+	"memory":   {entityKeys: []string{"node_id", "entity"}, fileKeys: []string{"affected_files", "file"}},
 	"tasks":    {entityKeys: nil, fileKeys: nil},
-	"rules":    {entityKeys: nil, fileKeys: nil},
-	"annotate":              {entityKeys: []string{"node_id", "entity"}, fileKeys: []string{"file"}},
-	"get_compaction_guide":  {entityKeys: nil, fileKeys: nil},
 }
 
 // synthesizeWorkSummary builds a human-readable narrative from work ledger signals

@@ -14,7 +14,7 @@ import (
 // its result is returned without error.
 func TestDispatchTool_KnownTool(t *testing.T) {
 	srv := newTestServer(t)
-	result, err := srv.DispatchTool(context.Background(), "get_file_context", nil)
+	result, err := srv.DispatchTool(context.Background(), "search", nil)
 	if err != nil {
 		t.Fatalf("expected no error for known tool, got: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestDispatchTool_EmptyToolName(t *testing.T) {
 // treated as an empty map by the handler.
 func TestDispatchTool_NilArgs(t *testing.T) {
 	srv := newTestServer(t)
-	result, err := srv.DispatchTool(context.Background(), "get_file_context", nil)
+	result, err := srv.DispatchTool(context.Background(), "search", nil)
 	if err != nil {
 		t.Fatalf("unexpected error with nil args: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestDispatchTool_SessionIDInContext(t *testing.T) {
 	srv := newTestServer(t)
 	ctx := WithSessionID(context.Background(), "rest-42")
 	// session_init records the session; we just verify no panic/error from dispatch.
-	result, err := srv.DispatchTool(ctx, "get_file_context", nil)
+	result, err := srv.DispatchTool(ctx, "search", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestDispatchTool_StoreNil(t *testing.T) {
 	srv := New(g, cfg, nil)
 	t.Cleanup(func() { srv.Close() })
 
-	result, err := srv.DispatchTool(context.Background(), "get_file_context", nil)
+	result, err := srv.DispatchTool(context.Background(), "search", nil)
 	if err != nil {
 		t.Fatalf("unexpected error with nil store: %v", err)
 	}

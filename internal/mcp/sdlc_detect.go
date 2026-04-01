@@ -175,12 +175,12 @@ func (d *sdlcDetector) detect() (brain.SDLCPhase, float64) {
 
 func (d *sdlcDetector) scorePlanning() float64 {
 	var score float64
-	score += float64(d.toolHits["create_plan"]) * 0.3
-	score += float64(d.toolHits["get_plans"]) * 0.2
-	score += float64(d.toolHits["rules"]) * 0.15
-	score += float64(d.toolHits["upsert_rule"]) * 0.2
-	score += float64(d.toolHits["upsert_adr"]) * 0.25
-	score += float64(d.toolHits["get_adrs"]) * 0.15
+	// Sprint 23.9: create_plan/get_plans are now tasks(action=create_plan/list_plans).
+	// SDLC detector tracks top-level tool name "tasks" — use as a moderate planning signal.
+	score += float64(d.toolHits["tasks"]) * 0.2
+	// validate(phase=upsert_adr/list_adrs/upsert_rule) signal flows through "validate" —
+	// already counted in scoreTesting; planning gets a smaller share for validate calls.
+	score += float64(d.toolHits["validate"]) * 0.05
 	score += float64(d.toolHits["search"]) * 0.05 // broad exploration
 	score += float64(d.fileKinds["doc"]) * 0.1
 	return score
@@ -189,7 +189,7 @@ func (d *sdlcDetector) scorePlanning() float64 {
 func (d *sdlcDetector) scoreDevelopment() float64 {
 	var score float64
 	score += float64(d.toolHits["get_context"]) * 0.15
-	score += float64(d.toolHits["find_entity"]) * 0.15
+	// find_entity is now search(mode="exact") — both count toward search
 	score += float64(d.toolHits["search"]) * 0.1
 	score += float64(d.toolHits["link_task_nodes"]) * 0.2
 	score += float64(d.toolHits["update_task"]) * 0.1
@@ -199,8 +199,8 @@ func (d *sdlcDetector) scoreDevelopment() float64 {
 
 func (d *sdlcDetector) scoreTesting() float64 {
 	var score float64
-	score += float64(d.toolHits["validate"]) * 0.2
-	score += float64(d.toolHits["verify_implementation"]) * 0.25
+	// validate absorbs verify_implementation (phase=post) and check_plan_safety.
+	score += float64(d.toolHits["validate"]) * 0.25
 	score += float64(d.toolHits["get_impact"]) * 0.1
 	score += float64(d.fileKinds["test"]) * 0.25
 	return score
@@ -210,9 +210,9 @@ func (d *sdlcDetector) scoreReview() float64 {
 	var score float64
 	score += float64(d.toolHits["get_impact"]) * 0.2
 	score += float64(d.toolHits["get_context"]) * 0.05 // lower weight — shared with dev
-	score += float64(d.toolHits["get_call_chain"]) * 0.15
-	score += float64(d.toolHits["annotate"]) * 0.15
-	score += float64(d.toolHits["annotate_node"]) * 0.15
+	// get_call_chain is now get_context(mode="path"); annotate/annotate_node are
+	// now memory(action="annotate"). Both contribute through their merged tool names.
+	score += float64(d.toolHits["memory"]) * 0.1
 	// Review = reads many, edits none. Penalize if code files are touched.
 	if d.fileKinds["code"] == 0 && d.toolHits["get_context"]+d.toolHits["get_impact"] > 2 {
 		score += 0.2

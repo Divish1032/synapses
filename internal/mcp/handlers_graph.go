@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -265,7 +264,7 @@ func (s *Server) handleFindEntity(
 		result["federated"] = fedResults
 	}
 	if len(results) == 0 && len(fedResults) == 0 {
-		result["hint"] = "No exact or substring match. Try search(mode=semantic) for concept-based lookup, or check get_file_context for a specific file."
+		result["hint"] = "No exact or substring match. Try search(mode=semantic) for concept-based lookup, or search(mode=fulltext) for broader text search."
 	}
 	return jsonResult(result)
 }
@@ -273,139 +272,9 @@ func (s *Server) handleFindEntity(
 
 // REMOVED: toolCatalog, workflowRecipes, handleDiscoverTools, splitAlpha, dotProduct, init()
 // were removed as dormant code — discover_tools was unregistered in Sprint 24.
-// The 12 active MCP tools are: session_init, get_context, validate, get_file_context,
-// search, annotate, get_impact, tasks, end_session, rules, lookup_docs, memory.
-//
-// handleGetFileContext follows below.
-func (s *Server) handleGetFileContext(
-	ctx context.Context,
-	req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	handlerStart := time.Now()
-	filePath, ok := req.GetArguments()["file"].(string)
-	if !ok || filePath == "" {
-		return mcp.NewToolResultError("file is required (e.g., 'internal/auth/service.go')"), nil
-	}
-
-	root := s.graph.Root()
-	prefix := root
-	if prefix != "" && !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-
-	// Use indexed FindByFile for O(1) lookup instead of scanning all nodes.
-	candidates := s.graph.FindByFile(filePath)
-	var matches []*graph.Node
-	for _, n := range candidates {
-		if n.Type == graph.NodeFile || n.Type == graph.NodePackage {
-			continue
-		}
-		matches = append(matches, n)
-	}
-
-	if len(matches) == 0 {
-		return jsonResult(map[string]interface{}{
-			"error": fmt.Sprintf("no entities found for file: %q", filePath),
-			"hint":  "Use a path suffix (e.g. 'store/tasks.go' not full absolute path). The file may not be indexed yet — try reindex.",
-		})
-	}
-
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].File != matches[j].File {
-			return matches[i].File < matches[j].File
-		}
-		return matches[i].Line < matches[j].Line
-	})
-
-	type fileEntity struct {
-		Type     graph.NodeType    `json:"type"`
-		Name     string            `json:"name"`
-		Line     int               `json:"line"`
-		Exported bool              `json:"exported"`
-		Metadata map[string]string `json:"metadata,omitempty"`
-	}
-
-	// Check how many distinct files were matched.
-	fileSet := make(map[string]struct{})
-	for _, n := range matches {
-		fileSet[n.File] = struct{}{}
-	}
-
-	fileTokenBudget := 4000
-	// Sprint 11: apply model-based budget multiplier to the default budget.
-	if mult := s.getSessionBudgetMultiplier(ctx); mult != 1.0 {
-		fileTokenBudget = int(float64(fileTokenBudget) * mult)
-	}
-	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
-		fileTokenBudget = int(tb)
-	}
-
-	agentIDFC, _ := req.GetArguments()["agent_id"].(string)
-	if agentIDFC == "" {
-		agentIDFC = s.getLastAgent()
-	}
-	// R29: track repeated file-context fetches as a confusion signal, the same
-	// way get_context tracks repeated entity fetches.
-	if agentIDFC != "" && s.store != nil {
-		s.trackContextCall(agentIDFC, "file:"+filePath)
-	}
-
-	if len(fileSet) == 1 {
-		// Single file — keep existing flat format.
-		out := make([]fileEntity, len(matches))
-		for i, n := range matches {
-			out[i] = fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata}
-		}
-		totalEntities := len(out)
-		// IMP-EVAL-10: truncate to token budget by dropping highest-line entities first.
-		// Proportional truncation: marshal once, compute keep ratio in O(n).
-		truncated := false
-		if fileTokenBudget > 0 {
-			if raw, err := json.Marshal(out); err == nil && len(raw) > fileTokenBudget*4 {
-				keep := len(out) * (fileTokenBudget * 4) / len(raw)
-				if keep < 1 {
-					keep = 1
-				}
-				out = out[:keep]
-				truncated = true
-			}
-		}
-		payload := map[string]interface{}{
-			"file":     strings.TrimPrefix(matches[0].File, prefix),
-			"package":  matches[0].Package,
-			"count":    len(out),
-			"entities": out,
-		}
-		if truncated {
-			payload["truncated"] = true
-			payload["total_entities"] = totalEntities
-		}
-		pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
-		s.emitFileContextDelivery(agentIDFC, filePath, matches, payload, time.Since(handlerStart).Milliseconds(), pulseSessID, truncated, totalEntities-len(out))
-		return jsonResult(payload)
-	}
-
-	// Multiple files matched — group by file with attribution.
-	byFile := make(map[string][]fileEntity)
-	fileOrder := make([]string, 0, len(fileSet))
-	for _, n := range matches {
-		rel := strings.TrimPrefix(n.File, prefix)
-		if _, seen := byFile[rel]; !seen {
-			fileOrder = append(fileOrder, rel)
-		}
-		byFile[rel] = append(byFile[rel], fileEntity{Type: n.Type, Name: n.Name, Line: n.Line, Exported: n.Exported, Metadata: n.Metadata})
-	}
-	sort.Strings(fileOrder)
-	multiPayload := map[string]interface{}{
-		"files_matched":    len(fileSet),
-		"total_count":      len(matches),
-		"entities_by_file": byFile,
-		"hint":             fmt.Sprintf("%d files named %q found. Use file= param with a longer path suffix to pin to one file.", len(fileSet), filePath),
-	}
-	pulseSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
-	s.emitFileContextDelivery(agentIDFC, filePath, matches, multiPayload, time.Since(handlerStart).Milliseconds(), pulseSessID, false, 0)
-	return jsonResult(multiPayload)
-}
+// Sprint 23.9: handleGetFileContext removed — agent reads files directly.
+// The 8 active MCP tools are: session_init, get_context, validate, search,
+// get_impact, tasks, end_session, memory.
 
 // handleSearch performs a keyword search across entity names and doc comments.
 // Results are ranked: exact name > name prefix > name substring > doc match.
