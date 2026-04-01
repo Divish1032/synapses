@@ -51,6 +51,7 @@ func extractPythonDeclInfo(root sitter.Node, src []byte, lines []string) map[str
 					doc = extractLineDoc(lines, sl, "#")
 				}
 				result[className] = declMeta{
+					Signature: extractSigToBody(n, src),
 					Doc:       doc,
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}

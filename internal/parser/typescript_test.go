@@ -1,6 +1,7 @@
 package parser_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -378,5 +379,57 @@ class User implements Comparable<User> {
 	hi := nodes[0].Metadata["heritage_implements"]
 	if hi != "Comparable" {
 		t.Errorf("heritage_implements = %q, want %q (generic stripped)", hi, "Comparable")
+	}
+}
+
+// --- Sprint 23.7: entity signature extraction tests ---
+
+func TestTypeScriptParser_ClassSignature(t *testing.T) {
+	g := parseTS(t, "auth/service.ts", tsSource)
+	nodes := g.FindByName("AuthClient")
+	if len(nodes) == 0 {
+		t.Fatal("AuthClient class not found")
+	}
+	var classNode *graph.Node
+	for i := range nodes {
+		if nodes[i].Type == graph.NodeStruct {
+			classNode = nodes[i]
+			break
+		}
+	}
+	if classNode == nil {
+		t.Fatal("AuthClient should be a NodeStruct")
+	}
+	sig := classNode.Metadata["signature"]
+	if sig == "" {
+		t.Fatal("AuthClient should have a signature")
+	}
+	if !strings.Contains(sig, "AuthClient") || !strings.Contains(sig, "implements") {
+		t.Errorf("class signature %q should contain 'AuthClient' and 'implements'", sig)
+	}
+}
+
+func TestTypeScriptParser_InterfaceSignature(t *testing.T) {
+	g := parseTS(t, "auth/service.ts", tsSource)
+	nodes := g.FindByName("AuthService")
+	if len(nodes) == 0 {
+		t.Fatal("AuthService interface not found")
+	}
+	var ifaceNode *graph.Node
+	for i := range nodes {
+		if nodes[i].Type == graph.NodeInterface {
+			ifaceNode = nodes[i]
+			break
+		}
+	}
+	if ifaceNode == nil {
+		t.Fatal("AuthService should be a NodeInterface")
+	}
+	sig := ifaceNode.Metadata["signature"]
+	if sig == "" {
+		t.Fatal("AuthService interface should have a signature")
+	}
+	if !strings.Contains(sig, "AuthService") {
+		t.Errorf("interface signature %q should contain 'AuthService'", sig)
 	}
 }

@@ -58,6 +58,7 @@ func extractJavaDeclInfo(root sitter.Node, src []byte, lines []string) map[strin
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"class_body", "interface_body", "enum_body", "record_body", "annotation_type_body"}),
 					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}

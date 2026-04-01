@@ -52,6 +52,7 @@ func extractTSDeclInfo(root sitter.Node, src []byte, lines []string) map[string]
 				className = string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[className] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"class_body"}),
 					Doc:       extractDocMulti(lines, sl, "//"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
@@ -60,7 +61,17 @@ func extractTSDeclInfo(root sitter.Node, src []byte, lines []string) map[string]
 				walk(n.Child(i), className, depth+1)
 			}
 			return
-		case "interface_declaration", "type_alias_declaration", "enum_declaration":
+		case "interface_declaration":
+			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
+				name := string(src[nameNode.StartByte():nameNode.EndByte()])
+				sl := int(n.StartPoint().Row) + 1
+				result[name] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"interface_body"}),
+					Doc:       extractDocMulti(lines, sl, "//"),
+					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
+				}
+			}
+		case "type_alias_declaration", "enum_declaration":
 			if nameNode := n.ChildByFieldName("name"); !nameNode.IsNull() {
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1

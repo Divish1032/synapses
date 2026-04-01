@@ -399,3 +399,81 @@ type Token struct{}
 		t.Errorf("empty struct should have no fields metadata, got %q", raw)
 	}
 }
+
+// --- Sprint 23.7: entity signature extraction tests ---
+
+func TestGoParser_StructSignature(t *testing.T) {
+	g := parseGoSource(t, goSource)
+	nodes := g.FindByName("AuthService")
+	if len(nodes) == 0 {
+		t.Fatal("AuthService not found")
+	}
+	sig := nodes[0].Metadata["signature"]
+	if sig == "" {
+		t.Fatal("AuthService should have a signature")
+	}
+	if sig != "type AuthService struct" {
+		t.Errorf("struct signature = %q, want %q", sig, "type AuthService struct")
+	}
+}
+
+func TestGoParser_InterfaceSignature(t *testing.T) {
+	g := parseGoSource(t, goSource)
+	nodes := g.FindByName("Authenticator")
+	if len(nodes) == 0 {
+		t.Fatal("Authenticator not found")
+	}
+	sig := nodes[0].Metadata["signature"]
+	if sig == "" {
+		t.Fatal("Authenticator should have a signature")
+	}
+	if sig != "type Authenticator interface" {
+		t.Errorf("interface signature = %q, want %q", sig, "type Authenticator interface")
+	}
+}
+
+func TestGoParser_TypeAliasSignature(t *testing.T) {
+	src := `package api
+type Handler func(w http.ResponseWriter, r *http.Request)
+type UserID int64
+`
+	g := parseGoSource(t, src)
+
+	handlerNodes := g.FindByName("Handler")
+	if len(handlerNodes) == 0 {
+		t.Fatal("Handler type not found")
+	}
+	handlerSig := handlerNodes[0].Metadata["signature"]
+	if !strings.Contains(handlerSig, "func") {
+		t.Errorf("Handler signature %q should contain 'func'", handlerSig)
+	}
+
+	idNodes := g.FindByName("UserID")
+	if len(idNodes) == 0 {
+		t.Fatal("UserID type not found")
+	}
+	idSig := idNodes[0].Metadata["signature"]
+	if !strings.Contains(idSig, "UserID") || !strings.Contains(idSig, "int64") {
+		t.Errorf("UserID signature %q should contain 'UserID' and 'int64'", idSig)
+	}
+}
+
+func TestGoParser_GenericStructSignature(t *testing.T) {
+	src := `package store
+type Cache[K comparable, V any] struct {
+	items map[K]V
+}
+`
+	g := parseGoSource(t, src)
+	nodes := g.FindByName("Cache")
+	if len(nodes) == 0 {
+		t.Fatal("Cache struct not found")
+	}
+	sig := nodes[0].Metadata["signature"]
+	if sig == "" {
+		t.Fatal("generic struct should have a signature")
+	}
+	if !strings.Contains(sig, "Cache") || !strings.Contains(sig, "struct") {
+		t.Errorf("generic struct signature %q should contain 'Cache' and 'struct'", sig)
+	}
+}

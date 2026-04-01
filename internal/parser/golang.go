@@ -274,10 +274,10 @@ func extractGoDeclarationInfo(root sitter.Node, src []byte, lines []string) map[
 			}
 
 		case "type_declaration":
-			// Handles struct and interface type declarations.
+			// Handles struct, interface, and type alias declarations.
 			typeSpec := child.Child(0)
 			if typeSpec.IsNull() || nodeType(typeSpec) != "type_spec" {
-				// Multi-spec: (type_declaration (type_spec) (type_spec)...)
+				// Multi-spec: type ( Foo struct{} Bar interface{} )
 				// Walk children to find type_spec nodes.
 				for j := uint32(0); j < child.ChildCount(); j++ {
 					spec := child.Child(j)
@@ -290,6 +290,7 @@ func extractGoDeclarationInfo(root sitter.Node, src []byte, lines []string) map[
 						startLine := int(child.StartPoint().Row) + 1
 						endLine := int(child.EndPoint().Row) + 1
 						result[name] = goFuncInfo{
+							signature: goTypeSignature(spec, src),
 							doc:       extractDocComment(lines, startLine),
 							lineCount: endLine - startLine + 1,
 						}
@@ -305,6 +306,7 @@ func extractGoDeclarationInfo(root sitter.Node, src []byte, lines []string) map[
 			startLine := int(child.StartPoint().Row) + 1
 			endLine := int(child.EndPoint().Row) + 1
 			result[name] = goFuncInfo{
+				signature: goTypeSignature(typeSpec, src),
 				doc:       extractDocComment(lines, startLine),
 				lineCount: endLine - startLine + 1,
 			}
@@ -328,6 +330,41 @@ func extractSignature(declNode sitter.Node, src []byte) string {
 	}
 	// No body (e.g. external function declaration) — return full text.
 	return strings.TrimSpace(string(src[declNode.StartByte():declNode.EndByte()]))
+}
+
+// goTypeSignature builds a concise signature for a Go type_spec node.
+//
+//	type User struct { ... }          → "type User struct"
+//	type IService interface { ... }   → "type IService interface"
+//	type Node[K any] struct { ... }   → "type Node[K any] struct"
+//	type Handler func(w http.ResponseWriter, r *http.Request)  → full normalized text
+//	type UserID int64                 → "type UserID int64"
+//
+// For struct/interface, only the declaration header is returned (no body/fields).
+// For all other types (aliases, named types, function types), the full normalized
+// spec text is returned — these have no body, so the full text IS the signature.
+func goTypeSignature(spec sitter.Node, src []byte) string {
+	nameNode := spec.ChildByFieldName("name")
+	typeNode := spec.ChildByFieldName("type")
+	if nameNode.IsNull() || typeNode.IsNull() {
+		return ""
+	}
+	switch nodeType(typeNode) {
+	case "struct_type", "interface_type":
+		// Header only: "type Name [type_params] struct|interface"
+		// Extract text from name identifier up to (not including) the struct/interface body.
+		mid := strings.TrimSpace(strings.Join(strings.Fields(
+			string(src[nameNode.StartByte():typeNode.StartByte()])), " "))
+		typKw := "struct"
+		if nodeType(typeNode) == "interface_type" {
+			typKw = "interface"
+		}
+		return "type " + mid + " " + typKw
+	default:
+		// Type alias, named type, function type — the spec IS its own signature.
+		return "type " + strings.TrimSpace(strings.Join(strings.Fields(
+			string(src[spec.StartByte():spec.EndByte()])), " "))
+	}
 }
 
 // extractReceiverType returns the base type name from a method receiver

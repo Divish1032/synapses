@@ -41,6 +41,7 @@ func extractRustDeclInfo(root sitter.Node, src []byte, lines []string) map[strin
 				name := string(src[nameNode.StartByte():nameNode.EndByte()])
 				sl := int(n.StartPoint().Row) + 1
 				result[name] = declMeta{
+					Signature: extractSigToBodyMulti(n, src, []string{"field_declaration_list", "enum_variant_list", "declaration_list"}),
 					Doc:       extractLineDoc(lines, sl, "///"),
 					LineCount: int(n.EndPoint().Row) - int(n.StartPoint().Row) + 1,
 				}
