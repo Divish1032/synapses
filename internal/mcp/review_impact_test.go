@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/config"
@@ -323,6 +324,151 @@ func TestHandleGetImpact_ReviewScope_UnknownSymbol(t *testing.T) {
 	}
 	if result == nil || !result.IsError {
 		t.Fatal("expected tool error for unknown symbol")
+	}
+}
+
+// ── Sprint 23.3: NL blast radius summary tests ───────────────────────────────
+
+// TestHandleGetImpact_DefaultScope_HasNLSummary verifies that the default
+// (non-review) scope now includes blast_radius_summary (NL string) and
+// packages_affected (int) as per the Sprint 23.3 redesign.
+func TestHandleGetImpact_DefaultScope_HasNLSummary(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	req := callTool(map[string]any{"symbol": "AuthLogin"})
+	result, err := s.handleGetImpact(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	// blast_radius_summary must be a non-empty string.
+	summary, ok := m["blast_radius_summary"].(string)
+	if !ok || summary == "" {
+		t.Fatalf("expected non-empty blast_radius_summary string, got %v", m["blast_radius_summary"])
+	}
+
+	// packages_affected must be a non-negative integer.
+	pa, ok := m["packages_affected"].(float64)
+	if !ok {
+		t.Fatalf("expected packages_affected numeric, got %T: %v", m["packages_affected"], m["packages_affected"])
+	}
+	if pa < 0 {
+		t.Errorf("expected packages_affected >= 0, got %v", pa)
+	}
+
+	// blast_radius (the struct from review scope) must NOT be present.
+	if _, ok := m["blast_radius"]; ok {
+		t.Error("blast_radius struct should not appear in default scope — only blast_radius_summary")
+	}
+}
+
+// TestHandleGetImpact_NLSummary_ContainsEntityName verifies the NL summary
+// references the queried entity by name so agents can read it without parsing.
+func TestHandleGetImpact_NLSummary_ContainsEntityName(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	req := callTool(map[string]any{"symbol": "AuthLogin"})
+	result, err := s.handleGetImpact(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	summary, _ := m["blast_radius_summary"].(string)
+	if !strings.Contains(summary, "AuthLogin") {
+		t.Errorf("expected blast_radius_summary to mention 'AuthLogin', got: %q", summary)
+	}
+}
+
+// TestHandleGetImpact_CriticalPathDomains_AuthDetected verifies that an entity
+// in the auth path is flagged with critical_path_domains = ["auth"].
+func TestHandleGetImpact_CriticalPathDomains_AuthDetected(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	// AuthLogin lives in pkg/auth/auth.go — "auth" keyword in both name and file.
+	req := callTool(map[string]any{"symbol": "AuthLogin"})
+	result, err := s.handleGetImpact(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	domains, ok := m["critical_path_domains"].([]any)
+	if !ok || len(domains) == 0 {
+		t.Fatalf("expected critical_path_domains to contain 'auth', got %v", m["critical_path_domains"])
+	}
+	found := false
+	for _, d := range domains {
+		if d.(string) == "auth" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'auth' in critical_path_domains, got %v", domains)
+	}
+}
+
+// TestHandleGetImpact_NLSummary_ZeroCallers verifies that an entity with no
+// callers gets the "safe to change in isolation" message.
+func TestHandleGetImpact_NLSummary_ZeroCallers(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+
+	id := g.MakeNodeID("pkg/util/util.go", "HelperFunc")
+	g.AddNode(&graph.Node{
+		ID:      id,
+		Type:    graph.NodeFunction,
+		Name:    "HelperFunc",
+		File:    "pkg/util/util.go",
+		Line:    1,
+		Package: "util",
+	})
+
+	cfg, err := loadTestConfig(t)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{"symbol": "HelperFunc"})
+	result, err := srv.handleGetImpact(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	summary, _ := m["blast_radius_summary"].(string)
+	if !strings.Contains(summary, "no callers") {
+		t.Errorf("expected 'no callers' in blast_radius_summary for isolated entity, got: %q", summary)
+	}
+	if pa := m["packages_affected"].(float64); pa != 0 {
+		t.Errorf("expected packages_affected=0 for isolated entity, got %v", pa)
+	}
+}
+
+// TestHandleGetImpact_ReviewScope_HasNLSummary verifies the review scope also
+// includes the Sprint 23.3 NL fields alongside its richer blast_radius struct.
+func TestHandleGetImpact_ReviewScope_HasNLSummary(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	req := callTool(map[string]any{"symbol": "AuthLogin", "scope": "review"})
+	result, err := s.handleGetImpact(ctx, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	// Both the review struct AND the NL summary must be present.
+	if _, ok := m["blast_radius"]; !ok {
+		t.Error("blast_radius struct missing from review scope")
+	}
+	summary, ok := m["blast_radius_summary"].(string)
+	if !ok || summary == "" {
+		t.Errorf("expected blast_radius_summary in review scope, got %v", m["blast_radius_summary"])
 	}
 }
 

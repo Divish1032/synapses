@@ -1879,8 +1879,36 @@ type failureEpisode struct {
 	Summary   string `json:"summary,omitempty"`
 }
 
+// impactNL holds the natural-language intelligence fields added to every
+// get_impact response (Sprint 23.3). These give the agent an architect-level
+// briefing rather than raw tier arrays it has to interpret itself.
+type impactNL struct {
+	// BlastRadiusSummary is a one-sentence NL description of the blast radius:
+	// "Changing AuthLogin affects 1 direct caller and 0 transitive callers across 1 package."
+	// For isolated entities: "AuthLogin has no callers — safe to change in isolation."
+	BlastRadiusSummary string `json:"blast_radius_summary"`
+	// PackagesAffected is the number of distinct packages (directories) in the
+	// affected_files set. Gives a quick sense of scope — "4 packages" is scarier
+	// than "4 files in the same package."
+	PackagesAffected int `json:"packages_affected"`
+	// CriticalPathDomains lists the critical-path categories detected in the
+	// root entity and its callers: "auth", "payment", "data". Empty when the
+	// entity is not in a recognized critical path. Drawn from name/file heuristics,
+	// not architectural rules — use validate for authoritative rule checks.
+	CriticalPathDomains []string `json:"critical_path_domains,omitempty"`
+}
+
+// impactResponse is the default get_impact response shape. It wraps ImpactResult
+// with the NL intelligence fields so agents get a pre-interpreted briefing
+// alongside the raw tier data. Replaces the bare jsonResult(result) pattern.
+type impactResponse struct {
+	*graph.ImpactResult
+	impactNL
+}
+
 type reviewImpact struct {
 	*graph.ImpactResult
+	impactNL
 	BlastRadius    blastRadiusSummary `json:"blast_radius"`
 	TestGaps       []testGap          `json:"test_gaps,omitempty"`
 	RiskFlags      []riskFlag         `json:"risk_flags,omitempty"`
@@ -1891,8 +1919,11 @@ type reviewImpact struct {
 // blast radius summary, test coverage gaps on impacted entities, risk flags
 // from entity quality scores, and recent failure episodes. This replaces
 // what would have required 10+ separate tool calls for an agent to assemble.
-func (s *Server) enrichImpactForReview(result *graph.ImpactResult, rootName string) *reviewImpact {
-	ri := &reviewImpact{ImpactResult: result}
+func (s *Server) enrichImpactForReview(result *graph.ImpactResult, rootName, rootFile string) *reviewImpact {
+	ri := &reviewImpact{
+		ImpactResult: result,
+		impactNL:     buildImpactNL(result, rootName, rootFile),
+	}
 
 	// 1. Blast radius summary — pre-computed counts from tiers.
 	// Deduplicate node IDs across tiers (struct aggregation can produce
@@ -2002,6 +2033,137 @@ func (s *Server) enrichImpactForReview(result *graph.ImpactResult, rootName stri
 	}
 
 	return ri
+}
+
+// buildImpactNL constructs the natural-language intelligence fields for a
+// get_impact response. Called for both the default and review scopes so agents
+// always receive a pre-interpreted briefing alongside the raw tier data.
+func buildImpactNL(result *graph.ImpactResult, rootName, rootFile string) impactNL {
+	// Count direct vs transitive callers (deduped across tiers).
+	seen := make(map[graph.NodeID]bool)
+	direct, transitive := 0, 0
+	for _, tier := range result.Tiers {
+		for _, ref := range tier.Nodes {
+			if seen[ref.ID] {
+				continue
+			}
+			seen[ref.ID] = true
+			if tier.Depth == 1 {
+				direct++
+			} else {
+				transitive++
+			}
+		}
+	}
+
+	packages := countAffectedPackages(result)
+	domains := detectCriticalPathDomains(result, rootName, rootFile)
+	summary := buildImpactNLText(rootName, direct, transitive, packages, domains, result.Truncated)
+
+	return impactNL{
+		BlastRadiusSummary:  summary,
+		PackagesAffected:    packages,
+		CriticalPathDomains: domains,
+	}
+}
+
+// countAffectedPackages returns the number of distinct packages (directories)
+// represented in the impact result's affected files and tier entity files.
+// Gives a scope signal: "4 packages" conveys more risk than "4 files in one package."
+func countAffectedPackages(result *graph.ImpactResult) int {
+	pkgs := make(map[string]bool)
+	for _, f := range result.AffectedFiles {
+		if d := filepath.Dir(f); d != "" && d != "." {
+			pkgs[d] = true
+		}
+	}
+	// Tier entity files may differ from AffectedFiles when struct aggregation
+	// merges results — scan both to avoid undercounting.
+	for _, tier := range result.Tiers {
+		for _, ref := range tier.Nodes {
+			if d := filepath.Dir(ref.File); d != "" && d != "." {
+				pkgs[d] = true
+			}
+		}
+	}
+	return len(pkgs)
+}
+
+// detectCriticalPathDomains scans the root entity and its affected callers for
+// known critical-path keywords (auth, payment, data). Returns matched domain
+// names sorted alphabetically. Empty slice when no match.
+//
+// This is a heuristic — it catches obvious cases (AuthService, paymentHandler,
+// db.Query). For authoritative rule-based checks, agents should use validate.
+func detectCriticalPathDomains(result *graph.ImpactResult, rootName, rootFile string) []string {
+	type domainPattern struct {
+		name     string
+		keywords []string
+	}
+	domains := []domainPattern{
+		{"auth", []string{"auth", "login", "logout", "token", "jwt", "session", "oauth", "permission", "credential", "rbac", "password"}},
+		{"payment", []string{"payment", "billing", "charge", "checkout", "invoice", "stripe", "order", "refund", "transaction"}},
+		{"data", []string{"database", "repository", "migration", "schema", "query", "datastore", "storage"}},
+	}
+
+	// Build a single lowercase corpus from root + all affected entity names/files.
+	var corpus strings.Builder
+	corpus.WriteString(strings.ToLower(rootName))
+	corpus.WriteByte(' ')
+	corpus.WriteString(strings.ToLower(rootFile))
+	for _, tier := range result.Tiers {
+		for _, ref := range tier.Nodes {
+			corpus.WriteByte(' ')
+			corpus.WriteString(strings.ToLower(ref.Name))
+			corpus.WriteByte(' ')
+			corpus.WriteString(strings.ToLower(ref.File))
+		}
+	}
+	text := corpus.String()
+
+	var matched []string
+	for _, dp := range domains {
+		for _, kw := range dp.keywords {
+			if strings.Contains(text, kw) {
+				matched = append(matched, dp.name)
+				break
+			}
+		}
+	}
+	sort.Strings(matched)
+	return matched
+}
+
+// buildImpactNLText produces the human-readable blast radius sentence.
+func buildImpactNLText(rootName string, direct, transitive, packages int, domains []string, truncated bool) string {
+	total := direct + transitive
+	if total == 0 {
+		return fmt.Sprintf("%s has no callers — safe to change in isolation.", rootName)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Changing %s affects %d direct caller", rootName, direct))
+	if direct != 1 {
+		sb.WriteByte('s')
+	}
+	if transitive > 0 {
+		sb.WriteString(fmt.Sprintf(" and %d transitive caller", transitive))
+		if transitive != 1 {
+			sb.WriteByte('s')
+		}
+	}
+	sb.WriteString(fmt.Sprintf(" across %d package", packages))
+	if packages != 1 {
+		sb.WriteByte('s')
+	}
+	sb.WriteByte('.')
+	if len(domains) > 0 {
+		sb.WriteString(fmt.Sprintf(" Callers include %s-path components.", strings.Join(domains, "/")))
+	}
+	if truncated {
+		sb.WriteString(" Results truncated — actual blast radius is larger.")
+	}
+	return sb.String()
 }
 
 func (s *Server) handleGetImpact(
@@ -2234,9 +2396,12 @@ func (s *Server) handleGetImpact(
 			})
 		}
 		if scope == "review" {
-			return jsonResult(s.enrichImpactForReview(merged, root.Name))
+			return jsonResult(s.enrichImpactForReview(merged, root.Name, root.File))
 		}
-		return jsonResult(merged)
+		return jsonResult(impactResponse{
+			ImpactResult: merged,
+			impactNL:     buildImpactNL(merged, root.Name, root.File),
+		})
 	}
 
 	result, err := s.graph.ImpactAnalysis(root.ID, maxDepth)
@@ -2293,7 +2458,7 @@ func (s *Server) handleGetImpact(
 	// Review scope: enriched output for code review with blast radius summary,
 	// test gaps, risk flags, and failure history in a single response.
 	if scope == "review" {
-		ri := s.enrichImpactForReview(result, root.Name)
+		ri := s.enrichImpactForReview(result, root.Name, root.File)
 		// Attach federation data if also requested.
 		projectsParam, _ := req.GetArguments()["projects"].(string)
 		if projectsParam != "" && s.federationResolver != nil && s.store != nil {
@@ -2316,9 +2481,9 @@ func (s *Server) handleGetImpact(
 
 	// Cross-project impact: when projects= is specified, include cross-project
 	// dependency status so the agent sees the full blast radius including siblings.
-	// Uses an embedding wrapper to preserve the flat ImpactResult JSON shape
-	// (all existing fields at top level) while adding cross_project_deps.
+	// Wraps impactResponse (which already has NL fields) with federation data.
 	projectsParam, _ := req.GetArguments()["projects"].(string)
+	nl := buildImpactNL(result, root.Name, root.File)
 	if projectsParam != "" && s.federationResolver != nil && s.store != nil {
 		fedCtx, fedCancel := context.WithTimeout(ctx, 2*time.Second)
 		crossDeps := s.federationResolver.GetDepsForEntity(fedCtx, string(root.ID), s.store)
@@ -2326,16 +2491,18 @@ func (s *Server) handleGetImpact(
 		if len(crossDeps) > 0 {
 			type impactWithFederation struct {
 				*graph.ImpactResult
+				impactNL
 				CrossProjectDeps []federation.CrossProjectDepStatus `json:"cross_project_deps,omitempty"`
 			}
 			return jsonResult(impactWithFederation{
 				ImpactResult:     result,
+				impactNL:         nl,
 				CrossProjectDeps: crossDeps,
 			})
 		}
 	}
 
-	return jsonResult(result)
+	return jsonResult(impactResponse{ImpactResult: result, impactNL: nl})
 }
 
 // applyImpactTokenBudget truncates an ImpactResult to fit within the token budget
@@ -2462,9 +2629,12 @@ func (s *Server) handleFileBasedImpact(
 	}
 
 	if scope == "review" {
-		return jsonResult(s.enrichImpactForReview(merged, merged.Root.Name))
+		return jsonResult(s.enrichImpactForReview(merged, merged.Root.Name, ""))
 	}
-	return jsonResult(merged)
+	return jsonResult(impactResponse{
+		ImpactResult: merged,
+		impactNL:     buildImpactNL(merged, merged.Root.Name, ""),
+	})
 }
 
 func applyImpactTokenBudget(result *graph.ImpactResult, tokenBudget int) {
