@@ -83,6 +83,9 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 	if detailLevel != "summary" {
 		for _, m := range dc.EntityMemories {
 			content := m.Content
+			if content == "" {
+				continue // skip empty-content memories (avoids blank 💡 lines)
+			}
 			if len(content) > 200 {
 				content = content[:200] + "…"
 			}

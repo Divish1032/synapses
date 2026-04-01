@@ -792,6 +792,47 @@ func TestSerializeCompact_EntityMemories(t *testing.T) {
 	}
 }
 
+// TestSerializeCompact_EntityMemoriesEmptyContentSkipped verifies that an
+// entity memory with empty Content does not render a blank 💡 line.
+// QueryMemories has no SQL guard for empty content, so the renderer must guard.
+func TestSerializeCompact_EntityMemoriesEmptyContentSkipped(t *testing.T) {
+	dc := newTestDC()
+	dc.EntityMemories = []entityMemoryHint{
+		{Content: "", Source: "auto"}, // empty — must be skipped
+		{Content: "valid finding", Source: "auto"},
+	}
+	out := serializeCompact(dc, "full")
+	// The valid memory must appear exactly once.
+	if !strings.Contains(out, "valid finding") {
+		t.Errorf("expected valid memory content in output, got:\n%s", out)
+	}
+	// Count 💡 occurrences — must be exactly 1 (empty one skipped).
+	count := strings.Count(out, "💡")
+	if count != 1 {
+		t.Errorf("expected exactly 1 💡 line (empty skipped), got %d:\n%s", count, out)
+	}
+}
+
+// TestSerializeCompact_RelatedNLDescriptionFallback verifies that when brain
+// DependencySummaries is absent, related node blocks use nl_description
+// from node metadata as a fallback summary (parallel to callee fallback).
+func TestSerializeCompact_RelatedNLDescriptionFallback(t *testing.T) {
+	dc := newTestDC()
+	related := &graph.Node{
+		ID: "rel", Name: "UserRepo", Type: graph.NodeStruct,
+		File: "pkg/repo/user.go", Line: 5,
+		Metadata: map[string]string{
+			"nl_description": "repository layer for user persistence",
+		},
+	}
+	dc.Related = []graph.CarvedNode{{Node: related}}
+	// No brain ContextPacket — nl_description fallback must fire.
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "repository layer for user persistence") {
+		t.Errorf("expected nl_description fallback in related block, got:\n%s", out)
+	}
+}
+
 // TestSerializeCompact_CalleeNLDescriptionFallback verifies that when brain
 // DependencySummaries is absent, callee detail blocks use nl_description
 // from node metadata as a fallback summary.
