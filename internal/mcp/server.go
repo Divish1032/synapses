@@ -1030,9 +1030,19 @@ func (s *Server) SetWebCache(wc *webcache.Cache) {
 }
 
 // SetProjectPath stores the absolute project root path so that lookup_docs
-// can parse go.mod for version-pinned package documentation.
+// can parse go.mod for version-pinned package documentation, and search
+// can inject source snippets from the filesystem.
 func (s *Server) SetProjectPath(path string) {
 	s.projectPath = path
+}
+
+// getProjectRoot returns the best available project root path.
+// Tries graph.Root() first (set by indexer), then projectPath (set by daemon).
+func (s *Server) getProjectRoot() string {
+	if r := s.graph.Root(); r != "" {
+		return r
+	}
+	return s.projectPath
 }
 
 // SetPulseClient wires a *pulse.Client into the server so that every tool

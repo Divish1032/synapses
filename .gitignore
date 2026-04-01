@@ -2,7 +2,7 @@ docs/ROADMAP.md
 
 # Benchmark results (regenerable)
 results/
-benchmark
+/benchmark
 logs/
 
 # Build artifacts
@@ -79,3 +79,9 @@ design-system/
 docs/
 e2e-results/
 pulse-audit-reports/
+
+synapses-taskbench.taskbench-baseline.json
+synapses-taskbench.taskbench-synapses.json
+
+# SynapsesBench (standalone benchmark module)
+synapses-bench/

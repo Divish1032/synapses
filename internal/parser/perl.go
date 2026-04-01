@@ -64,6 +64,8 @@ func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 	// Track current package context for method attribution.
 	currentPkg := ""
 
+	// Pass 1 (top-level): extract package declarations, use/import statements,
+	// and top-level variable declarations. These never appear nested.
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
 		if child.IsNull() {
@@ -110,33 +112,38 @@ func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 				g.AddEdge(&graph.Edge{From: fileNodeID, To: importID, Type: graph.EdgeImports})
 			}
 
-		case "subroutine_declaration_statement":
-			p.handleSubDecl(g, child, src, filePath, fileNodeID, currentPkg)
-
 		case "expression_statement":
 			// Capture our $VAR / my $VAR at file scope.
 			p.handleExprStmt(g, child, src, filePath, fileNodeID)
 		}
 	}
+
+	// Pass 2 (recursive): extract subroutine declarations at any depth.
+	// The tree-sitter Perl grammar sometimes absorbs multiple subs into one
+	// large subroutine_declaration_statement when a forward declaration
+	// (sub foo;) causes a parse error — walking recursively recovers all subs.
+	p.walkSubDecls(g, root, src, filePath, fileNodeID, &currentPkg)
 	// Sprint 28: collect call sites from function/method calls.
 	collectCallSitesWalk(g, root, src, filePath, fileNodeID, callSiteConfig{
 		FuncTypes: map[string]bool{
 			"subroutine_declaration_statement": true,
 		},
 		CallTypes: map[string]bool{
-			"function_call_expression": true,
-			"method_call_expression":   true,
+			"function_call_expression":           true,
+			"ambiguous_function_call_expression": true,
+			"method_call_expression":             true,
 		},
 		NameExtractor: func(n sitter.Node, src []byte) string {
 			// Extract sub name from bareword child.
+			// Return "sub_"+qualifiedName to match the node ID key used during creation.
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if !child.IsNull() && nodeType(child) == "bareword" {
 					name := childText(child, src)
 					if currentPkg != "" {
-						return currentPkg + "::" + name
+						return "sub_" + currentPkg + "::" + name
 					}
-					return name
+					return "sub_" + name
 				}
 			}
 			return ""
@@ -144,8 +151,9 @@ func (p *PerlParser) Parse(g *graph.Graph, filePath string, src []byte) error {
 		AliasedCalleeExtractor: func(n sitter.Node, src []byte) (string, string) {
 			nt := nodeType(n)
 			switch nt {
-			case "function_call_expression":
-				// function_call_expression: function child = callee name.
+			case "function_call_expression", "ambiguous_function_call_expression":
+				// function_call_expression / ambiguous_function_call_expression:
+				// both have a "function" child with the callee name.
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					child := n.Child(i)
 					if !child.IsNull() && nodeType(child) == "function" {
@@ -195,6 +203,50 @@ func isPerlBuiltin(name string) bool {
 	return false
 }
 
+// walkSubDecls recursively walks the AST and emits NodeFunction for every
+// subroutine_declaration_statement found at any depth. This is necessary
+// because the tree-sitter Perl grammar creates parse ERRORs for forward
+// declarations (sub foo;), which causes subsequent subs to be absorbed into
+// one large node. Walking recursively recovers all sub definitions.
+//
+// pkg is a pointer so that package_statement nodes encountered during the
+// walk can update the current package context (needed for multi-package files).
+func (p *PerlParser) walkSubDecls(
+	g *graph.Graph,
+	n sitter.Node,
+	src []byte,
+	filePath string,
+	fileNodeID graph.NodeID,
+	pkg *string,
+) {
+	if n.IsNull() {
+		return
+	}
+	switch nodeType(n) {
+	case "package_statement":
+		// Update current package context as we encounter new package declarations.
+		if name := perlExtractPackageName(n, src); name != "" {
+			*pkg = name
+		}
+		return
+	case "subroutine_declaration_statement":
+		p.handleSubDecl(g, n, src, filePath, fileNodeID, *pkg)
+		// Recurse into the block child only: when the grammar absorbs multiple
+		// subs into one node due to forward-declaration parse errors, the real
+		// sub bodies live inside the block. We use the same pkg context.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if !child.IsNull() && nodeType(child) == "block" {
+				p.walkSubDecls(g, child, src, filePath, fileNodeID, pkg)
+			}
+		}
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		p.walkSubDecls(g, n.Child(i), src, filePath, fileNodeID, pkg)
+	}
+}
+
 // handleSubDecl emits a NodeFunction for a sub declaration.
 func (p *PerlParser) handleSubDecl(
 	g *graph.Graph,
@@ -237,6 +289,7 @@ func (p *PerlParser) handleSubDecl(
 		ID:       nodeID,
 		Type:     graph.NodeFunction,
 		Name:     displayName,
+		Package:  pkg,
 		File:     filePath,
 		Line:     startLine,
 		Exported: exported,
@@ -353,9 +406,9 @@ func perlExtractVarName(vd sitter.Node, src []byte) string {
 
 // isPerlPragma returns true for common Perl pragmas that aren't real modules.
 var perlPragmas = map[string]bool{
-	"strict": true, "warnings": true, "utf8": true, "feature": true,
+	"utf8": true, "feature": true,
 	"constant": true, "vars": true, "base": true, "parent": true,
-	"Exporter": true, "overload": true, "POSIX": true,
+	"overload": true, "POSIX": true,
 }
 
 func isPerlPragma(name string) bool {

@@ -34,7 +34,12 @@ func newSourceCache(root string) *sourceCache {
 func (c *sourceCache) loadFile(filePath string) []string {
 	abs := filePath
 	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(c.root, abs)
+		if c.root != "" {
+			abs = filepath.Join(c.root, abs)
+		} else {
+			// No root set — cannot resolve relative paths.
+			return nil
+		}
 	}
 
 	c.mu.Lock()
@@ -45,7 +50,7 @@ func (c *sourceCache) loadFile(filePath string) []string {
 	}
 
 	// Security: reject paths that escape the project root.
-	if !pathWithinRoot(c.root, abs) {
+	if c.root != "" && !pathWithinRoot(c.root, abs) {
 		c.files[abs] = nil
 		return nil
 	}

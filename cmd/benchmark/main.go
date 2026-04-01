@@ -183,6 +183,7 @@ func main() {
 		gbOpts := benchmarks.GraphBenchOptions{
 			DataFile:   *gbDataFile,
 			ReposDir:   *reposDir,
+			OutputDir:  *outputDir,
 			Limit:      *limit,
 			Mode:       *gbMode,
 			Sequential: *gbSequential,

@@ -328,7 +328,8 @@ func looksLikeFilePath(q string) bool {
 		".vue", ".svelte", ".php", ".lua", ".r", ".jl", ".dart", ".zig",
 		".sol", ".tf", ".hcl", ".yaml", ".yml", ".json", ".toml", ".xml",
 		".graphql", ".gql", ".proto", ".sql", ".sh", ".bash", ".zsh",
-		".ps1", ".el", ".vim", ".css", ".scss", ".less", ".html", ".md":
+		".ps1", ".el", ".vim", ".css", ".scss", ".less", ".html", ".md",
+		".pm", ".pl", ".t", ".nim", ".groovy", ".cljs", ".cljc":
 		return true
 	}
 	return false

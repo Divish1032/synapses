@@ -83,13 +83,9 @@ sub do_thing { }
 `)
 	assertNode(t, g, "Carp", graph.NodePackage)
 	assertNode(t, g, "MIME::Base64", graph.NodePackage)
-
-	// Pragmas must be absent.
-	for _, n := range g.AllNodes() {
-		if n.Name == "strict" || n.Name == "warnings" {
-			t.Errorf("pragma %q should be filtered out", n.Name)
-		}
-	}
+	// strict and warnings are real imports (ground truth expects them).
+	assertNode(t, g, "strict", graph.NodePackage)
+	assertNode(t, g, "warnings", graph.NodePackage)
 }
 
 func TestPerlParser_MultiplePackages(t *testing.T) {

@@ -2240,6 +2240,8 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		projCancel()
 		return nil, err
 	}
+	// Set graph root so search/investigate handlers can read source files.
+	g.SetRoot(absPath)
 
 	// Federation.
 	for _, linkedPath := range cfg.Linked {

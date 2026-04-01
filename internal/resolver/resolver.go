@@ -195,10 +195,16 @@ func ResolveCallEdges(g *graph.Graph) int {
 				}
 			}
 
-			// Capitalized-alias heuristic: for Rust/Go, variable names are often
+			// Capitalized-alias heuristic: for Rust, variable names are often
 			// lowercase versions of their type (router → Router, app → App).
 			// Try capitalizing the first letter and look up TypeName.method.
-			if len(targets) == 0 && len(site.PkgAlias) > 0 {
+			//
+			// Disabled for Go files: go/types handles Go call resolution with
+			// full type information, making this heuristic redundant. For Go,
+			// the heuristic produces too many false CALLS edges (e.g. a var
+			// named "r" → "R.method" matches unrelated receiver types), hurting
+			// precision. All correct Go edges are captured by ResolveGoTypesCalls.
+			if len(targets) == 0 && len(site.PkgAlias) > 0 && !strings.HasSuffix(site.CallerFile, ".go") {
 				first := site.PkgAlias[0]
 				if first >= 'a' && first <= 'z' {
 					capitalized := strings.ToUpper(site.PkgAlias[:1]) + site.PkgAlias[1:]
@@ -379,10 +385,15 @@ func buildPkgNameIndex(pkgIdx map[string][]*graph.Node) pkgNameIndex {
 	for pkg, nodes := range pkgIdx {
 		nameMap := make(map[string][]*graph.Node)
 		for _, n := range nodes {
-			// Index by the function/method suffix: "Recv.Method" → "Method", "Func" → "Func"
+			// Index by the function/method suffix:
+			//   "Recv.Method"         → "Method"  (Python/Java/TS style)
+			//   "Pkg::Func"           → "Func"    (Perl/Ruby/C++ style)
+			//   "Func"                → "Func"    (plain function)
 			key := n.Name
 			if dot := strings.LastIndexByte(n.Name, '.'); dot >= 0 {
 				key = n.Name[dot+1:]
+			} else if idx := strings.LastIndex(n.Name, "::"); idx >= 0 {
+				key = n.Name[idx+2:]
 			}
 			nameMap[key] = append(nameMap[key], n)
 		}
@@ -538,4 +549,57 @@ func findByInheritedMethod(
 		queue = next
 	}
 	return ""
+}
+
+// ResolveGoMethodDefinesEdges adds DEFINES edges from struct nodes to their
+// method nodes when the struct and method are in different files of the same
+// package. The Go parser emits this edge only when the struct is already in
+// the graph at parse time (same-file case). Cross-file cases — the common Go
+// pattern of one file per type — are handled here in a single post-parse pass.
+//
+// Algorithm: for every NodeMethod whose name is "ReceiverType.MethodName",
+// look up a NodeStruct with name "ReceiverType" in the same package. If found
+// and no DEFINES edge already exists, add one.
+//
+// Returns the number of new DEFINES edges added.
+func ResolveGoMethodDefinesEdges(g *graph.Graph) int {
+	// Build: pkg → structName → NodeID for all structs.
+	type structKey struct{ pkg, name string }
+	structIDs := make(map[structKey]graph.NodeID)
+
+	g.IterateNodes(func(n *graph.Node) {
+		if n.Type == graph.NodeStruct {
+			structIDs[structKey{n.Package, n.Name}] = n.ID
+		}
+	})
+
+	if len(structIDs) == 0 {
+		return 0
+	}
+
+	count := 0
+	g.IterateNodes(func(n *graph.Node) {
+		if n.Type != graph.NodeMethod {
+			return
+		}
+		// Only Go methods: file must be a .go file.
+		if !strings.HasSuffix(n.File, ".go") {
+			return
+		}
+		dot := strings.IndexByte(n.Name, '.')
+		if dot <= 0 {
+			return
+		}
+		receiverType := n.Name[:dot]
+		sid, ok := structIDs[structKey{n.Package, receiverType}]
+		if !ok {
+			return
+		}
+		if g.HasEdge(sid, n.ID, graph.EdgeDefines) {
+			return
+		}
+		g.AddEdge(&graph.Edge{From: sid, To: n.ID, Type: graph.EdgeDefines})
+		count++
+	})
+	return count
 }

@@ -39,6 +39,7 @@ import (
 type GraphBenchOptions struct {
 	DataFile   string // path to graphbench.jsonl
 	ReposDir   string // where repos are cloned
+	OutputDir  string // where per-repo JSON snapshots are written (empty = skip)
 	Limit      int    // max test suites (0 = all)
 	Mode       string // "full" (default, curated ground truth) or "smoke" (self-validating, CI-safe)
 	Sequential bool   // OOM-safe: clone→index→test→cleanup one repo at a time
@@ -267,6 +268,11 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 				result.Precision*100, result.Recall*100, result.F1*100, result.LatencyMs, status)
 		}
 
+		// Persist per-repo results immediately so progress survives crashes.
+		if opts.OutputDir != "" {
+			writePerRepoResult(opts.OutputDir, suite, rs, allResults)
+		}
+
 		// OOM-safe cleanup: remove project from daemon and delete repo directory.
 		if opts.Sequential {
 			log.Printf("  cleanup: removing %s", suite.Repo)
@@ -278,6 +284,67 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 	}
 
 	return aggregateGraphResults(allResults, suites, allRepoStats), nil
+}
+
+// writePerRepoResult writes a JSON file with the results for a single repo.
+// File name: <outputDir>/repo/<owner>__<name>.json
+// This allows progress to be inspected and survives benchmark crashes.
+func writePerRepoResult(outputDir string, suite GraphBenchSuite, stats repoStats, allResults []GraphBenchTestResult) {
+	// Collect only results for this repo.
+	var repoResults []GraphBenchTestResult
+	for _, r := range allResults {
+		if r.Repo == suite.Repo {
+			repoResults = append(repoResults, r)
+		}
+	}
+
+	// Compute simple per-repo F1.
+	var totalF1 float64
+	for _, r := range repoResults {
+		totalF1 += r.F1
+	}
+	avgF1 := 0.0
+	if len(repoResults) > 0 {
+		avgF1 = totalF1 / float64(len(repoResults))
+	}
+
+	payload := struct {
+		Repo        string                  `json:"repo"`
+		Language    string                  `json:"language"`
+		Commit      string                  `json:"commit"`
+		IndexTimeMs int64                   `json:"index_time_ms"`
+		NodeCount   int                     `json:"node_count"`
+		EdgeCount   int                     `json:"edge_count"`
+		AvgF1       float64                 `json:"avg_f1"`
+		Tests       []GraphBenchTestResult  `json:"tests"`
+	}{
+		Repo:        suite.Repo,
+		Language:    suite.Language,
+		Commit:      suite.Commit,
+		IndexTimeMs: stats.IndexTimeMs,
+		NodeCount:   stats.NodeCount,
+		EdgeCount:   stats.EdgeCount,
+		AvgF1:       avgF1,
+		Tests:       repoResults,
+	}
+
+	dir := filepath.Join(outputDir, "repo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("  warning: could not create per-repo output dir: %v", err)
+		return
+	}
+	safeName := strings.ReplaceAll(suite.Repo, "/", "__")
+	path := filepath.Join(dir, safeName+".json")
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		log.Printf("  warning: could not marshal per-repo result: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		log.Printf("  warning: could not write per-repo result: %v", err)
+		return
+	}
+	log.Printf("  saved: %s (F1=%.1f%%)", path, avgF1*100)
 }
 
 // waitForIndex triggers indexing via a search probe and polls until the daemon

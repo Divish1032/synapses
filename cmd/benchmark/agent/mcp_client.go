@@ -419,9 +419,9 @@ func (c *SynapsesClient) RemoveProject(projectPath string) error {
 	if c.disabled {
 		return nil
 	}
-	u := fmt.Sprintf("%s/api/admin/projects/remove", c.endpoint)
+	u := fmt.Sprintf("%s/api/admin/projects", c.endpoint)
 	body, _ := json.Marshal(map[string]string{"path": projectPath})
-	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+	req, err := http.NewRequest("DELETE", u, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
