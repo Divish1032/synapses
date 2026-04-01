@@ -32,7 +32,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
-	"github.com/SynapsesOS/synapses/internal/webcache"
 )
 
 // loadAppSettingsJSON reads ~/.synapses/app_settings.json and returns the
@@ -123,7 +122,6 @@ type Server struct {
 	federationResolver *federation.Resolver   // nil if no federation configured — set via SetFederationResolver
 	projectRegistry    ProjectStoreProvider   // nil in single-project mode — set via SetProjectRegistry
 	brainClient        *brain.Client          // set via SetBrainClient; nil if brain not configured
-	webCache           *webcache.Cache        // nil if webcache not configured
 	pulseClient        *pulse.Client          // set via SetPulseClient; nil if pulse not configured
 	embedClient        embed.Embedder          // nil if embeddings not configured
 	memoryEmbedder     embed.Embedder         // nil if embeddings mode is "off" — set via SetMemoryEmbedder
@@ -1021,13 +1019,6 @@ func (s *Server) SetProjectID(id string) {
 	s.projectID = id
 	s.lg.projectID = id
 	s.rl.projectID = id
-}
-
-// SetWebCache wires a *webcache.Cache into the server for optional doc-cache operations.
-// The lookup_docs tool has been removed (Sprint 23.9) but webCache is retained for
-// future use and daemon compatibility.
-func (s *Server) SetWebCache(wc *webcache.Cache) {
-	s.webCache = wc
 }
 
 // SetProjectPath stores the absolute project root path so that search

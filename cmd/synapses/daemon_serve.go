@@ -77,7 +77,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
-	"github.com/SynapsesOS/synapses/internal/webcache"
 
 	"golang.org/x/net/netutil"
 )
@@ -2368,11 +2367,7 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 		}()
 	}
 
-	// Web doc cache: version-pinned Go package docs, cached locally in SQLite.
-	wc := webcache.New(st)
-	srv.SetWebCache(wc)
 	srv.SetProjectPath(absPath)
-	go webcache.IndexProjectImports(projCtx, absPath, g, wc, 20)
 
 	// Tech stack detection (no longer enriched via scout).
 	go func() {

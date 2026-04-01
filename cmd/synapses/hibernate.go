@@ -45,7 +45,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
-	"github.com/SynapsesOS/synapses/internal/webcache"
 
 )
 
@@ -335,9 +334,6 @@ func wakeProjectInstance(
 		srv.SetBrainClient(brainCli)
 	}
 
-	// Web doc cache.
-	wc := webcache.New(st)
-	srv.SetWebCache(wc)
 	srv.SetProjectPath(absPath)
 
 	// Pulse.
@@ -519,7 +515,6 @@ func wakeProjectInstance(
 			fetchAndWriteBackSummaries(projCtx, brainCli, g, st)
 		}
 	}()
-	go webcache.IndexProjectImports(projCtx, absPath, g, wc, 20)
 	go func() {
 		entries := scout.DetectTechStack(absPath)
 		if len(entries) > 0 {
