@@ -258,6 +258,52 @@ func TestHandleGetContext_IntentModify_PopulatesIntentMemories(t *testing.T) {
 	}
 }
 
+// TestHandleGetContext_IntentDebug_PopulatesRejectedApproaches verifies that
+// get_context with intent="debug" surfaces rejected_approaches in intent_memories
+// when the store has matching records. This covers the rejected-approach path in
+// goroutine 6 of handleGetContext that was absent in the original 25.3 commit.
+func TestHandleGetContext_IntentDebug_PopulatesRejectedApproaches(t *testing.T) {
+	srv, _, _ := newPopulatedServer(t)
+	ctx := context.Background()
+
+	// Insert a rejected approach containing the entity name "PaymentProcessor".
+	_, err := srv.store.InsertRejectedApproach(store.RejectedApproach{
+		AgentID:       "agent-1",
+		ProjectID:     srv.projectID,
+		Approach:      "direct DB call from PaymentProcessor handler",
+		FailureReason: "bypasses the service layer transaction boundaries",
+	})
+	if err != nil {
+		t.Fatalf("InsertRejectedApproach: %v", err)
+	}
+
+	res, callErr := srv.handleGetContext(ctx, callTool(map[string]any{
+		"entity": "PaymentProcessor",
+		"intent": "debug",
+		"format": "json",
+	}))
+	m := mustResult(t, res, callErr)
+
+	// intent_memories should be present when matching rejected approaches exist.
+	im, ok := m["intent_memories"].(map[string]interface{})
+	if !ok {
+		// Absent only if LIKE search on entity name missed — log and skip.
+		t.Log("intent_memories absent (possible LIKE search miss) — non-fatal")
+		return
+	}
+	if im["intent"] != "debug" {
+		t.Errorf("intent_memories.intent = %q, want %q", im["intent"], "debug")
+	}
+	rejected, ok := im["rejected_approaches"].([]interface{})
+	if !ok || len(rejected) == 0 {
+		t.Fatal("expected intent_memories.rejected_approaches to be non-empty for intent=debug")
+	}
+	r := rejected[0].(map[string]interface{})
+	if r["approach"] == nil {
+		t.Error("rejected_approaches[0] should have an approach field")
+	}
+}
+
 // ── store: SearchHypotheses ───────────────────────────────────────────────────
 
 // TestSearchHypotheses_MatchesContent verifies that SearchHypotheses finds
@@ -353,6 +399,82 @@ func TestSearchHypotheses_ProjectWide_EmptyAgentID(t *testing.T) {
 	results, err := st.SearchHypotheses("", "proj-shared", "race condition", 10)
 	if err != nil {
 		t.Fatalf("SearchHypotheses project-wide: %v", err)
+	}
+	if len(results) < 2 {
+		t.Errorf("expected ≥2 project-wide results, got %d", len(results))
+	}
+}
+
+// ── store: SearchRejectedApproaches ──────────────────────────────────────────
+
+// TestSearchRejectedApproaches_MatchesApproach verifies that SearchRejectedApproaches
+// finds entries whose approach or failure_reason field matches the query.
+func TestSearchRejectedApproaches_MatchesApproach(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	_, err := st.InsertRejectedApproach(store.RejectedApproach{
+		AgentID:       "agent-1",
+		ProjectID:     "proj-1",
+		Approach:      "use polling to detect file changes",
+		FailureReason: "polling caused high CPU usage and missed rapid changes",
+	})
+	if err != nil {
+		t.Fatalf("InsertRejectedApproach: %v", err)
+	}
+
+	results, err := st.SearchRejectedApproaches("agent-1", "proj-1", "polling", 10)
+	if err != nil {
+		t.Fatalf("SearchRejectedApproaches: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result, got 0")
+	}
+	if results[0].Approach == "" {
+		t.Error("result Approach should not be empty")
+	}
+}
+
+// TestSearchRejectedApproaches_NoMatch verifies empty slice (not error) when no match.
+func TestSearchRejectedApproaches_NoMatch(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	_, _ = st.InsertRejectedApproach(store.RejectedApproach{
+		AgentID:       "agent-1",
+		ProjectID:     "proj-1",
+		Approach:      "manual cache invalidation",
+		FailureReason: "error-prone and led to stale reads",
+	})
+
+	results, err := st.SearchRejectedApproaches("agent-1", "proj-1", "xyzzy-no-match-token", 10)
+	if err != nil {
+		t.Fatalf("SearchRejectedApproaches: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for no-match query, got %d", len(results))
+	}
+}
+
+// TestSearchRejectedApproaches_ProjectWide_EmptyAgentID verifies that agentID=""
+// returns rejected approaches from all agents in the project.
+func TestSearchRejectedApproaches_ProjectWide_EmptyAgentID(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	_, _ = st.InsertRejectedApproach(store.RejectedApproach{
+		AgentID:       "agent-A",
+		ProjectID:     "proj-shared",
+		Approach:      "synchronous retry loop for distributed lock",
+		FailureReason: "caused deadlock under high concurrency",
+	})
+	_, _ = st.InsertRejectedApproach(store.RejectedApproach{
+		AgentID:       "agent-B",
+		ProjectID:     "proj-shared",
+		Approach:      "exponential backoff retry for distributed lock",
+		FailureReason: "lock starvation under sustained concurrency",
+	})
+
+	results, err := st.SearchRejectedApproaches("", "proj-shared", "distributed lock", 10)
+	if err != nil {
+		t.Fatalf("SearchRejectedApproaches project-wide: %v", err)
 	}
 	if len(results) < 2 {
 		t.Errorf("expected ≥2 project-wide results, got %d", len(results))

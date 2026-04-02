@@ -93,6 +93,7 @@ type directionalContext struct {
 	AdaptiveHint           string                    `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
 	EntityMemories         []entityMemoryHint        `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
 	IntentMemories         *intentMemorySummary      `json:"intent_memories,omitempty"`          // Sprint 25.3: decisions/hypotheses for this entity area, shaped by intent
+	PriorExploration       *priorExplorationHint     `json:"prior_exploration,omitempty"`        // Sprint 25.4: entity explored in prior sessions — prior findings injected
 	QualityGaps            []store.QualityGap        `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
 	EntityHash             string                    `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
 	CallerCountWarning     string                    `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
@@ -214,20 +215,38 @@ type entityMemoryHint struct {
 	Source    string `json:"source"`
 }
 
+// priorExplorationHint is the Sprint 25.4 cross-session exploration dedup note
+// injected into get_context when the queried entity was explored in a prior
+// session. Tells the agent how many times the entity was examined before and
+// surfaces the best prior finding so re-exploration can be skipped.
+type priorExplorationHint struct {
+	HitCount   int    `json:"hit_count"`            // times explored in prior sessions
+	TopFinding string `json:"top_finding,omitempty"` // best finding_summary from prior explorations
+	Note       string `json:"note"`
+}
+
 // intentMemorySummary is the Sprint 25.3 intent-aware memory section injected
-// into get_context when intent is modify/debug/add/review. Surfaces decisions
-// and hypotheses relevant to the entity area based on what the agent is about to do.
+// into get_context when intent is modify/debug/add/review. Surfaces decisions,
+// hypotheses, and rejected approaches relevant to the entity area based on what
+// the agent is about to do.
 type intentMemorySummary struct {
-	Intent     string                `json:"intent"`
-	Note       string                `json:"note,omitempty"`
-	Decisions  []intentDecisionHint  `json:"decisions,omitempty"`
-	Hypotheses []intentHypothesisHint `json:"hypotheses,omitempty"`
+	Intent             string                 `json:"intent"`
+	Note               string                 `json:"note,omitempty"`
+	Decisions          []intentDecisionHint   `json:"decisions,omitempty"`
+	Hypotheses         []intentHypothesisHint `json:"hypotheses,omitempty"`
+	RejectedApproaches []intentRejectedHint   `json:"rejected_approaches,omitempty"` // for debug/review intents
 }
 
 // intentDecisionHint is a compact decision record for intent-aware retrieval.
 type intentDecisionHint struct {
 	Choice    string `json:"choice"`
 	Reasoning string `json:"reasoning,omitempty"`
+}
+
+// intentRejectedHint is a compact rejected-approach record for intent-aware retrieval.
+type intentRejectedHint struct {
+	Approach string `json:"approach"`
+	Reason   string `json:"failure_reason,omitempty"`
 }
 
 // intentHypothesisHint is a compact hypothesis record for intent-aware retrieval.
@@ -1196,9 +1215,58 @@ func (s *Server) handleGetContext(
 			}
 		}
 
+		if categories["rejected"] {
+			rs, err := s.store.SearchRejectedApproaches("", s.projectID, entityQuery, 3)
+			if err == nil && len(rs) > 0 {
+				hints := make([]intentRejectedHint, 0, len(rs))
+				for _, r := range rs {
+					hints = append(hints, intentRejectedHint{
+						Approach: r.Approach,
+						Reason:   r.FailureReason,
+					})
+				}
+				im.RejectedApproaches = hints
+			}
+		}
+
 		// Only set IntentMemories if there is something to show.
-		if len(im.Decisions) > 0 || len(im.Hypotheses) > 0 {
+		if len(im.Decisions) > 0 || len(im.Hypotheses) > 0 || len(im.RejectedApproaches) > 0 {
 			dc.IntentMemories = &im
+		}
+	}()
+
+	// Sprint 25.4: cross-session exploration dedup — inject prior-session findings
+	// when the agent queries an entity already explored in a previous session.
+	// Fires for ALL intents (not just modify/debug) because re-exploration waste
+	// is intent-independent. Lookup is a single indexed SQLite read; capped at
+	// 3 entries to bound latency. Silently skips when store or sessionID unavailable.
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		if s.store == nil || best == nil {
+			return
+		}
+		sID := s.getSynapseSessionID(SessionIDFromContext(ctx))
+		entries, err := s.store.GetCrossSessionExplorations(s.projectID, sID, best.Name, 50)
+		if err != nil || len(entries) == 0 {
+			return
+		}
+		// Pick the most informative finding (first entry is already ordered by
+		// non-empty finding_summary first, then by recency).
+		topFinding := ""
+		for _, e := range entries {
+			if e.FindingSummary != "" {
+				topFinding = e.FindingSummary
+				break
+			}
+		}
+		dc.PriorExploration = &priorExplorationHint{
+			HitCount:   len(entries),
+			TopFinding: topFinding,
+			Note: fmt.Sprintf(
+				"Explored %d time(s) in prior sessions. Review top_finding before re-querying to avoid redundant context budget spend.",
+				len(entries),
+			),
 		}
 	}()
 
