@@ -956,6 +956,20 @@ func Open(path string) (*Store, error) {
 		`CREATE INDEX IF NOT EXISTS idx_wl_project ON work_ledger(project_id, created_at)`,
 		// Cross-project recall: track which project originated each memory.
 		`ALTER TABLE memories ADD COLUMN source_project TEXT NOT NULL DEFAULT ''`,
+		// Sprint 24.1: Exploration log — captures response-side findings ("what was found")
+		// from get_context, search, get_impact, and validate tool calls. Distinct from
+		// work_ledger (input signals only) — this is the compaction recovery intelligence layer.
+		`CREATE TABLE IF NOT EXISTS exploration_log (
+			session_id      TEXT NOT NULL,
+			project_id      TEXT NOT NULL DEFAULT '',
+			tool_name       TEXT NOT NULL,
+			entity_queried  TEXT NOT NULL DEFAULT '',
+			query_context   TEXT NOT NULL DEFAULT '',
+			finding_summary TEXT NOT NULL DEFAULT '',
+			created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_elog_session ON exploration_log(session_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_elog_entity  ON exploration_log(session_id, entity_queried) WHERE entity_queried != ''`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

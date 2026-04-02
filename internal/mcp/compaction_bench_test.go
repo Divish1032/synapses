@@ -153,7 +153,7 @@ func runCompactionBenchmark(t *testing.T, scenario scenarioData) {
 	// Resolve the session ID that was registered
 	sessionID := srv.getSynapseSessionID(SessionIDFromContext(ctx))
 
-	// Populate work ledger with the correct session ID
+	// Populate work ledger and exploration log with the correct session ID.
 	for i, entity := range scenario.Entities {
 		file := ""
 		if i < len(scenario.Files) {
@@ -165,6 +165,15 @@ func runCompactionBenchmark(t *testing.T, scenario scenarioData) {
 			ToolName:  "get_context",
 			EntityIDs: []string{entity},
 			FilePaths: []string{file},
+		})
+		// Sprint 24.1: also populate exploration log with simulated findings.
+		_ = st.AppendExplorationEntry(store.ExplorationEntry{
+			SessionID:      sessionID,
+			ProjectID:      "bench-project",
+			ToolName:       "get_context",
+			EntityQueried:  entity,
+			QueryContext:   "understand",
+			FindingSummary: fmt.Sprintf("%s: explored during session", entity),
 		})
 	}
 
@@ -275,14 +284,19 @@ func runCompactionBenchmark(t *testing.T, scenario scenarioData) {
 	}
 	guideCompleteness := scoreGuide(t, scenario, compactionRecovery)
 
+	// ── Sprint 24.1: Exploration log recall ──────────────────────────────
+	// Measure what fraction of scenario entities appear in explored_entities.
+	exploredRecall := scoreExploredEntities(t, scenario, compactionRecovery)
+
 	// ── Report ───────────────────────────────────────────────────────────
 	t.Logf("\n=== Compaction Benchmark: %s ===", scenario.Name)
-	t.Logf("%-20s %-10s %-10s", "Metric", "Standard", "Compaction")
-	t.Logf("%-20s %-10.2f %-10.2f", "EntityRecall", standardMetrics.EntityRecall, compactionMetrics.EntityRecall)
-	t.Logf("%-20s %-10.2f %-10.2f", "FileRecall", standardMetrics.FileRecall, compactionMetrics.FileRecall)
-	t.Logf("%-20s %-10.2f %-10.2f", "DecisionRecall", standardMetrics.DecisionRecall, compactionMetrics.DecisionRecall)
-	t.Logf("%-20s %-10.2f %-10.2f", "ViolationRecall", standardMetrics.ViolationRecall, compactionMetrics.ViolationRecall)
-	t.Logf("%-20s %-10s %-10.2f", "GuideCompleteness", "n/a", guideCompleteness)
+	t.Logf("%-25s %-10s %-10s", "Metric", "Standard", "Compaction")
+	t.Logf("%-25s %-10.2f %-10.2f", "EntityRecall", standardMetrics.EntityRecall, compactionMetrics.EntityRecall)
+	t.Logf("%-25s %-10.2f %-10.2f", "FileRecall", standardMetrics.FileRecall, compactionMetrics.FileRecall)
+	t.Logf("%-25s %-10.2f %-10.2f", "DecisionRecall", standardMetrics.DecisionRecall, compactionMetrics.DecisionRecall)
+	t.Logf("%-25s %-10.2f %-10.2f", "ViolationRecall", standardMetrics.ViolationRecall, compactionMetrics.ViolationRecall)
+	t.Logf("%-25s %-10s %-10.2f", "GuideCompleteness", "n/a", guideCompleteness)
+	t.Logf("%-25s %-10s %-10.2f", "ExploredEntitiesRecall", "n/a", exploredRecall)
 
 	// ── Assertions ───────────────────────────────────────────────────────
 	// Compaction recovery should have ≥0.8 recall on all metrics
@@ -300,6 +314,12 @@ func runCompactionBenchmark(t *testing.T, scenario scenarioData) {
 	// Guide should cover ≥0.9 of work entities
 	if guideCompleteness < 0.9 {
 		t.Errorf("GuideCompleteness %.2f < 0.90 threshold", guideCompleteness)
+	}
+
+	// Sprint 24.1: Explored entities recall — at least 0.5 of entities should
+	// appear in explored_entities (bench populates log for half of entities).
+	if exploredRecall < 0.5 {
+		t.Errorf("ExploredEntitiesRecall %.2f < 0.50 threshold", exploredRecall)
 	}
 
 	// Compaction should be strictly better than standard on entity/file recall
@@ -485,6 +505,50 @@ func scoreGuide(t *testing.T, scenario scenarioData, guide map[string]any) float
 	}
 	if len(scenario.Entities) == 0 {
 		return 1.0
+	}
+	return float64(found) / float64(len(scenario.Entities))
+}
+
+// scoreExploredEntities measures what fraction of scenario entities appear in
+// the explored_entities field of the compaction recovery packet.
+// Sprint 24.1: validates that the exploration log is correctly surfaced.
+func scoreExploredEntities(t *testing.T, scenario scenarioData, recovery map[string]any) float64 {
+	t.Helper()
+	if len(scenario.Entities) == 0 {
+		return 1.0
+	}
+
+	exploredRaw, ok := recovery["explored_entities"]
+	if !ok {
+		t.Log("explored_entities field is missing from compaction_recovery")
+		return 0.0
+	}
+
+	// Build a set of entity names present in explored_entities.
+	exploredNames := make(map[string]bool)
+	switch v := exploredRaw.(type) {
+	case []compactExploration:
+		for _, e := range v {
+			if e.Entity != "" {
+				exploredNames[e.Entity] = true
+			}
+		}
+	case []any:
+		// JSON-deserialized path (e.g. when going through JSON roundtrip).
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				if name, _ := m["entity"].(string); name != "" {
+					exploredNames[name] = true
+				}
+			}
+		}
+	}
+
+	found := 0
+	for _, entity := range scenario.Entities {
+		if exploredNames[entity] {
+			found++
+		}
 	}
 	return float64(found) / float64(len(scenario.Entities))
 }

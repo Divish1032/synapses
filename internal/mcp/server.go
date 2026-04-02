@@ -1447,6 +1447,23 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 			})
 		}
 
+		// Sprint 24.1: Exploration log — capture response-side findings for
+		// compaction recovery ("what was found", not just "what was touched").
+		// Only fires for the 4 exploration-heavy tools; async, never blocks.
+		if cap := extractExplorationCapture(toolName, args, result); cap != nil {
+			elogEntry := store.ExplorationEntry{
+				SessionID:      sessionID,
+				ProjectID:      s.projectID,
+				ToolName:       toolName,
+				EntityQueried:  cap.EntityQueried,
+				QueryContext:   cap.QueryContext,
+				FindingSummary: cap.FindingSummary,
+			}
+			s.goBackground(func() {
+				_ = s.store.AppendExplorationEntry(elogEntry)
+			})
+		}
+
 		// Sprint 27.3: Track tool calls per session for suggestion suppression.
 		s.toolTracker.record(sessionID, toolName)
 

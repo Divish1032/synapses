@@ -2296,10 +2296,43 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 	importance := s.rankEntityImportance(sessionID, entities)
 	relationships := s.buildRelationshipMap(entities)
 
+	// 7b. Sprint 24.1: Exploration log — what was queried and what was found.
+	// This layer gives the recovery packet concrete intelligence ("AuthService: 5
+	// callers, 2 security constraints") rather than just entity names.
+	var exploredEntities []compactExploration
+	// Fetch a larger window and deduplicate by entity name (most-recent-first
+	// from the query), keeping up to 10 unique entries. This prevents a single
+	// repeatedly-queried entity from consuming all 10 slots.
+	if elog, err := s.store.GetSessionExplorationLog(sessionID, 30); err == nil {
+		seen := make(map[string]bool, len(elog))
+		for _, e := range elog {
+			if e.EntityQueried == "" && e.FindingSummary == "" {
+				continue
+			}
+			if e.EntityQueried != "" {
+				if seen[e.EntityQueried] {
+					continue
+				}
+				seen[e.EntityQueried] = true
+			}
+			exploredEntities = append(exploredEntities, compactExploration{
+				Entity:  e.EntityQueried,
+				Tool:    e.ToolName,
+				Finding: e.FindingSummary,
+			})
+			if len(exploredEntities) >= 10 {
+				break
+			}
+		}
+	}
+
 	// 8. Assemble the recovery packet
 	recovery := map[string]interface{}{
 		"work_summary": workSummary,
 		"hint":         "Your context was compacted. This recovery packet contains your prior work state from Synapses. File contents and graph traversals can be re-queried — focus on decisions and approach.",
+	}
+	if len(exploredEntities) > 0 {
+		recovery["explored_entities"] = exploredEntities
 	}
 	if len(sessionDecisions) > 0 {
 		recovery["session_decisions"] = sessionDecisions
@@ -2330,6 +2363,15 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 	truncateCompactionPacket(recovery, 8000)
 
 	return recovery
+}
+
+// compactExploration is a lightweight representation of one exploration log entry
+// for the compaction recovery packet. It surfaces what was queried and what was
+// learned during this session — the "institutional memory" layer.
+type compactExploration struct {
+	Entity  string `json:"entity,omitempty"`
+	Tool    string `json:"tool,omitempty"`
+	Finding string `json:"finding,omitempty"`
 }
 
 // compactEpisode is a lightweight episode representation for compaction recovery.
@@ -2372,7 +2414,9 @@ func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
 	}
 	// Progressive truncation in priority order (lowest value first).
 	// work_summary and hint are never dropped — they're the minimum useful payload.
-	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "session_failures", "session_decisions", "active_rules", "context_snapshot"}
+	// explored_entities is dropped after entity_memories (high-value intelligence,
+	// but work_summary already captures entity/file names as a fallback).
+	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "active_rules", "context_snapshot"}
 	for _, key := range dropOrder {
 		if len(data) <= maxChars {
 			return
