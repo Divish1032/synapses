@@ -1239,7 +1239,8 @@ func (s *Server) handleGetContext(
 	// when the agent queries an entity already explored in a previous session.
 	// Fires for ALL intents (not just modify/debug) because re-exploration waste
 	// is intent-independent. Lookup is a single indexed SQLite read; capped at
-	// 3 entries to bound latency. Silently skips when store or sessionID unavailable.
+	// 50 entries (sufficient for accurate hit counts at Synapses project scales).
+	// Silently skips when store or sessionID unavailable.
 	enrichWg.Add(1)
 	go func() {
 		defer enrichWg.Done()
