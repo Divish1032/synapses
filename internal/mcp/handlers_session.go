@@ -1608,8 +1608,9 @@ func (s *Server) handleSessionInit(
 					title := strings.TrimSpace(t.Title)
 					// Normalize: use only the first line and cap length so
 					// multi-line task titles don't corrupt the NL briefing.
+					// TrimRight removes a trailing \r left by Windows-style \r\n endings.
 					if nl := strings.IndexByte(title, '\n'); nl >= 0 {
-						title = title[:nl]
+						title = strings.TrimRight(title[:nl], "\r")
 					}
 					if rs := []rune(title); len(rs) > 80 {
 						title = string(rs[:80]) + "…"
@@ -1730,13 +1731,24 @@ func (s *Server) handleSessionInit(
 		}
 		briefing["security_rules"] = briefingSecurityRules
 
-		// (5) Recent decisions: decision-type episodes from the last 30 days.
+		// (5) Recent decisions and rejected approaches.
+		//
+		// Decision episodes: explicit decisions stored via memory(action=save).
+		// Rejected approaches: the most relevant failure episode relative to the
+		// current working context (already computed as recentFailure above).
+		// Both are surfaced together so the agent avoids repeating past mistakes.
 		{
 			var decisions []map[string]interface{}
 			if s.store != nil && primaryRepoID != "" {
 				if eps, err := s.store.GetEpisodes(primaryRepoID, "", "decision", nil, 3, 30); err == nil {
 					for _, e := range eps {
-						d := map[string]interface{}{"decision": e.Decision}
+						if e.Decision == "" {
+							continue // skip malformed episodes with no decision text
+						}
+						d := map[string]interface{}{
+							"type":     "decision",
+							"decision": e.Decision,
+						}
 						if e.Outcome != "" {
 							d["outcome"] = e.Outcome
 						}
@@ -1746,6 +1758,24 @@ func (s *Server) handleSessionInit(
 						}
 						decisions = append(decisions, d)
 					}
+				}
+			}
+			// Include the most relevant rejected approach (failure episode) when
+			// available — drawn from resp["recent_failure"] which is already computed.
+			if rf, ok := resp["recent_failure"].(map[string]interface{}); ok {
+				if dec, _ := rf["decision"].(string); dec != "" {
+					rejected := map[string]interface{}{
+						"type":     "rejected_approach",
+						"decision": dec,
+					}
+					if outcome, _ := rf["outcome"].(string); outcome != "" {
+						rejected["outcome"] = outcome
+					}
+					if at, _ := rf["created_at"].(int64); at > 0 {
+						age := time.Since(time.Unix(at, 0))
+						rejected["when"] = formatSessionDuration(age) + " ago"
+					}
+					decisions = append(decisions, rejected)
 				}
 			}
 			if len(decisions) > 0 {
