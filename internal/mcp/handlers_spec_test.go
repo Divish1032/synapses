@@ -341,6 +341,78 @@ func TestHandleTasksDispatch_UnknownAction(t *testing.T) {
 	}
 }
 
+// ── handleUpdateTask — tracked_files_reminder ────────────────────────────────
+
+func TestHandleUpdateTask_Done_TrackedFilesReminder(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	_, taskIDs, _ := st.CreatePlan("reminder plan", "", "", []store.TaskInput{
+		{Title: "Multi-file task"},
+	})
+	taskID := taskIDs[0]
+	_ = st.SetTrackedFiles(taskID, []string{"handler.go", "service.go"})
+
+	// Mark in_progress first, then done.
+	_, _ = s.handleUpdateTask(ctx, callTool(map[string]any{
+		"id": taskID, "status": "in_progress",
+	}))
+	res, err := s.handleUpdateTask(ctx, callTool(map[string]any{
+		"id": taskID, "status": "done",
+	}))
+	m := mustResult(t, res, err)
+
+	if _, hasReminder := m["tracked_files_reminder"]; !hasReminder {
+		t.Error("expected tracked_files_reminder in done response when tracked files are registered")
+	}
+}
+
+func TestHandleUpdateTask_Done_NoTrackedFiles_NoReminder(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	_, taskIDs, _ := st.CreatePlan("no tracked plan", "", "", []store.TaskInput{
+		{Title: "Plain task"},
+	})
+	taskID := taskIDs[0]
+
+	res, err := s.handleUpdateTask(ctx, callTool(map[string]any{
+		"id": taskID, "status": "done",
+	}))
+	m := mustResult(t, res, err)
+
+	if _, hasReminder := m["tracked_files_reminder"]; hasReminder {
+		t.Error("unexpected tracked_files_reminder when task has no tracked files")
+	}
+}
+
+func TestHandleUpdateTask_Cancelled_NoReminder(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	_, taskIDs, _ := st.CreatePlan("cancel plan", "", "", []store.TaskInput{
+		{Title: "Cancelled task"},
+	})
+	taskID := taskIDs[0]
+	_ = st.SetTrackedFiles(taskID, []string{"handler.go"})
+
+	res, err := s.handleUpdateTask(ctx, callTool(map[string]any{
+		"id": taskID, "status": "cancelled",
+	}))
+	m := mustResult(t, res, err)
+
+	// Reminder only fires on done, not cancelled.
+	if _, hasReminder := m["tracked_files_reminder"]; hasReminder {
+		t.Error("unexpected tracked_files_reminder on cancelled status")
+	}
+}
+
 // ── handleSetTrackedFiles ──────────────────────────────────────────────────────
 
 func TestHandleSetTrackedFiles_NoStore(t *testing.T) {

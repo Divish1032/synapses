@@ -456,13 +456,18 @@ func (s *Server) handleUpdateTask(
 		s.upsertAgentWithActivity(agentID, &store.AgentActivity{Intent: intent})
 	}
 
-	// R21: Commit-to-task linking — capture git state before status transitions.
-	// For done/cancelled: read start_commit now (before UpdateTask) so we can compute
-	// the range log. This is safe because UpdateTask never modifies start_commit.
+	// R21 + Sprint 25.2: Fetch task snapshot before status transitions.
+	// R21: captures start_commit for git log range at task completion.
+	// Sprint 25.2: captures tracked_files so we can warn when the agent marks done
+	// without having called validate(phase=post) to verify all files were modified.
 	var taskStartCommit string
-	if (status == "done" || status == "cancelled") && s.projectPath != "" {
+	var taskTrackedFiles []string
+	if status == "done" || status == "cancelled" {
 		if t, gtErr := s.store.GetTask(id); gtErr == nil {
-			taskStartCommit = t.StartCommit
+			if s.projectPath != "" {
+				taskStartCommit = t.StartCommit
+			}
+			taskTrackedFiles = t.TrackedFiles
 		}
 	}
 
@@ -692,6 +697,17 @@ func (s *Server) handleUpdateTask(
 	if len(capturedCommits) > 0 {
 		result["commits_since_start"] = capturedCommits
 	}
+	// Sprint 25.2: if the task had tracked files, remind the agent to verify them.
+	// This fires at task completion regardless of whether validate(phase=post) was called,
+	// catching agents that skip the validate step and declare done prematurely.
+	if status == "done" && len(taskTrackedFiles) > 0 {
+		result["tracked_files_reminder"] = fmt.Sprintf(
+			"This task had %d tracked file(s) registered: %s. "+
+				"If you haven't called validate(phase=post, task_id=%s, files_written=[...]), "+
+				"verify these files were all modified before closing.",
+			len(taskTrackedFiles), strings.Join(taskTrackedFiles, ", "), id,
+		)
+	}
 	return jsonResult(result)
 }
 
@@ -847,8 +863,8 @@ func (s *Server) handleSetTrackedFiles(
 	switch v := req.GetArguments()["files"].(type) {
 	case []interface{}:
 		for _, item := range v {
-			if s, ok := item.(string); ok && s != "" {
-				files = append(files, s)
+			if str, ok := item.(string); ok && str != "" {
+				files = append(files, str)
 			}
 		}
 	case string:
