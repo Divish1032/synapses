@@ -1029,9 +1029,12 @@ func (s *Server) SetProjectPath(path string) {
 
 // getProjectRoot returns the best available project root path.
 // Tries graph.Root() first (set by indexer), then projectPath (set by daemon).
+// Safe to call when s.graph is nil (knowledge mode or tests).
 func (s *Server) getProjectRoot() string {
-	if r := s.graph.Root(); r != "" {
-		return r
+	if s.graph != nil {
+		if r := s.graph.Root(); r != "" {
+			return r
+		}
 	}
 	return s.projectPath
 }

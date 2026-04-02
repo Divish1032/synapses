@@ -1660,14 +1660,23 @@ func (s *Server) handleSessionInit(
 			briefing["unfinished_work"] = w
 		}
 
-		// (2) Conventions: auto-load project prompts + all agent-type rules.
-		// Agent rules are manually configured behavioral conventions (e.g. "All
-		// handlers use AuthMiddleware", "DB access goes through repository layer").
+		// (2) Conventions: formatter detection + project prompts + agent-type rules.
+		// Formatter conventions are prepended so agents always learn about
+		// auto-formatting tools before other project norms. Agent rules are
+		// manually configured behavioral conventions (e.g. "All handlers use
+		// AuthMiddleware", "DB access goes through repository layer").
 		// Sprint 29 will add cross-session learned conventions here; Sprint 23
 		// establishes the delivery slot and populates it from configured rules.
-		// Cap: 5 from prompts, up to 8 total so rule-heavy projects stay terse.
+		// Cap: formatter conventions are always included; 5 from prompts, up to
+		// 8 total from prompts+rules so rule-heavy projects stay terse.
 		{
-			var convs []string
+			// Prepend formatter conventions so they are always delivered
+			// regardless of how many prompts or rules the project has.
+			convs := detectFormatterConventions(s.getProjectRoot())
+			// promptsAdded tracks how many prompt bodies have been appended so
+			// that the per-prompt cap (5) is counted independently of the
+			// formatter conventions already in convs.
+			promptsAdded := 0
 			if ap, ok := resp["active_prompts"].(map[string]interface{}); ok {
 				if pl, ok := ap["prompts"].([]map[string]string); ok {
 					for _, p := range pl {
@@ -1685,7 +1694,8 @@ func (s *Server) handleSessionInit(
 							body = string(rs[:120]) + "…"
 						}
 						convs = append(convs, body)
-						if len(convs) >= 5 {
+						promptsAdded++
+						if promptsAdded >= 5 {
 							break
 						}
 					}
@@ -1695,8 +1705,11 @@ func (s *Server) handleSessionInit(
 			// conventions. Every agent rule is a behavioral norm the agent must
 			// follow regardless of severity — warning rules are equally important
 			// for project conventions like testing style and layer boundaries.
+			// The 8-item cap applies only to prompts+rules (formatter conventions
+			// are included on top of this limit).
+			rulesAdded := 0
 			for _, ac := range agentConstraints {
-				if len(convs) >= 8 {
+				if promptsAdded+rulesAdded >= 8 {
 					break
 				}
 				desc := ac["description"]
@@ -1709,6 +1722,7 @@ func (s *Server) handleSessionInit(
 					desc = string(rs[:120]) + "…"
 				}
 				convs = append(convs, desc)
+				rulesAdded++
 			}
 			if convs == nil {
 				convs = []string{}
