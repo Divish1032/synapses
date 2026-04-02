@@ -740,6 +740,11 @@ func assignSpecItemIDs(items []SpecItem) []SpecItem {
 
 // UpdateSpecItem marks a single spec item within a task as done or not-done.
 // Returns an error if the task or item is not found.
+//
+// The read-modify-write is wrapped in a transaction so that concurrent callers
+// cannot interleave their SELECT and UPDATE: the transaction holds the
+// connection for its entire duration (knowledgeDB uses SetMaxOpenConns(1)),
+// making the operation atomic.
 func (s *Store) UpdateSpecItem(taskID, itemID string, done bool) error {
 	if taskID == "" {
 		return fmt.Errorf("task_id is required")
@@ -749,12 +754,17 @@ func (s *Store) UpdateSpecItem(taskID, itemID string, done bool) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	// Fetch current spec_items JSON.
-	var specJSON string
-	err := s.knowledgeDB.QueryRow(
-		`SELECT spec_items FROM tasks WHERE id = ?`, taskID,
-	).Scan(&specJSON)
+	tx, err := s.knowledgeDB.Begin()
 	if err != nil {
+		return fmt.Errorf("begin tx for update_spec_item: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // superseded by tx.Commit on success
+
+	// Read current spec_items within the transaction.
+	var specJSON string
+	if err := tx.QueryRow(
+		`SELECT spec_items FROM tasks WHERE id = ?`, taskID,
+	).Scan(&specJSON); err != nil {
 		return fmt.Errorf("get spec_items for task %q: %w", taskID, err)
 	}
 
@@ -779,11 +789,13 @@ func (s *Store) UpdateSpecItem(taskID, itemID string, done bool) error {
 	}
 
 	updated, _ := json.Marshal(items)
-	_, execErr := s.knowledgeDB.Exec(
+	if _, err := tx.Exec(
 		`UPDATE tasks SET spec_items = ?, updated_at = ? WHERE id = ?`,
 		string(updated), now, taskID,
-	)
-	return execErr
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // newID generates a cryptographically random ID for plans and tasks.

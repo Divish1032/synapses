@@ -1,6 +1,7 @@
 package store
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -244,5 +245,56 @@ func TestAssignSpecItemIDs_MixedIDs(t *testing.T) {
 	// Original slice should not be modified.
 	if items[1].ID != "" {
 		t.Error("expected original slice to be unmodified")
+	}
+}
+
+// TestUpdateSpecItem_ConcurrentUpdates verifies that simultaneous UpdateSpecItem
+// calls on different items in the same task do not clobber each other.
+// Without the transaction wrapping the read-modify-write, two goroutines could
+// both read the same spec_items JSON, each mutate a different item, and one
+// UPDATE would overwrite the other's change — leaving one item incorrectly
+// unchanged. The -race flag catches data races; the assertion catches the
+// logical correctness.
+func TestUpdateSpecItem_ConcurrentUpdates(t *testing.T) {
+	st := openTestStore(t)
+
+	_, taskIDs, err := st.CreatePlan("concurrent plan", "", "agent", []TaskInput{
+		{
+			Title: "Concurrent Task",
+			SpecItems: []SpecItem{
+				{ID: "item-a", Label: "Step A"},
+				{ID: "item-b", Label: "Step B"},
+				{ID: "item-c", Label: "Step C"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+	taskID := taskIDs[0]
+
+	// Mark all three items done concurrently.
+	var wg sync.WaitGroup
+	for _, id := range []string{"item-a", "item-b", "item-c"} {
+		id := id
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := st.UpdateSpecItem(taskID, id, true); err != nil {
+				t.Errorf("UpdateSpecItem(%q): %v", id, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// All three must be done — no update must have been lost.
+	task, err := st.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	for _, item := range task.SpecItems {
+		if !item.Done {
+			t.Errorf("spec item %q (%s) should be done but is not", item.ID, item.Label)
+		}
 	}
 }
