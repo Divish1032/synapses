@@ -352,6 +352,32 @@ func TestGetPeerActiveHypotheses_OnlyReturnsActive(t *testing.T) {
 	}
 }
 
+// TestGetPeerActiveHypotheses_OldHypothesisExcludedByWindow verifies that active
+// hypotheses whose created_at is older than windowHours are NOT returned.
+func TestGetPeerActiveHypotheses_OldHypothesisExcludedByWindow(t *testing.T) {
+	s := openTestStoreHyp(t)
+
+	// Insert a hypothesis with created_at 48h ago — outside the 24h window.
+	// InsertHypothesis respects a non-zero CreatedAt value.
+	_, err := s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "peer-old",
+		ProjectID: "proj-window",
+		Content:   "theory from two days ago",
+		CreatedAt: time.Now().Add(-48 * time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("InsertHypothesis: %v", err)
+	}
+
+	hyps, err := s.GetPeerActiveHypotheses("proj-window", "current-agent", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerActiveHypotheses: %v", err)
+	}
+	if len(hyps) != 0 {
+		t.Errorf("expected 0 hypotheses (all too old for 24h window), got %d", len(hyps))
+	}
+}
+
 // TestGetPeerActiveHypotheses_ProjectIsolation verifies no cross-project leakage.
 func TestGetPeerActiveHypotheses_ProjectIsolation(t *testing.T) {
 	s := openTestStoreHyp(t)

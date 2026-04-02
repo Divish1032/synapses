@@ -2045,6 +2045,9 @@ func (s *Server) handleSessionInit(
 						if len(payload.Remaining) > 0 {
 							entry["remaining"] = payload.Remaining
 						}
+						if len(payload.ExploredEntities) > 0 {
+							entry["explored_entities"] = payload.ExploredEntities
+						}
 					}
 					if hyps := hypsByAgent[mem.AgentID]; len(hyps) > 0 {
 						entry["open_hypotheses"] = hyps

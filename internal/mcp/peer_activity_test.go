@@ -189,6 +189,96 @@ func TestSessionInit_PeerActivity_AbsentInQuickMode(t *testing.T) {
 	}
 }
 
+// TestSessionInit_PeerActivity_MultiplePeers verifies that when two different
+// peer agents have recent handoffs, both appear in peer_activity.peers.
+func TestSessionInit_PeerActivity_MultiplePeers(t *testing.T) {
+	srv, _, _ := newPopulatedServer(t)
+
+	insertHandoffMemory(t, srv, "agent-alpha", srv.projectID,
+		`{"agent_summary":"Alpha worked on the parser","accomplished":["parser refactor"]}`)
+	insertHandoffMemory(t, srv, "agent-beta", srv.projectID,
+		`{"agent_summary":"Beta worked on the tests","remaining":["integration tests"]}`)
+
+	res, err := srv.handleSessionInit(context.Background(), callTool(map[string]any{
+		"agent_id": "agent-gamma",
+		"scope":    "full",
+	}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+
+	text := extractText(t, res)
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	briefing, ok := resp["_briefing"].(map[string]interface{})
+	if !ok {
+		t.Fatal("_briefing missing")
+	}
+	pa, ok := briefing["peer_activity"].(map[string]interface{})
+	if !ok || pa == nil {
+		t.Fatal("peer_activity missing — expected 2 peers")
+	}
+	peers, _ := pa["peers"].([]interface{})
+	if len(peers) != 2 {
+		t.Errorf("expected 2 peer entries (alpha + beta), got %d", len(peers))
+	}
+	// note should mention "2 peer agents"
+	note, _ := pa["note"].(string)
+	if note == "" {
+		t.Error("note must not be empty")
+	}
+}
+
+// TestSessionInit_PeerActivity_ExploredEntitiesFromHandoff verifies that
+// explored_entities from the peer's handoff payload appear in the peer entry.
+func TestSessionInit_PeerActivity_ExploredEntitiesFromHandoff(t *testing.T) {
+	srv, _, _ := newPopulatedServer(t)
+
+	insertHandoffMemory(t, srv, "explorer", srv.projectID,
+		`{"agent_summary":"Explored auth subsystem","explored_entities":["AuthHandler","TokenValidator","SessionStore"]}`)
+
+	res, err := srv.handleSessionInit(context.Background(), callTool(map[string]any{
+		"agent_id": "newcomer",
+		"scope":    "full",
+	}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+
+	text := extractText(t, res)
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	briefing, ok := resp["_briefing"].(map[string]interface{})
+	if !ok {
+		t.Fatal("_briefing missing")
+	}
+	pa, ok := briefing["peer_activity"].(map[string]interface{})
+	if !ok || pa == nil {
+		t.Fatal("peer_activity missing")
+	}
+	peers, _ := pa["peers"].([]interface{})
+	if len(peers) == 0 {
+		t.Fatal("peers must be non-empty")
+	}
+	peer, _ := peers[0].(map[string]interface{})
+	exploredEntities, ok := peer["explored_entities"].([]interface{})
+	if !ok || len(exploredEntities) == 0 {
+		t.Error("peer entry must include explored_entities from the handoff payload")
+	}
+}
+
 // TestSessionInit_PeerActivity_WithHypothesesOnly verifies that peer_activity
 // appears even when a peer has active hypotheses but no handoff memory.
 func TestSessionInit_PeerActivity_WithHypothesesOnly(t *testing.T) {

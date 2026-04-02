@@ -2495,6 +2495,38 @@ func TestGetPeerHandoffs_ProjectIsolation(t *testing.T) {
 	}
 }
 
+// TestGetPeerHandoffs_OldHandoffExcludedByWindow verifies that handoffs whose
+// created_at predates the windowHours cutoff are NOT returned.
+func TestGetPeerHandoffs_OldHandoffExcludedByWindow(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert a valid, unexpired memory but with a created_at that is 48 hours old —
+	// older than the 24h window. Use a direct INSERT so we can control the timestamp.
+	oldTime := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+	futureExpiry := time.Now().UTC().Add(90 * 24 * time.Hour).Format(time.RFC3339)
+	_, err := st.knowledgeDB.Exec(`
+		INSERT INTO memories (id, tier, content, entity_id, agent_id, task_id, tags,
+		                      created_at, expires_at, last_accessed_at, source, importance,
+		                      access_count, source_project)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"old-handoff-1", TierSessionLog,
+		`{"agent_summary":"old work"}`,
+		"", "agent-old", "", `["handoff","session_end","auto"]`,
+		oldTime, futureExpiry, oldTime, SourceAuto, "1.0", 0, "proj-window",
+	)
+	if err != nil {
+		t.Fatalf("direct INSERT old handoff: %v", err)
+	}
+
+	mems, err := st.GetPeerHandoffs("proj-window", "", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerHandoffs: %v", err)
+	}
+	if len(mems) != 0 {
+		t.Errorf("expected 0 handoffs (all too old for 24h window), got %d", len(mems))
+	}
+}
+
 // TestGetPeerHandoffs_EmptyExcludeReturnsAll verifies that an empty excludeAgentID
 // returns handoffs for all agents.
 func TestGetPeerHandoffs_EmptyExcludeReturnsAll(t *testing.T) {
