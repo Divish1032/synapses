@@ -170,7 +170,8 @@ func buildPackageWorkSummary(sess *sessionSummary, g *graph.Graph) []PackageWork
 	return result
 }
 
-// sessionCallEntry tracks per-connection tool call depth for RX1 auto-end detection.
+// sessionCallEntry tracks per-connection tool call depth for RX1 auto-end detection
+// and Sprint 24.7/24.8 memory-save nudging.
 // One entry exists per (sessionID + agentID) pair while the session is active.
 type sessionCallEntry struct {
 	agentID   string
@@ -182,6 +183,21 @@ type sessionCallEntry struct {
 	// autoLogged is set after the first auto-log fires, preventing re-trigger until
 	// the count resets (manual end_session or reconnect).
 	autoLogged bool
+
+	// Sprint 24.7: count-based memory save nudge.
+	// callsSinceLastSave counts tool calls since the last memory-save action.
+	// countNudgeSent prevents the count-based nudge from firing more than once
+	// per save cycle.
+	callsSinceLastSave int
+	countNudgeSent     bool
+
+	// Sprint 24.8: token-budget-based memory save nudge.
+	// cumulativeOutputTokens accumulates estimated token count of all Synapses
+	// tool responses in this session (responseBytes / 4 approximation).
+	// budgetNudgeSent prevents the budget nudge from firing more than once
+	// per save cycle.
+	cumulativeOutputTokens int
+	budgetNudgeSent        bool
 }
 
 // handleEndSession captures session knowledge and persists it as memories.
@@ -848,6 +864,174 @@ func (s *Server) clearAndGetStartTime(sessionID, agentID string) (time.Time, int
 }
 
 // ── end RX1 ────────────────────────────────────────────────────────────────
+
+// ── Sprint 24.7 / 24.8: memory save nudge ──────────────────────────────────
+
+// checkNudgeMessage accumulates response token estimates for the session and
+// returns a non-empty nudge message when the agent should be reminded to save
+// working state to memory.
+//
+// Strategy (in priority order):
+//  1. Token-budget nudge (preferred): when the model is known, fire once when
+//     cumulative Synapses output tokens reach TokenBudgetPct of the context
+//     window. Switches nudge strategy from count-based to budget-based.
+//  2. Count-based nudge (fallback): when the model is unknown, fire once when
+//     the agent has made NudgeThreshold tool calls without saving to memory.
+//
+// Either nudge fires at most once per save-cycle. The cycle resets when the
+// agent calls memory with a save-type action (see resetSaveCounter).
+//
+// Returns "" when no nudge should be emitted (threshold not reached, already
+// fired, or both features disabled via config).
+func (s *Server) checkNudgeMessage(sessionID, agentID, model string, responseTokens int) string {
+	nudgeThreshold := 0
+	budgetPct := 0.0
+	if s.config != nil {
+		nudgeThreshold = s.config.Session.NudgeThreshold
+		budgetPct = s.config.Session.TokenBudgetPct
+	}
+	bothDisabled := nudgeThreshold <= 0 && budgetPct <= 0
+	if bothDisabled || (sessionID == "" && agentID == "") {
+		return ""
+	}
+
+	key := sessionID + "::" + agentID
+
+	s.sessionCallsMu.Lock()
+	entry, ok := s.sessionCalls[key]
+	if !ok {
+		// Entry may not exist when AutoEndThresholdCalls is 0 (auto-end disabled).
+		// Create a minimal entry to track nudge state independently.
+		var startSeq int64
+		if s.store != nil {
+			if _, seq, err := s.store.GetEvents(0, nil, "", 0); err == nil {
+				startSeq = seq
+			}
+		}
+		entry = &sessionCallEntry{
+			agentID:   agentID,
+			startedAt: time.Now(),
+			startSeq:  startSeq,
+		}
+		s.sessionCalls[key] = entry
+	}
+
+	// Accumulate tokens regardless of nudge state (used for budget tracking).
+	entry.cumulativeOutputTokens += responseTokens
+	entry.callsSinceLastSave++
+
+	// ── Prefer token-budget nudge when model is known and window is resolved ──
+	if model != "" && budgetPct > 0 {
+		window := modelContextWindow(model)
+		if window > 0 {
+			// Window known: use token budget exclusively.
+			if !entry.budgetNudgeSent {
+				used := float64(entry.cumulativeOutputTokens) / float64(window) * 100
+				if used >= budgetPct {
+					entry.budgetNudgeSent = true
+					pct := int(used)
+					s.sessionCallsMu.Unlock()
+					return fmt.Sprintf(
+						"Context budget ~%d%% consumed by Synapses tool responses this session. "+
+							"Recommend calling memory(action=\"save\") to persist working state before context is lost.",
+						pct,
+					)
+				}
+			}
+			// Threshold not yet crossed (or already fired): no count-based nudge.
+			s.sessionCallsMu.Unlock()
+			return ""
+		}
+		// Window unknown (unrecognised model): fall through to count-based nudge.
+	}
+
+	// ── Fallback: count-based nudge when model unknown ─────────────────────
+	if nudgeThreshold > 0 && !entry.countNudgeSent && entry.callsSinceLastSave >= nudgeThreshold {
+		entry.countNudgeSent = true
+		calls := entry.callsSinceLastSave
+		s.sessionCallsMu.Unlock()
+		return fmt.Sprintf(
+			"You've made %d tool calls this session without saving to memory. "+
+				"Consider calling memory(action=\"save\") to protect findings against context loss.",
+			calls,
+		)
+	}
+
+	s.sessionCallsMu.Unlock()
+	return ""
+}
+
+// resetSaveCounter resets the per-session nudge counters after a memory save
+// action. This allows the nudge to fire again if the agent continues working
+// without saving for another full cycle.
+func (s *Server) resetSaveCounter(sessionID, agentID string) {
+	if sessionID == "" && agentID == "" {
+		return
+	}
+	key := sessionID + "::" + agentID
+	s.sessionCallsMu.Lock()
+	if entry, ok := s.sessionCalls[key]; ok {
+		entry.callsSinceLastSave = 0
+		entry.countNudgeSent = false
+		entry.budgetNudgeSent = false
+	}
+	s.sessionCallsMu.Unlock()
+}
+
+// modelContextWindow returns the context window size in tokens for a known
+// model name. Returns 0 for unrecognised models.
+func modelContextWindow(model string) int {
+	switch model {
+	// Claude 4 family
+	case "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5", "claude-haiku-4-5-20251001":
+		return 200000
+	// Claude 3 family
+	case "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229":
+		return 200000
+	// GPT-4 family
+	case "gpt-4o", "gpt-4o-mini":
+		return 128000
+	case "gpt-4-turbo":
+		return 128000
+	case "gpt-4":
+		return 8192
+	case "o1", "o3-mini":
+		return 200000
+	// Gemini
+	case "gemini-2.0-flash":
+		return 1000000
+	case "gemini-1.5-pro":
+		return 2000000
+	}
+	return 0
+}
+
+// injectNudgeIntoResult appends a memory_nudge field to the first TextContent
+// of result when nudgeMsg is non-empty. If Content[0] is valid JSON, the field
+// is added to the object. Otherwise the message is silently dropped to avoid
+// corrupting structured responses. Error results are never modified.
+func injectNudgeIntoResult(result *mcplib.CallToolResult, nudgeMsg string) {
+	if nudgeMsg == "" || result == nil || result.IsError || len(result.Content) == 0 {
+		return
+	}
+	tc, ok := result.Content[0].(mcplib.TextContent)
+	if !ok {
+		return
+	}
+	// Only inject into JSON object responses to avoid breaking plain-text handlers.
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(tc.Text), &obj); err != nil {
+		return
+	}
+	obj["memory_nudge"] = nudgeMsg
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return
+	}
+	result.Content[0] = mcplib.TextContent{Type: "text", Text: string(b)}
+}
+
+// ── end Sprint 24.7 / 24.8 ─────────────────────────────────────────────────
 
 // getRecentlyModifiedFiles returns files changed since the session started (from
 // watcher events). When sessionStart is zero the window defaults to 30 minutes.

@@ -394,6 +394,26 @@ type SessionConfig struct {
 	// Example: hibernate_window_secs: 7200   # 2-hour window
 	// Example: hibernate_window_secs: -1      # disable
 	HibernateWindowSecs int `json:"hibernate_window_secs,omitempty"`
+
+	// NudgeThreshold is the number of tool calls made without a memory save
+	// before Synapses includes a count-based memory save nudge in the next
+	// tool response. Used as a fallback when the agent model is unknown (no
+	// context window size available for token-budget tracking).
+	//
+	// Default: 0 (disabled). Set to a positive integer to enable.
+	// Recommended: 10 (fires after ~10 calls without saving).
+	// Example: nudge_threshold: 10
+	NudgeThreshold int `json:"nudge_threshold,omitempty"`
+
+	// TokenBudgetPct is the percentage of the agent's estimated context window
+	// that Synapses tool output must reach before a token-budget save nudge is
+	// injected into the next tool response. Preferred over count-based nudging
+	// when the agent model is known (declared via session_init model= param).
+	//
+	// Default: 0 (disabled). Set to a positive float to enable.
+	// Recommended: 60.0 (warn at 60% of context window consumed).
+	// Example: token_budget_pct: 60.0
+	TokenBudgetPct float64 `json:"token_budget_pct,omitempty"`
 }
 
 // HibernateConfig configures the project hibernation lifecycle.

@@ -781,29 +781,24 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		}
 
 		// Sprint 24.7 / 24.8: memory save nudge.
-		// Reset save counter when agent calls memory with a save-type action —
-		// this allows the nudge to fire again in the next work cycle.
-		if req.Params.Name == "memory" {
+		// isSaveAction is true when the tool call is a memory save-type action —
+		// used both to reset the nudge cycle and to skip nudge injection on the
+		// response that IS the save (avoid nudging the agent right as it saves).
+		isSaveAction := req.Params.Name == "memory" && func() bool {
 			action, _ := req.GetArguments()["action"].(string)
 			switch action {
 			case "save", "annotate", "annotate_web", "decide", "hypothesize", "abandon":
-				sessionID := SessionIDFromContext(ctx)
-				s.resetSaveCounter(sessionID, agentID)
+				return true
 			}
+			return false
+		}()
+		if isSaveAction {
+			sessionID := SessionIDFromContext(ctx)
+			s.resetSaveCounter(sessionID, agentID)
 		}
 		// Check token budget / call count and inject nudge into the response when
-		// the threshold is crossed. Skips end_session and memory saves to avoid
-		// nudging the agent right as it acts on the nudge.
-		skipNudge := req.Params.Name == "end_session" ||
-			(req.Params.Name == "memory" && func() bool {
-				action, _ := req.GetArguments()["action"].(string)
-				switch action {
-				case "save", "annotate", "annotate_web", "decide", "hypothesize", "abandon":
-					return true
-				}
-				return false
-			}())
-		if !skipNudge && agentID != "" && result != nil {
+		// the threshold is crossed. Skips end_session and memory saves.
+		if !isSaveAction && req.Params.Name != "end_session" && agentID != "" && result != nil {
 			sessionID := SessionIDFromContext(ctx)
 			model := s.getSessionModel(sessionID)
 			responseTokens := responseBytes / 4
