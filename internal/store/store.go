@@ -2139,6 +2139,14 @@ func (s *Store) PruneStaleData(ctx context.Context, retentionDays int) {
 	// Rows older than retention window have been analyzed and have no further value.
 	pruneExec(`DELETE FROM context_deliveries WHERE created_at < ?`, cutoffUnix)
 
+	// exploration_log: per-session entity exploration entries (Sprint 24.1 / 25.4).
+	// PruneExplorationLog was defined but never wired into the daily prune pass.
+	s.PruneExplorationLog(time.Duration(retentionDays) * 24 * time.Hour)
+
+	// work_ledger: cross-session work tracking entries (Sprint 24).
+	// PruneLedger was defined but never wired into the daily prune pass.
+	s.PruneLedger(time.Duration(retentionDays) * 24 * time.Hour)
+
 	// Cross-DB reconciliation for hard node_id references: annotations and quality_gaps
 	// in knowledgeDB reference node IDs from graphDB, but there is no cross-database
 	// transaction guaranteeing consistency (see the Store type comment for the full
