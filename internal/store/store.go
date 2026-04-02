@@ -970,6 +970,20 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_elog_session ON exploration_log(session_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_elog_entity  ON exploration_log(session_id, entity_queried) WHERE entity_queried != ''`,
+		// Sprint 24.4: Hypothesis tracking — mutable working theories with state machine.
+		// Distinct from episodes (append-only) because hypotheses change state over time.
+		`CREATE TABLE IF NOT EXISTS hypotheses (
+			id          TEXT PRIMARY KEY,
+			agent_id    TEXT NOT NULL,
+			project_id  TEXT NOT NULL DEFAULT '',
+			content     TEXT NOT NULL,
+			state       TEXT NOT NULL DEFAULT 'active',
+			evidence    TEXT NOT NULL DEFAULT '',
+			created_at  INTEGER NOT NULL,
+			updated_at  INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_hyp_agent   ON hypotheses(agent_id, project_id, state)`,
+		`CREATE INDEX IF NOT EXISTS idx_hyp_project ON hypotheses(project_id, state)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -295,6 +296,82 @@ func TestSynthesizeWorkSummary_ManyEntities(t *testing.T) {
 	result := synthesizeWorkSummary(entities, nil, nil)
 	if !strings.Contains(result, "+12 more") {
 		t.Errorf("expected overflow indicator, got: %s", result)
+	}
+}
+
+// ── Sprint 24.4: active_hypotheses in compaction recovery ────────────────────
+
+// TestBuildCompactionRecovery_IncludesActiveHypotheses verifies that ACTIVE
+// hypotheses are injected into the recovery packet, and that CONFIRMED /
+// REJECTED ones are excluded.
+func TestBuildCompactionRecovery_IncludesActiveHypotheses(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Bootstrap a session so we have a session ID.
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "hyp-agent",
+		"scope":    "standard",
+	}))
+	sessionID := srv.getSynapseSessionID(SessionIDFromContext(ctx))
+	if sessionID == "" {
+		t.Skip("no session ID resolved")
+	}
+
+	// Insert three hypotheses: two active, one rejected.
+	_, err := srv.store.InsertHypothesis(store.Hypothesis{
+		AgentID: "hyp-agent", ProjectID: srv.projectID,
+		Content: "the bug is in the cache invalidation logic",
+	})
+	if err != nil {
+		t.Fatalf("InsertHypothesis 1: %v", err)
+	}
+	_, err = srv.store.InsertHypothesis(store.Hypothesis{
+		AgentID: "hyp-agent", ProjectID: srv.projectID,
+		Content: "the leak is in the connection pool",
+	})
+	if err != nil {
+		t.Fatalf("InsertHypothesis 2: %v", err)
+	}
+	// Reject the third one — it should NOT appear in recovery.
+	id3, _ := srv.store.InsertHypothesis(store.Hypothesis{
+		AgentID: "hyp-agent", ProjectID: srv.projectID,
+		Content: "the issue is in the parser — REJECTED",
+	})
+	if _, err := srv.store.UpdateHypothesisState(id3, store.HypothesisStateRejected, "ruled out by profiler"); err != nil {
+		t.Fatalf("UpdateHypothesisState: %v", err)
+	}
+
+	recovery := srv.buildCompactionRecovery("hyp-agent", sessionID)
+	if recovery == nil {
+		t.Fatal("expected non-nil recovery packet")
+	}
+
+	raw, ok := recovery["active_hypotheses"]
+	if !ok {
+		t.Fatal("expected active_hypotheses in recovery packet")
+	}
+
+	// The compactHypothesis type is local to buildCompactionRecovery.
+	// Assert via JSON round-trip: marshal the raw slice, unmarshal to generic maps.
+	b, jsonErr := json.Marshal(raw)
+	if jsonErr != nil {
+		t.Fatalf("marshal active_hypotheses: %v", jsonErr)
+	}
+	var hyps []map[string]interface{}
+	if jsonErr := json.Unmarshal(b, &hyps); jsonErr != nil {
+		t.Fatalf("unmarshal active_hypotheses: %v", jsonErr)
+	}
+	if len(hyps) != 2 {
+		t.Errorf("expected 2 active hypotheses in recovery, got %d", len(hyps))
+	}
+	for _, h := range hyps {
+		if h["state"] != "active" {
+			t.Errorf("unexpected non-active hypothesis in recovery: %v", h)
+		}
+		// Rejected hypothesis must NOT appear.
+		if strings.Contains(h["content"].(string), "REJECTED") {
+			t.Error("rejected hypothesis must not appear in recovery packet")
+		}
 	}
 }
 

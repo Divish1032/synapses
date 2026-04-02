@@ -2114,11 +2114,13 @@ func (s *Server) registerTools() {
 					"action='annotate': attach a note to a graph entity. "+
 					"action='annotate_web': persist web research findings as an entity annotation. "+
 					"action='add_gap' / 'list_gaps': track and query quality gaps. "+
-					"action='history': entity change timeline.",
+					"action='history': entity change timeline. "+
+					"action='hypothesize': record a working theory (ACTIVE state); update with state=confirmed or state=rejected as evidence accumulates. Hypotheses survive compaction. "+
+					"action='list_hypotheses': retrieve current hypotheses, filtered by state.",
 			),
 			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history'."),
+				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history', 'hypothesize', 'list_hypotheses'."),
 			),
 			// action=save params
 			mcp.WithString("agent_id",
@@ -2221,6 +2223,23 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithString("entity",
 				mcp.Description("Entity name. Required for action=history."),
+			),
+			// action=hypothesize params (Sprint 24.4)
+			mcp.WithString("content",
+				mcp.Description("Working theory text (e.g. 'I think the bug is in X because Y'). Required when creating a new hypothesis."),
+			),
+			mcp.WithString("hypothesis_id",
+				mcp.Description("ID of an existing hypothesis to update. action=hypothesize (update path)."),
+			),
+			mcp.WithString("state",
+				mcp.Description("New hypothesis state: active, confirmed, rejected. action=hypothesize (update path)."),
+			),
+			mcp.WithString("evidence",
+				mcp.Description("Supporting or refuting evidence text. action=hypothesize."),
+			),
+			// action=list_hypotheses params (Sprint 24.4)
+			mcp.WithString("state_filter",
+				mcp.Description("Filter by state: active (default), confirmed, rejected, all. action=list_hypotheses."),
 			),
 		),
 		s.handleMemoryDispatch,

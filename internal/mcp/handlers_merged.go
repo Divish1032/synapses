@@ -119,7 +119,7 @@ func (s *Server) handleMemoryDispatch(
 ) (*mcp.CallToolResult, error) {
 	action, _ := req.GetArguments()["action"].(string)
 	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history)"), nil
+		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses)"), nil
 	}
 	switch action {
 	case "save":
@@ -139,9 +139,14 @@ func (s *Server) handleMemoryDispatch(
 		return s.handleGetGaps(ctx, req)
 	case "history":
 		return s.handleGetEntityHistory(ctx, req)
+	// Sprint 24.4: hypothesis tracking.
+	case "hypothesize":
+		return s.handleHypothesize(ctx, req)
+	case "list_hypotheses":
+		return s.handleListHypotheses(ctx, req)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf(
-			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history)", action)), nil
+			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses)", action)), nil
 	}
 }
 

@@ -2429,7 +2429,27 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 		recovery["relationship_map"] = relationships
 	}
 
-	// 9. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
+	// 9. Sprint 24.4: Active hypotheses — inject working theories that survived
+	// to recovery so the agent doesn't lose its in-progress reasoning thread.
+	// Only ACTIVE hypotheses matter; confirmed/rejected are already resolved.
+	if hyps, err := s.store.GetActiveHypotheses(agentID, s.projectID, 5); err == nil && len(hyps) > 0 {
+		type compactHypothesis struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+			State   string `json:"state"`
+		}
+		items := make([]compactHypothesis, 0, len(hyps))
+		for _, h := range hyps {
+			items = append(items, compactHypothesis{
+				ID:      h.ID,
+				Content: h.Content,
+				State:   h.State,
+			})
+		}
+		recovery["active_hypotheses"] = items
+	}
+
+	// 10. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
 	truncateCompactionPacket(recovery, 8000)
 
 	return recovery
