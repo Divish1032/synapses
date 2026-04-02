@@ -310,6 +310,139 @@ func TestSignal1_ReInit_Cooldown(t *testing.T) {
 	}
 }
 
+// ── Signal 2: re-exploration integration test ─────────────────────────────────
+
+// TestSignal2_ReExploration_InjectsRecovery verifies that when get_context or
+// search re-queries an entity already explored this session, the compaction
+// recovery packet is appended to the tool response as a content block.
+// This exercises the full ledgerWrapped → Signal 2 path end-to-end.
+func TestSignal2_ReExploration_InjectsRecovery(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Establish a session so ledgerWrapped can resolve sessionID from ctx.
+	_, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "signal2-agent",
+		"scope":    "standard",
+	}))
+	if err != nil {
+		t.Fatalf("session_init: %v", err)
+	}
+
+	// Get the registered session ID (ctx → "stdio" → sessionID).
+	sessionID := srv.getSynapseSessionID(synapseSessionKey(""))
+	if sessionID == "" {
+		t.Skip("no session ID resolved — session_init did not register a session")
+	}
+
+	// Prime the explored cache to simulate prior exploration of "AuthLogin".
+	// This models the agent having called get_context("AuthLogin") earlier.
+	srv.getCompactDetectState(sessionID).markExplored("AuthLogin")
+
+	// Now call search with the same query — Signal 2 should fire and inject recovery.
+	result, err := srv.DispatchTool(ctx, "search", map[string]interface{}{
+		"query": "AuthLogin",
+	})
+	if err != nil {
+		t.Fatalf("DispatchTool search: %v", err)
+	}
+	if result == nil {
+		t.Fatal("nil result from search")
+	}
+
+	// Verify compaction recovery was appended as a separate content block.
+	found := false
+	for _, c := range result.Content {
+		tc, ok := c.(mcp.TextContent)
+		if !ok {
+			continue
+		}
+		if strings.Contains(tc.Text, "re-exploration") && strings.Contains(tc.Text, "Compaction Recovery") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected compaction recovery block with signal 're-exploration' in result, got %d content blocks: %v",
+			len(result.Content), result.Content)
+	}
+}
+
+// TestSignal2_FirstExploration_NoRecovery verifies that the FIRST call to
+// get_context or search for an entity does NOT trigger recovery injection
+// (agent is discovering, not re-discovering after compaction).
+func TestSignal2_FirstExploration_NoRecovery(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Establish session.
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "signal2-fresh"}))
+
+	// Search for an entity that has never been explored in this session.
+	result, err := srv.DispatchTool(ctx, "search", map[string]interface{}{
+		"query": "NeverSeenBefore",
+	})
+	if err != nil {
+		t.Fatalf("DispatchTool search: %v", err)
+	}
+	if result == nil {
+		t.Fatal("nil result")
+	}
+
+	// No recovery block should appear on first exploration.
+	for _, c := range result.Content {
+		tc, ok := c.(mcp.TextContent)
+		if !ok {
+			continue
+		}
+		if strings.Contains(tc.Text, "Compaction Recovery") {
+			t.Error("unexpected compaction recovery on first exploration of entity")
+		}
+	}
+}
+
+// TestSignal2_ReExploration_CooldownPreventsRepeat verifies that Signal 2 fires
+// at most once within the cooldown window. After the first injection, subsequent
+// re-exploration of other entities does NOT trigger another injection.
+func TestSignal2_ReExploration_CooldownPreventsRepeat(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "signal2-cool"}))
+	sessionID := srv.getSynapseSessionID(synapseSessionKey(""))
+	if sessionID == "" {
+		t.Skip("no session ID")
+	}
+
+	cs := srv.getCompactDetectState(sessionID)
+	cs.markExplored("EntityA")
+	cs.markExplored("EntityB")
+
+	// First re-exploration of EntityA — fires Signal 2, marks injected.
+	result1, err := srv.DispatchTool(ctx, "search", map[string]interface{}{"query": "EntityA"})
+	if err != nil {
+		t.Fatalf("first DispatchTool: %v", err)
+	}
+	recovery1Found := false
+	for _, c := range result1.Content {
+		if tc, ok := c.(mcp.TextContent); ok && strings.Contains(tc.Text, "Compaction Recovery") {
+			recovery1Found = true
+			break
+		}
+	}
+	if !recovery1Found {
+		t.Error("expected Signal 2 to fire on first re-exploration of EntityA")
+	}
+
+	// Second re-exploration of EntityB — within cooldown, should NOT inject again.
+	result2, err := srv.DispatchTool(ctx, "search", map[string]interface{}{"query": "EntityB"})
+	if err != nil {
+		t.Fatalf("second DispatchTool: %v", err)
+	}
+	for _, c := range result2.Content {
+		if tc, ok := c.(mcp.TextContent); ok && strings.Contains(tc.Text, "Compaction Recovery") {
+			t.Error("unexpected compaction recovery on second re-exploration within cooldown")
+		}
+	}
+}
+
 // TestSignal1_ExplicitCompactionMode_NoDoubleInject verifies that when the
 // agent explicitly passes scope="compaction", Signal 1 is skipped to avoid
 // double-injecting the recovery packet.
