@@ -821,6 +821,64 @@ func (s *Server) handleUpdateSpecItem(
 	})
 }
 
+// handleSetTrackedFiles registers file paths that are expected to be modified
+// as part of completing a task. validate(phase=post) compares the files_written
+// list against these tracked files and warns when any remain unmodified,
+// preventing "completion illusion" where agents mark a task done without touching
+// all identified files.
+//
+// action=set_tracked_files requires: task_id, files (JSON array of paths).
+// The list is idempotent — calling again replaces the previous list entirely.
+func (s *Server) handleSetTrackedFiles(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
+	}
+
+	taskID := stringArg(req, "task_id")
+	if taskID == "" {
+		return mcp.NewToolResultError("task_id is required (use tasks(action=pending) to list task IDs)"), nil
+	}
+
+	// Accept files as a native JSON array or as a JSON-encoded string.
+	var files []string
+	switch v := req.GetArguments()["files"].(type) {
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				files = append(files, s)
+			}
+		}
+	case string:
+		if v != "" {
+			if err := json.Unmarshal([]byte(v), &files); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid files JSON: %v", stripInternalPaths(err.Error()))), nil
+			}
+		}
+	default:
+		return mcp.NewToolResultError("files is required (JSON array of file paths, e.g. [\"internal/auth/handler.go\", \"internal/auth/service.go\"])"), nil
+	}
+	if len(files) == 0 {
+		return mcp.NewToolResultError("files must contain at least one file path"), nil
+	}
+
+	if err := s.store.SetTrackedFiles(taskID, files); err != nil {
+		return toolError("set tracked files", err)
+	}
+
+	return jsonResult(map[string]interface{}{
+		"task_id":       taskID,
+		"tracked_files": files,
+		"count":         len(files),
+		"message": fmt.Sprintf(
+			"%d file(s) registered as needing changes. validate(phase=post, task_id=%s, files_written=[...]) will warn if any remain unmodified when you complete the task.",
+			len(files), taskID,
+		),
+	})
+}
+
 // entityWithPath returns "name@dir/file" for disambiguation when the same
 // function name exists in multiple packages. Uses the last two path components.
 // Example: "Health@internal/api/server.go" → unambiguous across packages.

@@ -1018,6 +1018,10 @@ func Open(path string) (*Store, error) {
 		// Sprint 25.1: Spec coverage tracking — per-task specification checklist.
 		// JSON array of {id, label, done} items. Default '[]' = no spec items (existing tasks unaffected).
 		`ALTER TABLE tasks ADD COLUMN spec_items TEXT NOT NULL DEFAULT '[]'`,
+		// Sprint 25.2: Multi-file change tracking — file paths expected to be modified.
+		// JSON array of strings. Default '[]' = no tracked files. Registered via
+		// tasks(action=set_tracked_files); checked by validate(phase=post).
+		`ALTER TABLE tasks ADD COLUMN tracked_files TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

@@ -703,6 +703,42 @@ func (s *Server) handleVerifyImplementation(
 				}
 			}
 
+			// Multi-file change tracking (Sprint 25.2): warn when tracked files are
+			// absent from the files_written list. Uses base name matching as a fallback
+			// so that "internal/auth/handler.go" matches "handler.go" in files_written.
+			if len(task.TrackedFiles) > 0 {
+				// Build a set of all written paths AND their base names for loose matching.
+				writtenSet := make(map[string]struct{}, len(files)*2)
+				for _, f := range files {
+					writtenSet[f] = struct{}{}
+					writtenSet[filepath.Base(f)] = struct{}{}
+				}
+				var unmodified []string
+				for _, tf := range task.TrackedFiles {
+					_, byFull := writtenSet[tf]
+					_, byBase := writtenSet[filepath.Base(tf)]
+					if !byFull && !byBase {
+						unmodified = append(unmodified, tf)
+					}
+				}
+				total := len(task.TrackedFiles)
+				modifiedCount := total - len(unmodified)
+				tv["file_tracking"] = map[string]interface{}{
+					"total_tracked":    total,
+					"modified_count":   modifiedCount,
+					"unmodified_count": len(unmodified),
+					"complete":         len(unmodified) == 0,
+				}
+				if len(unmodified) > 0 {
+					tv["file_tracking_warning"] = fmt.Sprintf(
+						"%d of %d tracked files have not been modified in this validate call: %s. "+
+							"These files were identified as needing changes for this task. "+
+							"Ensure they are updated before marking the task complete.",
+						len(unmodified), total, strings.Join(unmodified, ", "),
+					)
+				}
+			}
+
 			taskVerification = tv
 		}
 	}

@@ -54,6 +54,12 @@ type Task struct {
 	// Stored as JSON in tasks.spec_items. Marked individually via
 	// tasks(action=update_spec_item). validate(phase=post) checks coverage.
 	SpecItems []SpecItem `json:"spec_items,omitempty"`
+	// Sprint 25.2: Multi-file change tracking — file paths identified as needing
+	// changes for this task. Stored as JSON in tasks.tracked_files. Registered via
+	// tasks(action=set_tracked_files). validate(phase=post) warns when registered
+	// files are absent from the files_written list, preventing "completion illusion"
+	// where agents mark a task done without modifying all identified files.
+	TrackedFiles []string `json:"tracked_files,omitempty"`
 	// R21: Commit tracking — populated when git is available in the project root.
 	// StartCommit is the HEAD SHA captured when the task was set to in_progress.
 	// CommitsSinceStart is the git log since StartCommit, captured at done time.
@@ -69,12 +75,13 @@ type Task struct {
 
 // TaskInput is used when creating a batch of tasks inside CreatePlan.
 type TaskInput struct {
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Priority    string     `json:"priority"`
-	LinkedNodes []string   `json:"linked_nodes"`
-	DependsOn   []string   `json:"depends_on"`  // task IDs that must be done before this task
-	SpecItems   []SpecItem `json:"spec_items"`  // optional specification checklist
+	Title        string     `json:"title"`
+	Description  string     `json:"description"`
+	Priority     string     `json:"priority"`
+	LinkedNodes  []string   `json:"linked_nodes"`
+	DependsOn    []string   `json:"depends_on"`     // task IDs that must be done before this task
+	SpecItems    []SpecItem `json:"spec_items"`     // optional specification checklist
+	TrackedFiles []string   `json:"tracked_files"` // optional files expected to be modified
 }
 
 // UnmarshalJSON allows `priority` to be either a string ("p0", "p1") or a number (0, 1, 2).
@@ -152,10 +159,15 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 		// Ensure each spec item has an ID before persisting.
 		items := assignSpecItemIDs(t.SpecItems)
 		specJSON, _ := json.Marshal(items)
+		trackedFiles := t.TrackedFiles
+		if trackedFiles == nil {
+			trackedFiles = []string{}
+		}
+		trackedJSON, _ := json.Marshal(trackedFiles)
 		_, txErr = tx.Exec(
-			`INSERT INTO tasks (id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes, spec_items, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', ?, ?, ?)`,
-			taskID, planID, t.Title, t.Description, priority, string(linked), string(deps), string(specJSON), now, now,
+			`INSERT INTO tasks (id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes, spec_items, tracked_files, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', ?, ?, ?, ?)`,
+			taskID, planID, t.Title, t.Description, priority, string(linked), string(deps), string(specJSON), string(trackedJSON), now, now,
 		)
 		if txErr != nil {
 			return "", nil, fmt.Errorf("insert task %q: %w", t.Title, txErr)
@@ -176,7 +188,7 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	query := `
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items, tracked_files
 		FROM tasks
 		WHERE status IN ('pending', 'in_progress')
 	`
@@ -272,7 +284,7 @@ func (s *Store) FindTasksByNodeID(nodeID string, limit int) ([]Task, error) {
 	pattern := `%"` + escapeLike(nodeID) + `"%`
 	rows, err := s.knowledgeDB.Query(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items, tracked_files
 		FROM tasks
 		WHERE linked_nodes LIKE ? ESCAPE '\'
 		ORDER BY updated_at DESC
@@ -518,20 +530,47 @@ func (s *Store) SetTaskCommits(taskID string, commits []string) error {
 	return err
 }
 
+// SetTrackedFiles replaces the tracked_files list for a task. Call with the
+// full desired set; the previous list is overwritten. Used by
+// tasks(action=set_tracked_files) when the agent identifies files that are
+// expected to be modified as part of completing a task.
+// validate(phase=post) compares files_written against this list to warn when
+// expected files haven't been touched.
+func (s *Store) SetTrackedFiles(taskID string, files []string) error {
+	if taskID == "" {
+		return fmt.Errorf("task_id must not be empty")
+	}
+	if files == nil {
+		files = []string{}
+	}
+	raw, _ := json.Marshal(files)
+	res, err := s.knowledgeDB.Exec(
+		`UPDATE tasks SET tracked_files = ?, updated_at = ? WHERE id = ?`,
+		string(raw), time.Now().UTC().Format(time.RFC3339), taskID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %q not found", taskID)
+	}
+	return nil
+}
+
 // GetTask retrieves a single task by ID. Returns an error wrapping sql.ErrNoRows if not found.
 func (s *Store) GetTask(id string) (*Task, error) {
 	row := s.knowledgeDB.QueryRow(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items, tracked_files
 		FROM tasks WHERE id = ?`, id)
 	var t Task
-	var linkedJSON, depsJSON, commitsJSON, specJSON string
+	var linkedJSON, depsJSON, commitsJSON, specJSON, trackedJSON string
 	if err := row.Scan(
 		&t.ID, &t.PlanID, &t.Title, &t.Description,
 		&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 		&t.AssignedTo, &t.LastUpdatedBy,
 		&t.CreatedAt, &t.UpdatedAt,
-		&t.StartCommit, &commitsJSON, &specJSON,
+		&t.StartCommit, &commitsJSON, &specJSON, &trackedJSON,
 	); err != nil {
 		return nil, fmt.Errorf("get task %q: %w", id, err)
 	}
@@ -553,6 +592,11 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	if specJSON != "" && specJSON != "[]" && specJSON != "null" {
 		if err := json.Unmarshal([]byte(specJSON), &t.SpecItems); err != nil {
 			logutil.Debug("synapses: tasks: unmarshal spec_items for task %q: %v\n", t.ID, err)
+		}
+	}
+	if trackedJSON != "" && trackedJSON != "[]" && trackedJSON != "null" {
+		if err := json.Unmarshal([]byte(trackedJSON), &t.TrackedFiles); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal tracked_files for task %q: %v\n", t.ID, err)
 		}
 	}
 	return &t, nil
@@ -632,18 +676,18 @@ func (s *Store) GetPlans() ([]PlanSummary, error) {
 //
 //	id, plan_id, title, description, status, priority, linked_nodes, depends_on,
 //	notes, assigned_to, last_updated_by, created_at, updated_at, start_commit,
-//	commits, spec_items
+//	commits, spec_items, tracked_files
 func scanTasks(rows *sql.Rows) ([]Task, error) {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		var linkedJSON, depsJSON, commitsJSON, specJSON string
+		var linkedJSON, depsJSON, commitsJSON, specJSON, trackedJSON string
 		if err := rows.Scan(
 			&t.ID, &t.PlanID, &t.Title, &t.Description,
 			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 			&t.AssignedTo, &t.LastUpdatedBy,
 			&t.CreatedAt, &t.UpdatedAt,
-			&t.StartCommit, &commitsJSON, &specJSON,
+			&t.StartCommit, &commitsJSON, &specJSON, &trackedJSON,
 		); err != nil {
 			return nil, err
 		}
@@ -665,6 +709,11 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 		if specJSON != "" && specJSON != "[]" && specJSON != "null" {
 			if err := json.Unmarshal([]byte(specJSON), &t.SpecItems); err != nil {
 				logutil.Debug("synapses: tasks: unmarshal spec_items for task %q: %v\n", t.ID, err)
+			}
+		}
+		if trackedJSON != "" && trackedJSON != "[]" && trackedJSON != "null" {
+			if err := json.Unmarshal([]byte(trackedJSON), &t.TrackedFiles); err != nil {
+				logutil.Debug("synapses: tasks: unmarshal tracked_files for task %q: %v\n", t.ID, err)
 			}
 		}
 		tasks = append(tasks, t)

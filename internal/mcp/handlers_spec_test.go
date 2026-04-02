@@ -341,6 +341,259 @@ func TestHandleTasksDispatch_UnknownAction(t *testing.T) {
 	}
 }
 
+// ── handleSetTrackedFiles ──────────────────────────────────────────────────────
+
+func TestHandleSetTrackedFiles_NoStore(t *testing.T) {
+	s := New(nil, nil, nil)
+	res, err := s.handleSetTrackedFiles(ctx, callTool(map[string]any{
+		"task_id": "task-1",
+		"files":   []any{"a.go"},
+	}))
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected tool error for nil store")
+	}
+}
+
+func TestHandleSetTrackedFiles_MissingTaskID(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	res, err := s.handleSetTrackedFiles(ctx, callTool(map[string]any{
+		"files": []any{"handler.go"},
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected tool error for missing task_id")
+	}
+}
+
+func TestHandleSetTrackedFiles_MissingFiles(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	res, err := s.handleSetTrackedFiles(ctx, callTool(map[string]any{
+		"task_id": "task-1",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.IsError {
+		t.Error("expected tool error for missing files")
+	}
+}
+
+func TestHandleSetTrackedFiles_Success(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	_, taskIDs, _ := st.CreatePlan("tracked plan", "", "", []store.TaskInput{
+		{Title: "Multi-file task"},
+	})
+	taskID := taskIDs[0]
+
+	res, err := s.handleSetTrackedFiles(ctx, callTool(map[string]any{
+		"task_id": taskID,
+		"files":   []any{"internal/auth/handler.go", "internal/auth/service.go"},
+	}))
+	m := mustResult(t, res, err)
+	if m["count"] != float64(2) {
+		t.Errorf("expected count=2, got %v", m["count"])
+	}
+	if m["task_id"] != taskID {
+		t.Errorf("expected task_id=%q, got %v", taskID, m["task_id"])
+	}
+
+	// Verify store was updated.
+	task, _ := st.GetTask(taskID)
+	if len(task.TrackedFiles) != 2 {
+		t.Fatalf("expected 2 tracked files in store, got %d", len(task.TrackedFiles))
+	}
+}
+
+func TestHandleSetTrackedFiles_JSONStringFiles(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	_, taskIDs, _ := st.CreatePlan("json string plan", "", "", []store.TaskInput{
+		{Title: "Task"},
+	})
+	taskID := taskIDs[0]
+
+	filesJSON, _ := json.Marshal([]string{"foo.go", "bar.go"})
+	res, err := s.handleSetTrackedFiles(ctx, callTool(map[string]any{
+		"task_id": taskID,
+		"files":   string(filesJSON),
+	}))
+	m := mustResult(t, res, err)
+	if m["count"] != float64(2) {
+		t.Errorf("expected count=2, got %v", m["count"])
+	}
+}
+
+func TestHandleTasksDispatch_SetTrackedFiles(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, _ := config.Load(t.TempDir())
+	s := New(g, cfg, st)
+
+	_, taskIDs, _ := st.CreatePlan("dispatch tracked plan", "", "", []store.TaskInput{
+		{Title: "Task"},
+	})
+	taskID := taskIDs[0]
+
+	res, err := s.handleTasksDispatch(ctx, callTool(map[string]any{
+		"action":  "set_tracked_files",
+		"task_id": taskID,
+		"files":   []any{"main.go"},
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("unexpected tool error: %v", res.Content)
+	}
+}
+
+// ── handleVerifyImplementation — file tracking ────────────────────────────────
+
+func TestHandleVerifyImplementation_FileTracking_SomeUnmodified(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	_, taskIDs, _ := s.store.CreatePlan("file tracking plan", "", "", []store.TaskInput{
+		{Title: "Multi-file task"},
+	})
+	taskID := taskIDs[0]
+	_ = s.store.SetTrackedFiles(taskID, []string{"internal/auth/handler.go", "internal/auth/service.go"})
+
+	// Only write one of the two tracked files.
+	filesWritten, _ := json.Marshal([]string{"internal/auth/handler.go"})
+	res1, err1 := s.handleVerifyImplementation(ctx, callTool(map[string]any{
+		"files_written": string(filesWritten),
+		"task_id":       taskID,
+	}))
+	m := mustResult(t, res1, err1)
+
+	tv, ok := m["task_verification"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected task_verification in response, got %T", m["task_verification"])
+	}
+
+	ft, ok := tv["file_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected file_tracking in task_verification, got %T", tv["file_tracking"])
+	}
+	if ft["total_tracked"] != float64(2) {
+		t.Errorf("expected total_tracked=2, got %v", ft["total_tracked"])
+	}
+	if ft["unmodified_count"] != float64(1) {
+		t.Errorf("expected unmodified_count=1, got %v", ft["unmodified_count"])
+	}
+	if ft["complete"] != false {
+		t.Error("expected complete=false when files remain unmodified")
+	}
+
+	if _, hasWarn := tv["file_tracking_warning"]; !hasWarn {
+		t.Error("expected file_tracking_warning when tracked files are unmodified")
+	}
+}
+
+func TestHandleVerifyImplementation_FileTracking_AllModified(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	_, taskIDs, _ := s.store.CreatePlan("all modified plan", "", "", []store.TaskInput{
+		{Title: "Task"},
+	})
+	taskID := taskIDs[0]
+	_ = s.store.SetTrackedFiles(taskID, []string{"internal/auth/handler.go", "internal/auth/service.go"})
+
+	// Write both tracked files.
+	filesWritten, _ := json.Marshal([]string{"internal/auth/handler.go", "internal/auth/service.go"})
+	res2, err2 := s.handleVerifyImplementation(ctx, callTool(map[string]any{
+		"files_written": string(filesWritten),
+		"task_id":       taskID,
+	}))
+	m := mustResult(t, res2, err2)
+
+	tv, _ := m["task_verification"].(map[string]any)
+	ft, ok := tv["file_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected file_tracking in task_verification")
+	}
+	if ft["complete"] != true {
+		t.Error("expected complete=true when all tracked files are modified")
+	}
+	if _, hasWarn := tv["file_tracking_warning"]; hasWarn {
+		t.Error("unexpected file_tracking_warning when all files are modified")
+	}
+}
+
+func TestHandleVerifyImplementation_FileTracking_BaseNameMatch(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	_, taskIDs, _ := s.store.CreatePlan("base name plan", "", "", []store.TaskInput{
+		{Title: "Task"},
+	})
+	taskID := taskIDs[0]
+	// Tracked with full path.
+	_ = s.store.SetTrackedFiles(taskID, []string{"internal/auth/handler.go"})
+
+	// Written with just base name — should match via base name fallback.
+	filesWritten, _ := json.Marshal([]string{"handler.go"})
+	res3, err3 := s.handleVerifyImplementation(ctx, callTool(map[string]any{
+		"files_written": string(filesWritten),
+		"task_id":       taskID,
+	}))
+	m := mustResult(t, res3, err3)
+
+	tv, _ := m["task_verification"].(map[string]any)
+	ft, ok := tv["file_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected file_tracking in task_verification")
+	}
+	if ft["complete"] != true {
+		t.Errorf("expected complete=true via base name match, got %v", ft["complete"])
+	}
+}
+
+func TestHandleVerifyImplementation_FileTracking_NoTrackedFiles(t *testing.T) {
+	s, _, _ := newPopulatedServer(t)
+
+	// Task with no tracked files — file_tracking key should be absent.
+	_, taskIDs, _ := s.store.CreatePlan("no tracking plan", "", "", []store.TaskInput{
+		{Title: "Plain task"},
+	})
+	taskID := taskIDs[0]
+
+	filesWritten, _ := json.Marshal([]string{"some.go"})
+	res4, err4 := s.handleVerifyImplementation(ctx, callTool(map[string]any{
+		"files_written": string(filesWritten),
+		"task_id":       taskID,
+	}))
+	m := mustResult(t, res4, err4)
+
+	tv, ok := m["task_verification"].(map[string]any)
+	if !ok {
+		// No task_verification at all is fine (graph may not have the file).
+		return
+	}
+	if _, hasTracking := tv["file_tracking"]; hasTracking {
+		t.Error("expected no file_tracking when task has no tracked files")
+	}
+}
+
 // ── create_plan with spec_items via MCP ──────────────────────────────────────
 
 func TestHandleCreatePlan_WithSpecItems_ViaJSON(t *testing.T) {
