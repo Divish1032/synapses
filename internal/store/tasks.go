@@ -26,6 +26,16 @@ type Plan struct {
 	CompletedAt int64 `json:"completed_at,omitempty"`
 }
 
+// SpecItem is a named specification sub-item within a task. Agents create
+// spec items at plan time and mark them individually as work progresses.
+// validate(phase=post) warns when items remain incomplete at task completion,
+// preventing the "completion illusion" (declaring done at 30-40% progress).
+type SpecItem struct {
+	ID    string `json:"id"`    // unique slug within the task (auto-generated if empty)
+	Label string `json:"label"` // human-readable description: "Add OAuth handler"
+	Done  bool   `json:"done"`  // true when this sub-item has been completed
+}
+
 // Task is a single actionable work item belonging to a plan.
 // Status flows: pending → in_progress → done (or cancelled).
 type Task struct {
@@ -40,6 +50,10 @@ type Task struct {
 	Notes         string   `json:"notes"`        // append-only notes from each session
 	AssignedTo    string   `json:"assigned_to,omitempty"`
 	LastUpdatedBy string   `json:"last_updated_by,omitempty"`
+	// Sprint 25.1: Spec coverage — named sub-items within a task.
+	// Stored as JSON in tasks.spec_items. Marked individually via
+	// tasks(action=update_spec_item). validate(phase=post) checks coverage.
+	SpecItems []SpecItem `json:"spec_items,omitempty"`
 	// R21: Commit tracking — populated when git is available in the project root.
 	// StartCommit is the HEAD SHA captured when the task was set to in_progress.
 	// CommitsSinceStart is the git log since StartCommit, captured at done time.
@@ -55,11 +69,12 @@ type Task struct {
 
 // TaskInput is used when creating a batch of tasks inside CreatePlan.
 type TaskInput struct {
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Priority    string   `json:"priority"`
-	LinkedNodes []string `json:"linked_nodes"`
-	DependsOn   []string `json:"depends_on"` // task IDs that must be done before this task
+	Title       string     `json:"title"`
+	Description string     `json:"description"`
+	Priority    string     `json:"priority"`
+	LinkedNodes []string   `json:"linked_nodes"`
+	DependsOn   []string   `json:"depends_on"`  // task IDs that must be done before this task
+	SpecItems   []SpecItem `json:"spec_items"`  // optional specification checklist
 }
 
 // UnmarshalJSON allows `priority` to be either a string ("p0", "p1") or a number (0, 1, 2).
@@ -134,10 +149,13 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 		}
 		linked, _ := json.Marshal(t.LinkedNodes)
 		deps, _ := json.Marshal(t.DependsOn)
+		// Ensure each spec item has an ID before persisting.
+		items := assignSpecItemIDs(t.SpecItems)
+		specJSON, _ := json.Marshal(items)
 		_, txErr = tx.Exec(
-			`INSERT INTO tasks (id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', ?, ?)`,
-			taskID, planID, t.Title, t.Description, priority, string(linked), string(deps), now, now,
+			`INSERT INTO tasks (id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes, spec_items, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', ?, ?, ?)`,
+			taskID, planID, t.Title, t.Description, priority, string(linked), string(deps), string(specJSON), now, now,
 		)
 		if txErr != nil {
 			return "", nil, fmt.Errorf("insert task %q: %w", t.Title, txErr)
@@ -158,7 +176,7 @@ func (s *Store) CreatePlan(title, description, agentID string, tasks []TaskInput
 func (s *Store) GetPendingTasks(planID, agentID string) ([]Task, error) {
 	query := `
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items
 		FROM tasks
 		WHERE status IN ('pending', 'in_progress')
 	`
@@ -254,7 +272,7 @@ func (s *Store) FindTasksByNodeID(nodeID string, limit int) ([]Task, error) {
 	pattern := `%"` + escapeLike(nodeID) + `"%`
 	rows, err := s.knowledgeDB.Query(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items
 		FROM tasks
 		WHERE linked_nodes LIKE ? ESCAPE '\'
 		ORDER BY updated_at DESC
@@ -263,38 +281,7 @@ func (s *Store) FindTasksByNodeID(nodeID string, limit int) ([]Task, error) {
 		return nil, fmt.Errorf("find tasks by node: %w", err)
 	}
 	defer rows.Close()
-
-	var tasks []Task
-	for rows.Next() {
-		var t Task
-		var linkedJSON, depsJSON, commitsJSON string
-		if err := rows.Scan(
-			&t.ID, &t.PlanID, &t.Title, &t.Description,
-			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
-			&t.AssignedTo, &t.LastUpdatedBy,
-			&t.CreatedAt, &t.UpdatedAt,
-			&t.StartCommit, &commitsJSON,
-		); err != nil {
-			return nil, fmt.Errorf("scan task by node: %w", err)
-		}
-		if err := json.Unmarshal([]byte(linkedJSON), &t.LinkedNodes); err != nil {
-			logutil.Debug("synapses: tasks: unmarshal linked_nodes for task %q: %v\n", t.ID, err)
-		}
-		if t.LinkedNodes == nil {
-			t.LinkedNodes = []string{}
-		}
-		if err := json.Unmarshal([]byte(depsJSON), &t.DependsOn); err != nil {
-			logutil.Debug("synapses: tasks: unmarshal depends_on for task %q: %v\n", t.ID, err)
-		}
-		if t.DependsOn == nil {
-			t.DependsOn = []string{}
-		}
-		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
-			logutil.Debug("synapses: tasks: unmarshal commits for task %q: %v\n", t.ID, err)
-		}
-		tasks = append(tasks, t)
-	}
-	return tasks, rows.Err()
+	return scanTasks(rows)
 }
 
 // UpdateLinkedNodes replaces the linked_nodes for a task with nodeIDs.
@@ -535,16 +522,16 @@ func (s *Store) SetTaskCommits(taskID string, commits []string) error {
 func (s *Store) GetTask(id string) (*Task, error) {
 	row := s.knowledgeDB.QueryRow(`
 		SELECT id, plan_id, title, description, status, priority, linked_nodes, depends_on, notes,
-		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits
+		       assigned_to, last_updated_by, created_at, updated_at, start_commit, commits, spec_items
 		FROM tasks WHERE id = ?`, id)
 	var t Task
-	var linkedJSON, depsJSON, commitsJSON string
+	var linkedJSON, depsJSON, commitsJSON, specJSON string
 	if err := row.Scan(
 		&t.ID, &t.PlanID, &t.Title, &t.Description,
 		&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 		&t.AssignedTo, &t.LastUpdatedBy,
 		&t.CreatedAt, &t.UpdatedAt,
-		&t.StartCommit, &commitsJSON,
+		&t.StartCommit, &commitsJSON, &specJSON,
 	); err != nil {
 		return nil, fmt.Errorf("get task %q: %w", id, err)
 	}
@@ -562,6 +549,11 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	}
 	if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
 		logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
+	}
+	if specJSON != "" && specJSON != "null" {
+		if err := json.Unmarshal([]byte(specJSON), &t.SpecItems); err != nil {
+			logutil.Debug("synapses: tasks: unmarshal spec_items for task %q: %v\n", t.ID, err)
+		}
 	}
 	return &t, nil
 }
@@ -636,17 +628,22 @@ func (s *Store) GetPlans() ([]PlanSummary, error) {
 }
 
 // scanTasks reads task rows into a slice.
+// Rows must select columns in this order:
+//
+//	id, plan_id, title, description, status, priority, linked_nodes, depends_on,
+//	notes, assigned_to, last_updated_by, created_at, updated_at, start_commit,
+//	commits, spec_items
 func scanTasks(rows *sql.Rows) ([]Task, error) {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		var linkedJSON, depsJSON, commitsJSON string
+		var linkedJSON, depsJSON, commitsJSON, specJSON string
 		if err := rows.Scan(
 			&t.ID, &t.PlanID, &t.Title, &t.Description,
 			&t.Status, &t.Priority, &linkedJSON, &depsJSON, &t.Notes,
 			&t.AssignedTo, &t.LastUpdatedBy,
 			&t.CreatedAt, &t.UpdatedAt,
-			&t.StartCommit, &commitsJSON,
+			&t.StartCommit, &commitsJSON, &specJSON,
 		); err != nil {
 			return nil, err
 		}
@@ -665,9 +662,79 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 		if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
 			logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
 		}
+		if specJSON != "" && specJSON != "[]" && specJSON != "null" {
+			if err := json.Unmarshal([]byte(specJSON), &t.SpecItems); err != nil {
+				logutil.Debug("synapses: tasks: unmarshal spec_items for task %q: %v\n", t.ID, err)
+			}
+		}
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
+}
+
+// assignSpecItemIDs returns a copy of items where any item with an empty ID
+// gets a freshly generated one. This ensures every spec item is addressable
+// even when the caller (LLM) omits explicit IDs.
+func assignSpecItemIDs(items []SpecItem) []SpecItem {
+	if len(items) == 0 {
+		return items
+	}
+	out := make([]SpecItem, len(items))
+	copy(out, items)
+	for i := range out {
+		if out[i].ID == "" {
+			out[i].ID = newID()
+		}
+	}
+	return out
+}
+
+// UpdateSpecItem marks a single spec item within a task as done or not-done.
+// Returns an error if the task or item is not found.
+func (s *Store) UpdateSpecItem(taskID, itemID string, done bool) error {
+	if taskID == "" {
+		return fmt.Errorf("task_id is required")
+	}
+	if itemID == "" {
+		return fmt.Errorf("item_id is required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Fetch current spec_items JSON.
+	var specJSON string
+	err := s.knowledgeDB.QueryRow(
+		`SELECT spec_items FROM tasks WHERE id = ?`, taskID,
+	).Scan(&specJSON)
+	if err != nil {
+		return fmt.Errorf("get spec_items for task %q: %w", taskID, err)
+	}
+
+	var items []SpecItem
+	if specJSON != "" && specJSON != "null" {
+		if err := json.Unmarshal([]byte(specJSON), &items); err != nil {
+			return fmt.Errorf("unmarshal spec_items for task %q: %w", taskID, err)
+		}
+	}
+
+	// Find and update the target item.
+	found := false
+	for i := range items {
+		if items[i].ID == itemID {
+			items[i].Done = done
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("spec item %q not found in task %q", itemID, taskID)
+	}
+
+	updated, _ := json.Marshal(items)
+	_, execErr := s.knowledgeDB.Exec(
+		`UPDATE tasks SET spec_items = ?, updated_at = ? WHERE id = ?`,
+		string(updated), now, taskID,
+	)
+	return execErr
 }
 
 // newID generates a cryptographically random ID for plans and tasks.

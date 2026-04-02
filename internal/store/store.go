@@ -1015,6 +1015,9 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_rej_agent   ON rejected_approaches(agent_id, project_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_rej_project ON rejected_approaches(project_id, created_at DESC)`,
+		// Sprint 25.1: Spec coverage tracking — per-task specification checklist.
+		// JSON array of {id, label, done} items. Default '[]' = no spec items (existing tasks unaffected).
+		`ALTER TABLE tasks ADD COLUMN spec_items TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

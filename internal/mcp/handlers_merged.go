@@ -168,7 +168,7 @@ func (s *Server) handleTasksDispatch(
 ) (*mcp.CallToolResult, error) {
 	action, _ := req.GetArguments()["action"].(string)
 	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: create_plan, list_plans, pending, update, save_state, get_state, link_nodes)"), nil
+		return mcp.NewToolResultError("action is required (valid: create_plan, list_plans, pending, update, save_state, get_state, link_nodes, update_spec_item)"), nil
 	}
 	switch action {
 	case "create_plan":
@@ -185,8 +185,11 @@ func (s *Server) handleTasksDispatch(
 		return s.handleGetSessionState(ctx, req)
 	case "link_nodes":
 		return s.handleLinkTaskNodes(ctx, req)
+	// Sprint 25.1: Spec coverage tracking — mark individual spec items done/pending.
+	case "update_spec_item":
+		return s.handleUpdateSpecItem(ctx, req)
 	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown tasks action: %q (valid: create_plan, list_plans, pending, update, save_state, get_state, link_nodes)", action)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("unknown tasks action: %q (valid: create_plan, list_plans, pending, update, save_state, get_state, link_nodes, update_spec_item)", action)), nil
 	}
 }
 

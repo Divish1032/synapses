@@ -645,25 +645,65 @@ func (s *Server) handleVerifyImplementation(
 		reports = append(reports, r)
 	}
 
-	// Task-level verification: compare actual graph entities against task's linked_nodes.
+	// Task-level verification: compare actual graph entities against task's linked_nodes
+	// and check spec item coverage (Sprint 25.1).
 	var taskVerification map[string]interface{}
 	if taskID != "" && s.store != nil {
 		task, err := s.store.GetTask(taskID)
-		if err == nil && task != nil && len(task.LinkedNodes) > 0 {
-			var found, missing []string
-			for _, nodeID := range task.LinkedNodes {
-				if n := s.graph.GetNode(graph.NodeID(nodeID)); n != nil {
-					found = append(found, n.Name)
-				} else {
-					missing = append(missing, nodeID)
+		if err == nil && task != nil {
+			tv := map[string]interface{}{
+				"task_id":    taskID,
+				"task_title": task.Title,
+			}
+
+			// linked_nodes check: which graph entities are still reachable.
+			if len(task.LinkedNodes) > 0 {
+				var found, missing []string
+				for _, nodeID := range task.LinkedNodes {
+					if n := s.graph.GetNode(graph.NodeID(nodeID)); n != nil {
+						found = append(found, n.Name)
+					} else {
+						missing = append(missing, nodeID)
+					}
+				}
+				tv["linked_found"] = found
+				tv["linked_missing"] = missing
+			}
+
+			// Spec coverage check (Sprint 25.1): warn when spec items remain incomplete.
+			// This is the "completion illusion" guard — agents often declare a task done
+			// at 30-40% completion. Informational only: doesn't block or change status.
+			if len(task.SpecItems) > 0 {
+				doneCount := 0
+				var pendingLabels []string
+				for _, item := range task.SpecItems {
+					if item.Done {
+						doneCount++
+					} else {
+						label := item.Label
+						if label == "" {
+							label = item.ID // fall back to ID if label is empty
+						}
+						pendingLabels = append(pendingLabels, label)
+					}
+				}
+				total := len(task.SpecItems)
+				tv["spec_coverage"] = map[string]interface{}{
+					"total":    total,
+					"done":     doneCount,
+					"pending":  total - doneCount,
+					"complete": doneCount == total,
+				}
+				if doneCount < total {
+					tv["spec_coverage_warning"] = fmt.Sprintf(
+						"%d of %d spec items are not yet marked complete: %s. "+
+							"Mark items done via tasks(action=update_spec_item) before closing this task.",
+						total-doneCount, total, strings.Join(pendingLabels, ", "),
+					)
 				}
 			}
-			taskVerification = map[string]interface{}{
-				"task_id":        taskID,
-				"task_title":     task.Title,
-				"linked_found":   found,
-				"linked_missing": missing,
-			}
+
+			taskVerification = tv
 		}
 	}
 

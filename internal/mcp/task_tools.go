@@ -747,6 +747,83 @@ func (s *Server) writeRetrospectiveAnnotations(taskID, agentID, completionNotes 
 // entityWithPath returns "name@dir/file" for disambiguation when the same
 // function name exists in multiple packages. Uses the last two path components.
 // Example: "Health@internal/api/server.go" → unambiguous across packages.
+// handleUpdateSpecItem marks a spec item within a task as done or not-done.
+// action=update_spec_item requires: task_id, item_id, done (bool).
+// Used to tick off individual checklist items as work progresses. validate(phase=post)
+// warns when incomplete items remain, preventing premature task completion.
+func (s *Server) handleUpdateSpecItem(
+	_ context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
+	}
+
+	taskID := stringArg(req, "task_id")
+	if taskID == "" {
+		return mcp.NewToolResultError("task_id is required (use tasks(action=pending) to list task IDs)"), nil
+	}
+	itemID := stringArg(req, "item_id")
+	if itemID == "" {
+		return mcp.NewToolResultError("item_id is required (use tasks(action=pending) to see spec item IDs)"), nil
+	}
+
+	// Accept done as bool, string "true"/"false", or integer 0/1.
+	done := false
+	switch v := req.GetArguments()["done"].(type) {
+	case bool:
+		done = v
+	case string:
+		done = v == "true" || v == "1" || v == "yes"
+	case float64:
+		done = v != 0
+	case int:
+		done = v != 0
+	}
+
+	if err := s.store.UpdateSpecItem(taskID, itemID, done); err != nil {
+		return toolError("update spec item", err)
+	}
+
+	// Fetch updated task to report coverage.
+	task, err := s.store.GetTask(taskID)
+	if err != nil {
+		return jsonResult(map[string]interface{}{
+			"task_id": taskID,
+			"item_id": itemID,
+			"done":    done,
+			"message": fmt.Sprintf("Spec item marked %s.", map[bool]string{true: "done", false: "pending"}[done]),
+		})
+	}
+
+	doneCount := 0
+	for _, item := range task.SpecItems {
+		if item.Done {
+			doneCount++
+		}
+	}
+	total := len(task.SpecItems)
+
+	var msg string
+	if total == 0 {
+		msg = fmt.Sprintf("Spec item marked %s.", map[bool]string{true: "done", false: "pending"}[done])
+	} else if doneCount == total {
+		msg = fmt.Sprintf("Spec item marked done. All %d/%d spec items complete — task is fully covered.", doneCount, total)
+	} else {
+		msg = fmt.Sprintf("Spec item marked %s. Coverage: %d/%d spec items done.", map[bool]string{true: "done", false: "pending"}[done], doneCount, total)
+	}
+
+	return jsonResult(map[string]interface{}{
+		"task_id":    taskID,
+		"item_id":    itemID,
+		"done":       done,
+		"coverage":   fmt.Sprintf("%d/%d", doneCount, total),
+		"all_done":   doneCount == total && total > 0,
+		"spec_items": task.SpecItems,
+		"message":    msg,
+	})
+}
+
 func entityWithPath(name, filePath string) string {
 	if filePath == "" {
 		return name

@@ -1991,16 +1991,18 @@ func (s *Server) registerTools() {
 			mcp.WithDescription(
 				"CALL action='create_plan' at the start of multi-step work to track progress across sessions. "+
 					"Without a plan, resumed sessions start from scratch with no record of what was done or what remains. "+
-					"action='create_plan': save a plan with tasks. "+
+					"action='create_plan': save a plan with tasks (include spec_items per task for completion tracking). "+
 					"action='list_plans': overview of all plans. "+
-					"action='pending': pending and in-progress tasks with suggested next step. "+
+					"action='pending': pending and in-progress tasks with spec item status. "+
 					"action='update': mark tasks done with notes (call immediately when a task completes). "+
+					"action='update_spec_item': mark a single spec item done/pending (prevents completion illusion). "+
 					"action='save_state' / 'get_state': checkpoint and restore session working state. "+
-					"action='link_nodes': connect tasks to graph entities for cross-session tracing.",
+					"action='link_nodes': connect tasks to graph entities for cross-session tracing. "+
+					"validate(phase=post, task_id=X) warns when spec items remain incomplete.",
 			),
 			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("'create_plan', 'list_plans', 'pending', 'update', 'save_state', 'get_state', 'link_nodes'."),
+				mcp.Description("'create_plan', 'list_plans', 'pending', 'update', 'update_spec_item', 'save_state', 'get_state', 'link_nodes'."),
 			),
 			// create_plan params
 			mcp.WithString("title",
@@ -2063,6 +2065,13 @@ func (s *Server) registerTools() {
 			// link_nodes params
 			mcp.WithString("node_ids",
 				mcp.Description("JSON array of node ID strings. Required for action=link_nodes."),
+			),
+			// update_spec_item params (Sprint 25.1)
+			mcp.WithString("item_id",
+				mcp.Description("Spec item ID within the task. Required for action=update_spec_item."),
+			),
+			mcp.WithBoolean("done",
+				mcp.Description("Mark spec item done (true) or pending (false). action=update_spec_item."),
 			),
 		),
 		s.handleTasksDispatch,
