@@ -1238,3 +1238,182 @@ func TestTSFrameworks_TsxFile_TreatedAsTypeScript(t *testing.T) {
 	// What matters: no crash and no false language-level violations.
 	_ = violations // result is valid either way — just verify no panic
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TS CSRF suppression — Fastify and Koa (missing from initial test suite)
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestTSFrameworks_Fastify_TS_MissingCSRF_WithFastifyCsrf_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/routes.ts", "fastify")
+	// fastifyCsrfProtection matches *Csrf* via path.Match glob.
+	addFunctionWithCalls(g, "/project/src/routes.ts", "setup", "post", "fastifyCsrfProtection")
+
+	violations := e.CheckFile(g, "/project/src/routes.ts", nil)
+	if findViolation(violations, "ts-fastify-missing-csrf") != nil {
+		t.Error("expected no violation: fastifyCsrfProtection matches *Csrf* pattern")
+	}
+}
+
+func TestTSFrameworks_Koa_TS_MissingCSRF_WithCsrfSuppression_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/routes.ts", "koa")
+	// csrfProtection* matches "csrfProtection" — the common koa-csrf usage pattern.
+	addFunctionWithCalls(g, "/project/src/routes.ts", "setup", "post", "csrfProtection")
+
+	violations := e.CheckFile(g, "/project/src/routes.ts", nil)
+	if findViolation(violations, "ts-koa-missing-csrf") != nil {
+		t.Error("expected no violation: csrfProtection matches csrfProtection* pattern")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// JS rate-limit patterns — behavior tests (fires)
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestTSFrameworks_JS_Express_MissingRateLimit_Fires_JsFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "express")
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "get", "post", "authenticate")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	found := findViolation(violations, "js-express-missing-rate-limit")
+	if found == nil {
+		t.Fatal("expected js-express-missing-rate-limit on .js file, got none")
+	}
+	if found.Severity != SeverityHigh {
+		t.Errorf("severity = %s, want HIGH", found.Severity)
+	}
+}
+
+func TestTSFrameworks_JS_Fastify_MissingRateLimit_Fires_JsFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "fastify")
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "get", "post")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	if findViolation(violations, "js-fastify-missing-rate-limit") == nil {
+		t.Fatal("expected js-fastify-missing-rate-limit on .js file, got none")
+	}
+}
+
+func TestTSFrameworks_JS_Koa_MissingRateLimit_Fires_JsFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "koa")
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "get", "post")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	if findViolation(violations, "js-koa-missing-rate-limit") == nil {
+		t.Fatal("expected js-koa-missing-rate-limit on .js file, got none")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// JS CSRF patterns — behavior tests (fires and suppression)
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestTSFrameworks_JS_Fastify_MissingCSRF_Fires_JsFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "fastify")
+	// POST route with no CSRF protection.
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "post")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	found := findViolation(violations, "js-fastify-missing-csrf")
+	if found == nil {
+		t.Fatal("expected js-fastify-missing-csrf on .js file with POST route, got none")
+	}
+	if found.Severity != SeverityMedium {
+		t.Errorf("severity = %s, want MEDIUM", found.Severity)
+	}
+}
+
+func TestTSFrameworks_JS_Fastify_MissingCSRF_WithCsrf_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "fastify")
+	// fastifyCsrfProtection matches *Csrf*.
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "post", "fastifyCsrfProtection")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	if findViolation(violations, "js-fastify-missing-csrf") != nil {
+		t.Error("expected no js-fastify-missing-csrf violation with fastifyCsrfProtection")
+	}
+}
+
+func TestTSFrameworks_JS_Koa_MissingCSRF_Fires_JsFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "koa")
+	// DELETE is a mutation route — CSRF should fire.
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "delete")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	if findViolation(violations, "js-koa-missing-csrf") == nil {
+		t.Fatal("expected js-koa-missing-csrf on .js file with DELETE route, got none")
+	}
+}
+
+func TestTSFrameworks_JS_Koa_MissingCSRF_NoFire_OnGetOnly(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/routes.js", "koa")
+	// Only GET routes — CSRF should not fire.
+	addFunctionWithCalls(g, "/project/routes.js", "setup", "get", "head")
+
+	violations := e.CheckFile(g, "/project/routes.js", nil)
+	if findViolation(violations, "js-koa-missing-csrf") != nil {
+		t.Error("CSRF should not fire on read-only Koa JS routes")
+	}
+}
