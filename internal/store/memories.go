@@ -438,6 +438,45 @@ func (s *Store) GetLatestWorkSummary(agentID string) (*Memory, error) {
 	return &m, nil
 }
 
+// GetLatestHandoff returns the most recent session-handoff memory for the given
+// agent and project. Handoff memories are stored by handleEndSession with the
+// tag "handoff" and contain a JSON handoffPayload object (accomplished,
+// remaining, key_decisions, open_hypotheses, explored_entities, agent_summary).
+// Returns nil, nil when no unexpired handoff exists.
+// Sprint 25.5: session handoff protocol.
+func (s *Store) GetLatestHandoff(agentID, projectID string) (*Memory, error) {
+	if agentID == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	row := s.knowledgeDB.QueryRow(`
+		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+		       created_at, expires_at, last_accessed_at, source, importance, access_count, source_project
+		FROM memories
+		WHERE tier = 'session_log'
+		  AND agent_id = ?
+		  AND source_project = ?
+		  AND tags LIKE ? ESCAPE '\'
+		  AND stale = 0
+		  AND expires_at > ?
+		ORDER BY created_at DESC
+		LIMIT 1`, agentID, projectID, "%\""+escapeLike("handoff")+"\"%", now)
+
+	var m Memory
+	err := row.Scan(
+		&m.ID, &m.Tier, &m.Content, &m.EntityID, &m.AgentID, &m.TaskID,
+		&m.Tags, &m.CreatedAt, &m.ExpiresAt, &m.LastAccessedAt, &m.Source, &m.Importance,
+		&m.AccessCount, &m.SourceProject,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest handoff: %w", err)
+	}
+	return &m, nil
+}
+
 // GetMemoryContent returns the content of a memory by ID. Returns ("", false) if not found.
 func (s *Store) GetMemoryContent(id string) (string, bool) {
 	var content string

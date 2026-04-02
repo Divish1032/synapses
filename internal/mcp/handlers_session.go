@@ -1695,16 +1695,17 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// _briefing: morning briefing — the five highest-priority items an agent
+	// _briefing: morning briefing — the highest-priority items an agent
 	// needs at session start. Natural language only; no code snippets. Present
 	// in ALL scopes (including quickMode) so every agent gets oriented first.
 	//
-	//   (1) unfinished_work    — in-progress/pending tasks + prior session summary
-	//   (2) conventions        — auto-load project prompts + key agent constraints
-	//   (3) drift_alerts       — federation drift + active architectural violations
-	//   (4) security_rules     — structural rule descriptions (NL, capped at 5)
-	//   (5) recent_decisions   — decision episodes from last 30 days (capped at 3)
-	//   (6) previously_explored — entities explored 2+ times in prior sessions (Sprint 25.4)
+	//   (1) unfinished_work      — in-progress/pending tasks + prior session summary
+	//   (2) conventions          — auto-load project prompts + key agent constraints
+	//   (3) drift_alerts         — federation drift + active architectural violations
+	//   (4) security_rules       — structural rule descriptions (NL, capped at 5)
+	//   (5) recent_decisions     — decision episodes from last 30 days (capped at 3)
+	//   (6) previously_explored  — entities explored 2+ times in prior sessions (Sprint 25.4)
+	//   (7) session_handoff      — structured reasoning state from prior session (Sprint 25.5)
 	{
 		briefing := make(map[string]interface{})
 
@@ -1950,6 +1951,45 @@ func (s *Server) handleSessionInit(
 					"entities": hints,
 					"note":     "These entities were explored in prior sessions. Consult top_finding before calling get_context again — saves context budget.",
 				}
+			}
+		}
+
+		// (7) Session handoff: structured reasoning state from the most recent prior
+		// session on this project. Surfaces accomplished work, remaining tasks,
+		// key decisions, and active hypotheses so the agent re-orients instantly
+		// instead of re-exploring. Skipped in quick mode to keep lightweight sessions
+		// lean. Sprint 25.5: session handoff protocol.
+		if s.store != nil && agentID != "" && !quickMode {
+			if handoffMem, hErr := s.store.GetLatestHandoff(agentID, s.projectID); hErr == nil && handoffMem != nil {
+				var payload handoffPayload
+				if jsonErr := json.Unmarshal([]byte(handoffMem.Content), &payload); jsonErr == nil {
+					handoff := make(map[string]interface{})
+					if payload.AgentSummary != "" {
+						handoff["agent_summary"] = payload.AgentSummary
+					}
+					if len(payload.Accomplished) > 0 {
+						handoff["accomplished"] = payload.Accomplished
+					}
+					if len(payload.Remaining) > 0 {
+						handoff["remaining"] = payload.Remaining
+					}
+					if len(payload.KeyDecisions) > 0 {
+						handoff["key_decisions"] = payload.KeyDecisions
+					}
+					if len(payload.OpenHypotheses) > 0 {
+						handoff["open_hypotheses"] = payload.OpenHypotheses
+					}
+					if len(payload.ExploredEntities) > 0 {
+						handoff["explored_entities"] = payload.ExploredEntities
+					}
+					if len(handoff) > 0 {
+						handoff["note"] = "Reasoning state from your most recent session on this project. Review before re-exploring."
+						briefing["session_handoff"] = handoff
+					}
+				}
+				// Touch in background to renew TTL (same as relevant_memories pattern).
+				hid := handoffMem.ID
+				s.goBackground(func() { s.store.TouchMemory(hid) })
 			}
 		}
 

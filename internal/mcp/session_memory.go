@@ -353,6 +353,25 @@ func (s *Server) handleEndSession(
 		}
 	}
 
+	// ── Step 1c: Session handoff memory (Sprint 25.5) ──
+	// Build a structured handoff payload: what was accomplished, what remains,
+	// key decisions, active hypotheses. Stored as a session-log memory with the
+	// "handoff" tag so session_init can retrieve it as primary context on the
+	// next session. Tier 1 auto-capture: no agent action required.
+	if handoffContent := s.buildHandoffPayload(agentID, summary, sessSummary); handoffContent != "" {
+		_, _ = s.store.InsertMemory(store.Memory{
+			Tier:          store.TierSessionLog,
+			Content:       handoffContent,
+			AgentID:       agentID,
+			TaskID:        taskID,
+			Source:        store.SourceAuto,
+			Tags:          `["handoff","session_end","auto"]`,
+			SourceProject: s.projectID,
+		})
+		// memoriesSaved is intentionally not incremented — this is a structured
+		// metadata record, not a human-readable institutional memory.
+	}
+
 	// ── Step 2: Save session-log memory ──
 	sessionContent := buildSessionLogContent(agentID, taskID, summary, sessSummary)
 	if sessionContent != "" {
@@ -1245,3 +1264,148 @@ func parseExaminedEntities(content string) []string {
 
 // Ensure graph.NodeID is used (imported for FindByName return type).
 var _ graph.NodeID
+
+// ── Sprint 25.5: Session Handoff Protocol ────────────────────────────────────
+
+// handoffPayload is the structured reasoning-state object stored at end_session
+// and retrieved by the next session's session_init. It captures the agent's
+// working context — what was done, what remains, decisions made, active theories —
+// so the next session starts with full situational awareness instead of zero.
+//
+// All fields are natural language strings (no source code). Compliant with the
+// Communication Protocol (gives intelligence, never gives code).
+type handoffPayload struct {
+	AgentSummary     string   `json:"agent_summary,omitempty"`    // agent-provided free-text summary
+	Accomplished     []string `json:"accomplished,omitempty"`     // tasks completed this session
+	Remaining        []string `json:"remaining,omitempty"`        // pending/in_progress tasks at handoff
+	KeyDecisions     []string `json:"key_decisions,omitempty"`    // recent decisions (choice field, NL)
+	OpenHypotheses   []string `json:"open_hypotheses,omitempty"`  // active hypotheses (content field)
+	ExploredEntities []string `json:"explored_entities,omitempty"` // key entities examined this session
+	SessionAt        int64    `json:"session_at"`                 // Unix seconds — uniqueness nonce
+}
+
+// buildHandoffPayload assembles a structured handoff payload for the just-ending
+// session and returns it as a JSON string. Returns "" when there is nothing
+// meaningful to persist (no work done, no summary, no decisions, no hypotheses).
+//
+// Data sources (all fast SQLite reads — no network calls):
+//   - Accomplished: tasks in sessSummary.TasksUpdated whose current status is "completed"
+//   - Remaining:    pending/in_progress tasks via GetPendingTasks for this agent
+//   - KeyDecisions: 3 most recent decisions via GetRecentDecisions
+//   - OpenHypotheses: active hypotheses via GetHypotheses(state="active")
+//   - ExploredEntities: sessSummary.EntitiesExamined, capped at 5
+func (s *Server) buildHandoffPayload(agentID, summary string, sessSummary *sessionSummary) string {
+	if s.store == nil {
+		return ""
+	}
+
+	payload := handoffPayload{
+		SessionAt:    time.Now().Unix(),
+		AgentSummary: summary,
+	}
+
+	// Accomplished: resolve tasks updated this session and keep completed ones.
+	if sessSummary != nil {
+		for _, tid := range sessSummary.TasksUpdated {
+			t, err := s.store.GetTask(tid)
+			if err != nil || t == nil {
+				continue
+			}
+			if t.Status == "completed" {
+				title := strings.TrimSpace(t.Title)
+				if nl := strings.IndexByte(title, '\n'); nl >= 0 {
+					title = strings.TrimRight(title[:nl], "\r")
+				}
+				if len([]rune(title)) > 80 {
+					title = string([]rune(title)[:80]) + "…"
+				}
+				if title != "" {
+					payload.Accomplished = append(payload.Accomplished, title)
+				}
+			}
+		}
+	}
+
+	// Remaining: pending and in_progress tasks for this agent across all plans.
+	if pending, err := s.store.GetPendingTasks("", agentID); err == nil {
+		for _, t := range pending {
+			if t.Status != "pending" && t.Status != "in_progress" {
+				continue
+			}
+			title := strings.TrimSpace(t.Title)
+			if nl := strings.IndexByte(title, '\n'); nl >= 0 {
+				title = strings.TrimRight(title[:nl], "\r")
+			}
+			if len([]rune(title)) > 80 {
+				title = string([]rune(title)[:80]) + "…"
+			}
+			if title != "" {
+				payload.Remaining = append(payload.Remaining, title)
+			}
+			if len(payload.Remaining) >= 5 {
+				break
+			}
+		}
+	}
+
+	// Key decisions: 3 most recent decisions for this agent+project.
+	if decisions, err := s.store.GetRecentDecisions(agentID, s.projectID, 3); err == nil {
+		for _, d := range decisions {
+			choice := strings.TrimSpace(d.Choice)
+			if choice != "" {
+				// Optionally append context to give anchoring without code.
+				if d.Context != "" {
+					choice = choice + " (context: " + strings.TrimSpace(d.Context) + ")"
+				}
+				// Cap individual decision strings to prevent unbounded payload growth.
+				if len([]rune(choice)) > 200 {
+					choice = string([]rune(choice)[:200]) + "…"
+				}
+				payload.KeyDecisions = append(payload.KeyDecisions, choice)
+			}
+		}
+	}
+
+	// Open hypotheses: active working theories for this agent+project.
+	if hyps, err := s.store.GetHypotheses(agentID, s.projectID, "active", 3); err == nil {
+		for _, h := range hyps {
+			content := strings.TrimSpace(h.Content)
+			if content != "" {
+				if len([]rune(content)) > 200 {
+					content = string([]rune(content)[:200]) + "…"
+				}
+				payload.OpenHypotheses = append(payload.OpenHypotheses, content)
+			}
+		}
+	}
+
+	// Explored entities: key entities examined this session, capped at 5.
+	if sessSummary != nil {
+		capLeft := 5
+		for _, e := range sessSummary.EntitiesExamined {
+			if e != "" {
+				payload.ExploredEntities = append(payload.ExploredEntities, e)
+				capLeft--
+				if capLeft <= 0 {
+					break
+				}
+			}
+		}
+	}
+
+	// Skip persisting if there is nothing meaningful to hand off.
+	if payload.AgentSummary == "" &&
+		len(payload.Accomplished) == 0 &&
+		len(payload.Remaining) == 0 &&
+		len(payload.KeyDecisions) == 0 &&
+		len(payload.OpenHypotheses) == 0 &&
+		len(payload.ExploredEntities) == 0 {
+		return ""
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
