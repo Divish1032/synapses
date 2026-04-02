@@ -220,8 +220,11 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// Compaction mode is explicit-only: agents must pass scope="compaction" when they
-	// know they compacted. No auto-detection — avoids false positives that waste tokens.
+	// Compaction mode is explicit-only for mid-session compaction: agents pass
+	// scope="compaction" when they know their context was compressed. No mid-session
+	// auto-detection — avoids false positives that waste tokens.
+	// Cross-connection resumes (hibernateCtx != nil) auto-inject the recovery packet
+	// because they are a concrete signal of context loss (see below, Sprint 24.2).
 
 	// Detect project-wide first session: count == 1 means this is the first
 	// session_init ever recorded for this project — surfaced as highlights.
@@ -744,6 +747,21 @@ func (s *Server) handleSessionInit(
 			}
 		}
 		resp["session_resumed"] = resumeBlock
+
+		// Sprint 24.2: Auto-inject compaction recovery packet on hibernate resume.
+		// When the agent restarts its editor and reconnects, it has genuinely lost
+		// its prior working context. Use the PRIOR session's ID (ParentID) to
+		// retrieve the work history — the new session is empty at this point.
+		// This is distinct from scope=compaction (mid-session explicit recovery):
+		// a hibernate resume is a concrete signal of context loss that requires
+		// no agent awareness of compaction.
+		if s.store != nil && hibernateCtx.ParentID != "" && !compactionMode {
+			recovery := s.buildCompactionRecovery(agentID, hibernateCtx.ParentID)
+			if recovery != nil {
+				recovery["hint"] = "You're resuming a prior session. This packet contains your working state from before the break. File contents can be re-read — focus on decisions and progress."
+				resp["compaction_recovery"] = recovery
+			}
+		}
 	}
 
 	// Sprint 24: Work Ledger — include cross-session briefing on every session_init.
@@ -2326,10 +2344,39 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 		}
 	}
 
+	// 7c. Task progress — list pending/in_progress tasks for the agent so the
+	// recovery packet answers "what was I doing?" at the task level.
+	// Uses agent-scoped task query (not session-scoped) to capture any active
+	// plan work regardless of which session created the tasks.
+	var taskProgress *compactTaskProgress
+	if tasks, err := s.store.GetPendingTasks("", agentID); err == nil && len(tasks) > 0 {
+		tp := &compactTaskProgress{}
+		maxList := 5
+		for _, t := range tasks {
+			switch t.Status {
+			case "in_progress":
+				if len(tp.InProgress) < maxList {
+					tp.InProgress = append(tp.InProgress, compactTask{Title: t.Title, ID: t.ID})
+				}
+			case "pending":
+				if len(tp.Pending) < maxList {
+					tp.Pending = append(tp.Pending, compactTask{Title: t.Title, ID: t.ID})
+				}
+			}
+		}
+		// Only include task progress if there are active or pending tasks.
+		if len(tp.InProgress) > 0 || len(tp.Pending) > 0 {
+			taskProgress = tp
+		}
+	}
+
 	// 8. Assemble the recovery packet
 	recovery := map[string]interface{}{
 		"work_summary": workSummary,
 		"hint":         "Your context was compacted. This recovery packet contains your prior work state from Synapses. File contents and graph traversals can be re-queried — focus on decisions and approach.",
+	}
+	if taskProgress != nil {
+		recovery["task_progress"] = taskProgress
 	}
 	if len(exploredEntities) > 0 {
 		recovery["explored_entities"] = exploredEntities
@@ -2396,6 +2443,21 @@ type compactViolation struct {
 	ToNode   string `json:"to_node"`
 }
 
+// compactTask is a lightweight task representation for compaction recovery.
+type compactTask struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// compactTaskProgress summarizes active task state for the recovery packet.
+// In-progress tasks represent what the agent was actively working on; pending
+// tasks show what comes next. Completed tasks are omitted — they're not relevant
+// to recovery orientation.
+type compactTaskProgress struct {
+	InProgress []compactTask `json:"in_progress,omitempty"`
+	Pending    []compactTask `json:"pending,omitempty"`
+}
+
 // compactMemory is a lightweight memory representation for compaction recovery.
 type compactMemory struct {
 	EntityID string `json:"entity_id"`
@@ -2414,9 +2476,10 @@ func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
 	}
 	// Progressive truncation in priority order (lowest value first).
 	// work_summary and hint are never dropped — they're the minimum useful payload.
+	// task_progress is high-value (answers "what was I doing?") so drops late.
 	// explored_entities is dropped after entity_memories (high-value intelligence,
 	// but work_summary already captures entity/file names as a fallback).
-	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "active_rules", "context_snapshot"}
+	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "active_rules", "task_progress", "context_snapshot"}
 	for _, key := range dropOrder {
 		if len(data) <= maxChars {
 			return

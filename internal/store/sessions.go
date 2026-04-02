@@ -356,6 +356,16 @@ func (s *Store) TouchSession(sessionID string) {
 		now, sessionID)
 }
 
+// SetSessionLastSeen updates the last_seen_at timestamp for the given session
+// to a specific Unix second value. Used in tests to simulate elapsed time
+// (e.g. to trigger the hibernate resume path).
+func (s *Store) SetSessionLastSeen(sessionID string, unixSec int64) error {
+	_, err := s.knowledgeDB.Exec(
+		`UPDATE sessions SET last_seen_at = ? WHERE id = ?`,
+		unixSec, sessionID)
+	return err
+}
+
 // EndSession marks a session as closed with the given reason, outcome, and summary.
 // reason: "clean" (end_session called), "timeout" (manual reconciliation).
 // outcome: "success" | "failure" | "partial" | "unknown".
