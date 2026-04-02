@@ -1544,17 +1544,15 @@ func (s *Server) registerTools() {
 			"session_init",
 			mcp.WithDescription(
 				"CALL FIRST at the start of every session — before reading any files. "+
-					"Returns your pending tasks, unfinished work, recent decisions, and project conventions. "+
-					"Without this you'll miss in-progress tasks and re-explore context that's already been captured. "+
-					"Default scope (standard): returns pending_tasks, working_state, scale_guidance, "+
-					"and a more_available field listing richer sections you can request. "+
-					"Pass scope=\"full\" for project_identity, brain_health, federation_health, relevant_memories, "+
-					"knowledge_graph, and session analytics. "+
-					"Pass scope=\"compaction\" after context compaction to restore your prior work state. "+
-					"Incremental mode: when agent_id is provided and the agent has called "+
-					"session_init before, unchanged sections are skipped to save tokens. "+
-					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) "+
-					"are always included regardless of scope.",
+					"Returns pending tasks, unfinished work, recent decisions, and project conventions. "+
+					"Without this, you'll miss in-progress work and re-explore context that's already been captured. "+
+					"scope='standard' (default): tasks + working state + scale guidance (~500 tokens). "+
+					"scope='full': adds project identity, memories, and health stats. "+
+					"scope='compaction': recovery briefing after context compaction — restores task state, "+
+					"explored files, and recent decisions. "+
+					"scope='resume': task continuity after reconnect. "+
+					"Provide agent_id for incremental delivery — unchanged sections skipped on repeat calls. "+
+					"Safety alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) always included.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Description("Self-declared agent identifier. Enables incremental delivery: "+
@@ -1604,14 +1602,14 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"CALL when you need to understand an entity before writing code that touches it. "+
-					"Returns relationships, callers, callees, entity signatures, and relevant memories — "+
-					"information you cannot get from reading files alone. "+
-					"Without this, you'll miss hidden callers and make breaking changes. "+
-					"mode='context' (default): BFS/PPR ego-subgraph. "+
-					"mode='intent': intent-based assembly (declare intent + target, one round-trip). "+
+				"CALL before writing code that touches a known entity. "+
+					"Returns relationships, callers, callees, entity signatures, and attached memories — "+
+					"what reading files alone cannot tell you. "+
+					"Without this, you'll miss hidden callers and make breaking changes you didn't see coming. "+
+					"mode='context' (default): graph neighborhood traversal. "+
+					"mode='intent': one-call context assembly for a declared goal (understand/modify/add/debug). "+
 					"mode='path': shortest call chain between two entities. "+
-					"mode='investigate': problem-aware context with ranked code blocks.",
+					"mode='investigate': ranks suspicious entity locations by relevance to a described problem.",
 			),
 			mcp.WithString("entity",
 				mcp.Description("Entity name for mode=context (e.g. 'AuthService'). Required for mode=context."),
@@ -1691,18 +1689,16 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"validate",
 			mcp.WithDescription(
-				"CALL before and after writing code to catch architectural violations before they reach review. "+
-					"Without phase=pre, you may write code that breaks 5+ rules you didn't know existed. "+
-					"Without phase=post, violations in your written files go undetected until CI. "+
+				"CALL before writing code (phase=pre) and after writing code (phase=post) to catch violations early. "+
+					"Without phase=pre, you may write code that breaks rules you didn't know existed. "+
+					"Without phase=post, violations in written files go undetected until CI. "+
 					"phase='pre' (default): check proposed changes against rules before writing. "+
-					"phase='post': verify files after writing. phase='list': list current violations. "+
-					"phase='full': compound pre-implementation gate (safety+rules+scope). "+
-					"phase='safety': search failure episodes for similar past failures. "+
-					"phase='upsert_rule': create/update architectural rule. "+
-					"phase='delete_rule': remove a rule. "+
-					"phase='candidates': failure episodes not yet promoted to rules. "+
-					"phase='upsert_adr': create/update an architectural decision record. "+
-					"phase='list_adrs': query ADRs.",
+					"phase='post': audit written files for new violations. "+
+					"phase='list': active violations. "+
+					"phase='full': compound gate — scope + safety + rules in one call. "+
+					"phase='safety': check failure history for similar past mistakes. "+
+					"Rule management: phase='upsert_rule' / 'delete_rule' / 'candidates'. "+
+					"Decision records: phase='upsert_adr' / 'list_adrs'.",
 			),
 			mcp.WithString("phase",
 				mcp.Description("'pre' (default), 'post', 'list', 'full', 'safety', "+
@@ -1815,12 +1811,13 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"search",
 			mcp.WithDescription(
-				"CALL when you don't know which file or entity to look at. "+
-					"Returns entity names and file:line locations — use to find what to read, not the contents itself. "+
-					"Use mode='exact' to resolve an entity name to a node ID before calling get_context. "+
-					"mode='keyword' (default): substring match. mode='fulltext': FTS5 BM25 ranked. "+
-					"mode='semantic': HyDE vector search for concept-based lookup. "+
-					"mode='exact': precise name lookup returning node refs (ID, type, file, line).",
+				"CALL when you need to find an entity by name or concept before exploring it. "+
+					"Returns entity names and file:line locations — the map, not the territory. "+
+					"Without this, you'll grep source files directly and miss graph-indexed relationships and relevance signals. "+
+					"mode='keyword' (default): substring match across entity names. "+
+					"mode='fulltext': BM25 ranked full-text search. "+
+					"mode='semantic': concept-based vector search — describe what you're looking for, not the exact name. "+
+					"mode='exact': precise name-to-node-ID lookup — use before get_context when you have the exact name.",
 			),
 			mcp.WithString("query",
 				mcp.Required(),
@@ -1855,15 +1852,13 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_impact",
 			mcp.WithDescription(
-				"CALL before changing any shared entity (function, interface, type). "+
-					"Without this, you won't know you're about to break 12 callers across 4 packages. "+
-					"Performs blast-radius analysis: reverse-BFS from a named entity "+
-					"following incoming CALLS and IMPLEMENTS edges. "+
-					"Results grouped by depth: direct (depth 1), indirect (depth 2), peripheral (depth 3+). "+
-					"Also returns implementor_impact, cross_domain_impact: infrastructure (DEPLOYS), "+
-					"API endpoints (CONSUMES), config files (CONFIGURED_BY), docs (DOCUMENTS). "+
-					"Answers: 'what breaks if I change X?' — across code, infra, API, and docs. "+
-					"Use files= for PR blast-radius across all entities in changed files.",
+				"CALL before changing any shared entity — function, interface, or type. "+
+					"Without this, you won't know you're about to break callers across multiple packages. "+
+					"Returns blast-radius analysis: direct callers (depth 1), indirect dependents (depth 2+), "+
+					"and cross-domain impact across infrastructure, API endpoints, config files, and docs. "+
+					"Summary in natural language: 'Changing X affects N callers across M packages.' "+
+					"Use files= for PR-level blast radius across all entities in changed files. "+
+					"scope='review' adds test gaps and risk flags for enriched code review output.",
 			),
 			mcp.WithString("symbol",
 				mcp.Description("Name of the entity to analyse (e.g. 'CarveEgoGraph'). Required unless files= is provided."),
@@ -1905,13 +1900,13 @@ func (s *Server) registerTools() {
 			"tasks",
 			mcp.WithDescription(
 				"CALL action='create_plan' at the start of multi-step work to track progress across sessions. "+
-					"Without a plan, resumed sessions start from scratch with no context on what was done. "+
+					"Without a plan, resumed sessions start from scratch with no record of what was done or what remains. "+
 					"action='create_plan': save a plan with tasks. "+
 					"action='list_plans': overview of all plans. "+
-					"action='pending': list pending/in-progress tasks. "+
-					"action='update': change task status (in_progress→done). "+
-					"action='save_state'/'get_state': persist session state. "+
-					"action='link_nodes': link task to graph nodes.",
+					"action='pending': pending and in-progress tasks with suggested next step. "+
+					"action='update': mark tasks done with notes (call immediately when a task completes). "+
+					"action='save_state' / 'get_state': checkpoint and restore session working state. "+
+					"action='link_nodes': connect tasks to graph entities for cross-session tracing.",
 			),
 			mcp.WithString("action",
 				mcp.Required(),
@@ -1989,14 +1984,14 @@ func (s *Server) registerTools() {
 			"end_session",
 			mcp.WithDescription(
 				"CALL LAST before ending any session — even short ones. "+
-					"Without this, everything you learned is discarded. Future sessions will re-explore "+
-					"the same files and make the same mistakes. "+
-					"Automatically extracts files touched, entities examined, tasks updated and saves them "+
-					"as structured memories that appear in session_init and get_context in future sessions. "+
-					"This is the mechanism by which institutional knowledge accumulates. "+
-					"Returns effectiveness_report with quality metrics: context_hit_rate, "+
-					"first_fetch_right, tokens_saved, and prev_7d trend comparison. "+
-					"Optionally reports LLM token usage if model is provided.",
+					"Without this, everything you learned this session is discarded. "+
+					"Future sessions will re-explore the same files and repeat the same mistakes. "+
+					"Extracts files touched, entities examined, and task updates into structured memories "+
+					"that surface in session_init and get_context in future sessions. "+
+					"This is how institutional knowledge accumulates across sessions. "+
+					"Returns effectiveness_report: context_hit_rate, first_fetch_right, tokens_saved, "+
+					"and 7-day trend comparison. "+
+					"Optionally records LLM token usage when model is provided.",
 			),
 			mcp.WithString("agent_id",
 				mcp.Required(),
@@ -2062,16 +2057,15 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"memory",
 			mcp.WithDescription(
-				"CALL action='save' after any decision, failed approach, or key finding — "+
-					"before the next tool call. Without this, discoveries are lost at compaction "+
-					"and you'll re-explore the same ground next session. "+
-					"action='save': record a decision/failure/pattern episode. "+
-					"action='search': find prior decisions by keyword or concept. "+
+				"CALL action='save' immediately after any decision, failed approach, or key finding — "+
+					"before the next tool call. "+
+					"Without this, discoveries are lost at context compaction and you'll re-explore the same ground next session. "+
+					"action='save': record a decision, failure, or pattern episode. "+
+					"action='search': retrieve prior decisions by keyword or concept. "+
 					"action='list': chronological episode browser. "+
-					"action='annotate': attach a note to a graph node. "+
-					"action='annotate_web': persist web search findings as a node annotation. "+
-					"action='add_gap': record a quality gap against a node. "+
-					"action='list_gaps': query recorded quality gaps. "+
+					"action='annotate': attach a note to a graph entity. "+
+					"action='annotate_web': persist web research findings as an entity annotation. "+
+					"action='add_gap' / 'list_gaps': track and query quality gaps. "+
 					"action='history': entity change timeline.",
 			),
 			mcp.WithString("action",
