@@ -11,6 +11,8 @@
       "detection": {
         "check_type": "admin_elevation",
         "admin_path_patterns": ["/admin", "/admin/*", "*/admin/*", "/management", "/management/*", "/internal/admin", "*/internal/admin/*"],
+        "admin_handler_name_patterns": ["*admin*"],
+        "admin_package_paths": ["*/admin/*", "*/admin.go", "*_admin.go", "*/management/*", "*/management.go", "*_management.go"],
         "required_call_patterns": ["Auth*", "authenticate", "JWT*", "RequireAuth", "checkToken"],
         "elevated_auth_patterns": ["RequireAdmin*", "RequireRole*", "hasRole*", "IsAdmin*", "checkAdmin*", "adminOnly*", "requireAdmin*"],
         "scope": "file"

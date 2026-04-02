@@ -220,6 +220,26 @@ type Detection struct {
 	// Examples: ["/admin/*", "/management/*", "/internal/*", "*/admin*"]
 	AdminPathPatterns []string `json:"admin_path_patterns,omitempty"`
 
+	// AdminHandlerNamePatterns are glob patterns (matched case-insensitively)
+	// for function or method names that indicate admin functionality. Functions
+	// whose names match are treated as admin handlers and require elevated
+	// authorization when they do not call ElevatedAuthPatterns.
+	//
+	// Used by: CheckTypeAdminElevation
+	// Examples: ["*admin*", "*management*", "handleAdmin*", "*AdminHandler"]
+	AdminHandlerNamePatterns []string `json:"admin_handler_name_patterns,omitempty"`
+
+	// AdminPackagePaths are file path patterns identifying files that contain
+	// admin-level handlers by virtue of their location (e.g. an admin/ package).
+	// Files matching these patterns are treated as admin handler files and trigger
+	// a file-level violation when ElevatedAuthPatterns is absent, but only when
+	// strategies 1 (route path) and 2 (function name) find no violations — this
+	// prevents double-reporting the same file via multiple strategies.
+	//
+	// Used by: CheckTypeAdminElevation
+	// Examples: ["*/admin/*", "*/admin.go", "*_admin.go", "*/management/*"]
+	AdminPackagePaths []string `json:"admin_package_paths,omitempty"`
+
 	// WebSocketNodeNames are function or method names that identify WebSocket upgrade
 	// handlers or WebSocket connection handlers in the project. Used by
 	// CheckTypeCrossTransportAuth to classify route nodes as WebSocket transport.

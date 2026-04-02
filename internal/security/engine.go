@@ -857,63 +857,134 @@ func isPlaceholderValue(val string) bool {
 	return false
 }
 
-// checkAdminElevation fires when a route node in the file has an admin-level
-// path but the file does not call any elevated authorization function.
+// checkAdminElevation fires when a route, function, or file identified as
+// admin-level does not call elevated authorization functions.
 //
-// A route is "admin-level" when its path matches any AdminPathPattern or
-// contains "/admin" as a path component.
+// Three detection strategies are applied in order; the first two are independent,
+// the third fires only when the first two produce no violations:
+//
+//  1. Route path patterns (AdminPathPatterns): route nodes whose path matches
+//     an admin path pattern or contains "/admin" as a URL path component.
+//  2. Handler name patterns (AdminHandlerNamePatterns): functions or methods
+//     whose names match admin-indicating glob patterns (case-insensitive).
+//  3. Admin package paths (AdminPackagePaths): files in admin directories are
+//     treated as admin handler files and produce a single file-level violation.
+//     Only fires when strategies 1 and 2 find nothing (avoids double-reporting).
+//
+// In all cases: if ElevatedAuthPatterns is non-empty and the file calls any
+// matching function, the file is considered compliant and no violation is fired.
 func checkAdminElevation(fc *fileContext, p SecurityPattern) []Violation {
-	if len(fc.routes) == 0 {
-		return nil
-	}
-	if len(p.Detection.AdminPathPatterns) == 0 {
-		return nil
-	}
-
-	// Find admin routes in this file.
-	var adminRoutes []*graph.Node
-	for _, route := range fc.routes {
-		routePath := route.Metadata["path"]
-		if routePath == "" {
-			routePath = route.Name // fallback to node name like "GET /admin/users"
-		}
-		for _, adminPat := range p.Detection.AdminPathPatterns {
-			if matchGlob(adminPat, routePath) || matchAdminComponent(routePath) {
-				adminRoutes = append(adminRoutes, route)
-				break
-			}
-		}
-	}
-	if len(adminRoutes) == 0 {
-		return nil
-	}
-
-	// Check if the file calls elevated auth (distinct from basic auth).
+	// Fast path: if elevated auth is called anywhere in this file, it is compliant.
 	if len(p.Detection.ElevatedAuthPatterns) > 0 && fc.callsAny(p.Detection.ElevatedAuthPatterns) {
 		return nil
 	}
 
 	var violations []Violation
-	for _, route := range adminRoutes {
-		routePath := route.Metadata["path"]
-		if routePath == "" {
-			routePath = route.Name
+
+	// ── Strategy 1: route nodes with admin path patterns ─────────────────────
+	if len(p.Detection.AdminPathPatterns) > 0 && len(fc.routes) > 0 {
+		for _, route := range fc.routes {
+			routePath := route.Metadata["path"]
+			if routePath == "" {
+				routePath = route.Name // fallback: "GET /admin/users"
+			}
+			isAdmin := false
+			for _, adminPat := range p.Detection.AdminPathPatterns {
+				if matchGlob(adminPat, routePath) || matchAdminComponent(routePath) {
+					isAdmin = true
+					break
+				}
+			}
+			if !isAdmin {
+				continue
+			}
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   fc.filePath,
+				"target": routePath,
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    p.Severity,
+				File:        fc.filePath,
+				Target:      routePath,
+				Message:     msg,
+				Evidence:    fmt.Sprintf("Admin route %q in %s does not call elevated authorization (role check, admin permission)", routePath, filepath.Base(fc.filePath)),
+				Tags:        p.Tags,
+			})
 		}
-		msg := fillTemplate(p.Message, map[string]string{
-			"file":   fc.filePath,
-			"target": routePath,
-		})
-		violations = append(violations, Violation{
-			PatternID:   p.ID,
-			PatternName: p.Name,
-			Severity:    p.Severity,
-			File:        fc.filePath,
-			Target:      routePath,
-			Message:     msg,
-			Evidence:    fmt.Sprintf("Admin route %q in %s does not call elevated authorization (role check, admin permission)", routePath, filepath.Base(fc.filePath)),
-			Tags:        p.Tags,
-		})
 	}
+
+	// ── Strategy 2: functions/methods whose names indicate admin handling ─────
+	// Patterns are matched case-insensitively so both "AdminUsers" and
+	// "adminUsers" are caught without requiring duplicate pattern entries.
+	if len(p.Detection.AdminHandlerNamePatterns) > 0 {
+		seen := make(map[string]bool)
+		for _, n := range fc.nodes {
+			if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+				continue
+			}
+			lowerName := strings.ToLower(n.Name)
+			for _, pat := range p.Detection.AdminHandlerNamePatterns {
+				if matchGlob(strings.ToLower(pat), lowerName) {
+					if seen[n.Name] {
+						break
+					}
+					seen[n.Name] = true
+					msg := fillTemplate(p.Message, map[string]string{
+						"file":   fc.filePath,
+						"target": n.Name,
+					})
+					violations = append(violations, Violation{
+						PatternID:   p.ID,
+						PatternName: p.Name,
+						Severity:    p.Severity,
+						File:        fc.filePath,
+						Target:      n.Name,
+						Message:     msg,
+						Evidence:    fmt.Sprintf("Function %q appears to be an admin handler but does not call elevated authorization (role check, admin permission)", n.Name),
+						Tags:        p.Tags,
+					})
+					break
+				}
+			}
+		}
+	}
+
+	// ── Strategy 3: file located in an admin package/directory ───────────────
+	// Only fires when strategies 1 and 2 found nothing — prevents double-reporting
+	// the same file via multiple strategies (e.g. a file in admin/ that also has
+	// admin-named routes would already be caught by strategy 1 or 2).
+	// Requires the file to contain at least one function or method to be worth flagging
+	// (avoids noisy findings on config/init files with no handler logic).
+	if len(violations) == 0 && len(p.Detection.AdminPackagePaths) > 0 &&
+		fileMatchesAny(fc.filePath, p.Detection.AdminPackagePaths) {
+		hasFunctions := false
+		for _, n := range fc.nodes {
+			if n.Type == graph.NodeFunction || n.Type == graph.NodeMethod {
+				hasFunctions = true
+				break
+			}
+		}
+		if hasFunctions {
+			target := filepath.Base(fc.filePath)
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   fc.filePath,
+				"target": target,
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    p.Severity,
+				File:        fc.filePath,
+				Target:      target,
+				Message:     msg,
+				Evidence:    fmt.Sprintf("File %s is in an admin package but does not call elevated authorization (role check, admin permission)", filepath.Base(fc.filePath)),
+				Tags:        p.Tags,
+			})
+		}
+	}
+
 	return nilIfEmpty(violations)
 }
 
