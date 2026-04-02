@@ -133,6 +133,7 @@ type Server struct {
 	rulesMu            sync.RWMutex           // protects s.config.Rules for concurrent dynamic upserts
 	sdlcDetect         *sdlcDetector          // Sprint 27.1: auto-detects SDLC phase from tool-call patterns
 	toolTracker        *sessionToolTracker    // Sprint 27.3: per-session tool call counts for suggestion suppression
+	saveNudger         *memorySaveNudger      // Sprint 24.7: proactive nudge when agent hasn't saved to memory
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -518,6 +519,19 @@ func (s *Server) getSessionBudgetMultiplier(ctx context.Context) float64 {
 	return modelBudgetMultiplier(entry.model)
 }
 
+// getSessionModel returns the model name declared in session_init for the given
+// MCP session ID. Returns "" when the session is unknown or no model was declared.
+// Used by the nudge system to select token-budget vs count-based strategy.
+func (s *Server) getSessionModel(mcpSessionID string) string {
+	s.synapseSessionsMu.RLock()
+	entry, ok := s.synapsesSessions[synapseSessionKey(mcpSessionID)]
+	s.synapseSessionsMu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return entry.model
+}
+
 // ClearSynapseSession removes the session mapping for an MCP connection.
 // Should be called when a connection closes (daemon) or end_session fires.
 // Safe to call with an empty or unknown session ID.
@@ -590,6 +604,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		toolDescs:        make(map[string]string),
 		sdlcDetect:       newSDLCDetector(),
 		toolTracker:      newSessionToolTracker(),
+		saveNudger:       newMemorySaveNudger(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
@@ -703,15 +718,17 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 			}
 		}
 
+		// Extract response size once — used by both pulse telemetry and nudge tracking.
+		var responseBytes int
+		if result != nil && !result.IsError && len(result.Content) > 0 {
+			if tc, ok := result.Content[0].(mcp.TextContent); ok {
+				responseBytes = len(tc.Text)
+			}
+		}
+
 		// Fire-and-forget telemetry to synapses-pulse (if configured).
 		if pc := s.getPulseClient(); pc != nil && s.logToolCalls {
-			var responseBytes int
 			var errorMsg string
-			if result != nil && !result.IsError && len(result.Content) > 0 {
-				if tc, ok := result.Content[0].(mcp.TextContent); ok {
-					responseBytes = len(tc.Text)
-				}
-			}
 			if result != nil && result.IsError && len(result.Content) > 0 {
 				if tc, ok := result.Content[0].(mcp.TextContent); ok {
 					errorMsg = tc.Text
@@ -761,6 +778,38 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		if req.Params.Name != "end_session" && agentID != "" && s.store != nil {
 			sessionID := SessionIDFromContext(ctx)
 			s.trackSessionCall(sessionID, agentID)
+		}
+
+		// Sprint 24.7 / 24.8: memory save nudge.
+		// Reset save counter when agent calls memory with a save-type action —
+		// this allows the nudge to fire again in the next work cycle.
+		if req.Params.Name == "memory" {
+			action, _ := req.GetArguments()["action"].(string)
+			switch action {
+			case "save", "annotate", "annotate_web", "decide", "hypothesize", "abandon":
+				sessionID := SessionIDFromContext(ctx)
+				s.resetSaveCounter(sessionID, agentID)
+			}
+		}
+		// Check token budget / call count and inject nudge into the response when
+		// the threshold is crossed. Skips end_session and memory saves to avoid
+		// nudging the agent right as it acts on the nudge.
+		skipNudge := req.Params.Name == "end_session" ||
+			(req.Params.Name == "memory" && func() bool {
+				action, _ := req.GetArguments()["action"].(string)
+				switch action {
+				case "save", "annotate", "annotate_web", "decide", "hypothesize", "abandon":
+					return true
+				}
+				return false
+			}())
+		if !skipNudge && agentID != "" && result != nil {
+			sessionID := SessionIDFromContext(ctx)
+			model := s.getSessionModel(sessionID)
+			responseTokens := responseBytes / 4
+			if nudgeMsg := s.checkNudgeMessage(sessionID, agentID, model, responseTokens); nudgeMsg != "" {
+				injectNudgeIntoResult(result, nudgeMsg)
+			}
 		}
 	})
 
@@ -1497,6 +1546,19 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 
 		// Sprint 27.3: Track tool calls per session for suggestion suppression.
 		s.toolTracker.record(sessionID, toolName)
+
+		// Sprint 24.7: Proactive memory save nudge — fires when the agent has made
+		// saveNudgeThreshold non-meta tool calls without persisting anything to memory.
+		// The nudge re-arms after another saveNudgeThreshold calls (suppressible by
+		// calling memory with a write action). Never fires on errors.
+		if !result.IsError {
+			if nudge := s.saveNudger.record(sessionID, toolName, args); nudge != "" {
+				result.Content = append(result.Content, mcp.TextContent{
+					Type: "text",
+					Text: "\n---\nsave_nudge: " + nudge,
+				})
+			}
+		}
 
 		// Sprint 27.1: SDLC auto-detection from tool-call patterns.
 		if phase, mode, changed := s.sdlcDetect.recordCall(toolName, entities, files); changed {

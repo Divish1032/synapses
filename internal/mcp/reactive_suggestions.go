@@ -25,6 +25,127 @@ var metaTools = map[string]bool{
 	"end_session":  true,
 }
 
+// ── Sprint 24.7: Proactive memory save nudge ─────────────────────────────────
+
+// saveNudgeThreshold is the number of non-meta tool calls without a memory write
+// that triggers the nudge. The nudge re-arms after another saveNudgeThreshold
+// calls pass without a save (suppressible by calling memory with a write action).
+const saveNudgeThreshold = 10
+
+// explorationTools are counted separately in the nudge message so the agent
+// gets specific context: "you've explored N entities".
+var explorationTools = map[string]bool{
+	"get_context": true,
+	"search":      true,
+	"get_impact":  true,
+	"validate":    true,
+}
+
+// memorySaveWriteActions are memory actions that constitute a "save" and reset
+// the nudge counter. Read-only actions (search, list, history, list_*) do NOT
+// reset the counter — they don't persist new findings.
+var memorySaveWriteActions = map[string]bool{
+	"save":         true,
+	"annotate":     true,
+	"annotate_web": true,
+	"hypothesize":  true,
+	"decide":       true,
+	"abandon":      true,
+}
+
+// nudgeEntry holds per-session nudge state.
+type nudgeEntry struct {
+	callsSinceSave     int       // non-meta calls since last memory write
+	explorationSince   int       // exploration calls since last memory write
+	lastNudgeCallCount int       // callsSinceSave value when the last nudge fired (0 = never)
+	created            time.Time // for GC
+}
+
+// memorySaveNudger tracks tool calls since the last memory write per session.
+// When an agent accumulates ≥ saveNudgeThreshold calls without persisting
+// anything, the next tool response piggybacks a nudge. The nudge re-arms after
+// another saveNudgeThreshold calls — it never fires more than once per threshold
+// window.
+type memorySaveNudger struct {
+	mu      sync.RWMutex
+	entries map[string]*nudgeEntry
+	lastGC  time.Time
+}
+
+func newMemorySaveNudger() *memorySaveNudger {
+	return &memorySaveNudger{
+		entries: make(map[string]*nudgeEntry),
+		lastGC:  time.Now(),
+	}
+}
+
+// record processes one tool call for the given session. If toolName+args represent
+// a memory write action the counter is reset and "" is returned. Otherwise the
+// counter is incremented and a nudge message is returned when the threshold is
+// crossed (empty string means no nudge needed yet).
+func (n *memorySaveNudger) record(sessionID, toolName string, args map[string]any) string {
+	if metaTools[toolName] {
+		return ""
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	// Periodic GC — same cadence as sessionToolTracker.
+	if time.Since(n.lastGC) > toolTrackerGCInterval {
+		n.lastGC = time.Now()
+		cutoff := time.Now().Add(-toolTrackerMaxAge)
+		for sid, e := range n.entries {
+			if e.created.Before(cutoff) {
+				delete(n.entries, sid)
+			}
+		}
+	}
+
+	e, ok := n.entries[sessionID]
+	if !ok {
+		e = &nudgeEntry{created: time.Now()}
+		n.entries[sessionID] = e
+	}
+
+	// Memory write → reset; no nudge for this call.
+	if toolName == "memory" {
+		if action, _ := args["action"].(string); memorySaveWriteActions[action] {
+			e.callsSinceSave = 0
+			e.explorationSince = 0
+			e.lastNudgeCallCount = 0
+			return ""
+		}
+	}
+
+	// Increment counters.
+	e.callsSinceSave++
+	if explorationTools[toolName] {
+		e.explorationSince++
+	}
+
+	// Nudge fires when threshold crossed AND has not fired in the current window.
+	// "Current window" = calls since the last nudge (re-arms every saveNudgeThreshold).
+	if e.callsSinceSave < saveNudgeThreshold {
+		return ""
+	}
+	if e.callsSinceSave-e.lastNudgeCallCount < saveNudgeThreshold {
+		return ""
+	}
+	e.lastNudgeCallCount = e.callsSinceSave
+	return fmt.Sprintf(
+		"You've explored %d entities and made %d tool calls this session without saving to memory. "+
+			"Consider calling memory(action=save) to protect key findings against context loss.",
+		e.explorationSince, e.callsSinceSave,
+	)
+}
+
+// clear removes session state (called by end_session cleanup).
+func (n *memorySaveNudger) clear(sessionID string) {
+	n.mu.Lock()
+	delete(n.entries, sessionID)
+	n.mu.Unlock()
+}
+
 // sessionToolEntry holds per-session tool counts with a creation timestamp.
 type sessionToolEntry struct {
 	counts  map[string]int
