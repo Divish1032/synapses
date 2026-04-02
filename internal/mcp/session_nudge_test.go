@@ -352,3 +352,44 @@ func TestNudgeInjectedIntoToolResult(t *testing.T) {
 		t.Errorf("nudge message should mention memory: %q", got)
 	}
 }
+
+// TestNudge_OnlyOneNudgePerCall verifies that a single tool call produces at most
+// one nudge field — no double-injection from a second nudge system.
+func TestNudge_OnlyOneNudgePerCall(t *testing.T) {
+	s := newNudgeServer(t, 3, 0)
+
+	result := makeJSONResult(map[string]any{"entities": []string{"Foo"}})
+
+	// Drive to threshold.
+	for i := 0; i < 3; i++ {
+		nudgeMsg := s.checkNudgeMessage("sess_once", "agent-once", "", 100)
+		if nudgeMsg != "" {
+			injectNudgeIntoResult(result, nudgeMsg)
+			// Attempt a second injection on the same result (simulates dual-system bug).
+			injectNudgeIntoResult(result, nudgeMsg)
+		}
+	}
+
+	// Result must have exactly one TextContent item (no second item appended).
+	if len(result.Content) != 1 {
+		t.Errorf("want 1 content item, got %d — possible double-nudge bug", len(result.Content))
+	}
+	// And the single item must be valid JSON with exactly one memory_nudge field.
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatal("content[0] is not TextContent")
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(tc.Text), &obj); err != nil {
+		t.Fatalf("content is not JSON: %v", err)
+	}
+	count := 0
+	for k := range obj {
+		if k == "memory_nudge" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("want exactly 1 memory_nudge key in JSON, got %d", count)
+	}
+}

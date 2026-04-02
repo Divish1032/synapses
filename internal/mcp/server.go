@@ -133,7 +133,6 @@ type Server struct {
 	rulesMu            sync.RWMutex           // protects s.config.Rules for concurrent dynamic upserts
 	sdlcDetect         *sdlcDetector          // Sprint 27.1: auto-detects SDLC phase from tool-call patterns
 	toolTracker        *sessionToolTracker    // Sprint 27.3: per-session tool call counts for suggestion suppression
-	saveNudger         *memorySaveNudger      // Sprint 24.7: proactive nudge when agent hasn't saved to memory
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -604,7 +603,6 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		toolDescs:        make(map[string]string),
 		sdlcDetect:       newSDLCDetector(),
 		toolTracker:      newSessionToolTracker(),
-		saveNudger:       newMemorySaveNudger(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
@@ -1541,19 +1539,6 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 
 		// Sprint 27.3: Track tool calls per session for suggestion suppression.
 		s.toolTracker.record(sessionID, toolName)
-
-		// Sprint 24.7: Proactive memory save nudge — fires when the agent has made
-		// saveNudgeThreshold non-meta tool calls without persisting anything to memory.
-		// The nudge re-arms after another saveNudgeThreshold calls (suppressible by
-		// calling memory with a write action). Never fires on errors.
-		if !result.IsError {
-			if nudge := s.saveNudger.record(sessionID, toolName, args); nudge != "" {
-				result.Content = append(result.Content, mcp.TextContent{
-					Type: "text",
-					Text: "\n---\nsave_nudge: " + nudge,
-				})
-			}
-		}
 
 		// Sprint 27.1: SDLC auto-detection from tool-call patterns.
 		if phase, mode, changed := s.sdlcDetect.recordCall(toolName, entities, files); changed {
