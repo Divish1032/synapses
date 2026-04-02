@@ -133,6 +133,7 @@ type Server struct {
 	rulesMu            sync.RWMutex           // protects s.config.Rules for concurrent dynamic upserts
 	sdlcDetect         *sdlcDetector          // Sprint 27.1: auto-detects SDLC phase from tool-call patterns
 	toolTracker        *sessionToolTracker    // Sprint 27.3: per-session tool call counts for suggestion suppression
+	goalReinforcer     *goalReinforcer        // Sprint 25.6: per-session response counter for goal+convention reminders
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -605,6 +606,15 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		toolTracker:      newSessionToolTracker(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
+
+	// Sprint 25.6: goal+convention reinforcer — interval from config (0 = disabled).
+	{
+		interval := 0
+		if cfg != nil {
+			interval = cfg.Session.ReinforcementInterval
+		}
+		s.goalReinforcer = newGoalReinforcer(interval)
+	}
 
 	// Security F10: build rate limiter from config (or defaults if cfg is nil).
 	if cfg != nil {
@@ -1539,6 +1549,14 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 
 		// Sprint 27.3: Track tool calls per session for suggestion suppression.
 		s.toolTracker.record(sessionID, toolName)
+
+		// Sprint 25.6: Goal and convention reinforcement — inject every N responses.
+		// Skip meta tools (session_init, end_session) since they already carry full
+		// project context; reinforcement targets the exploration/validation tools where
+		// drift is most likely to occur.
+		if !metaTools[toolName] && s.goalReinforcer.recordAndShouldFire(sessionID) {
+			s.injectGoalReinforcement(result, sessionID)
+		}
 
 		// Sprint 27.1: SDLC auto-detection from tool-call patterns.
 		if phase, mode, changed := s.sdlcDetect.recordCall(toolName, entities, files); changed {

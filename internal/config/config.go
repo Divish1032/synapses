@@ -414,6 +414,17 @@ type SessionConfig struct {
 	// Recommended: 60.0 (warn at 60% of context window consumed).
 	// Example: token_budget_pct: 60.0
 	TokenBudgetPct float64 `json:"token_budget_pct,omitempty"`
+
+	// ReinforcementInterval is the number of tool responses between automatic
+	// goal+convention reminders. Every Nth response, Synapses appends a compact
+	// reminder containing the current in-progress task goal (1 line) and the top
+	// 3 active conventions. Prevents mid-session drift where the task and project
+	// conventions decay into the "middle of context" and stop influencing the agent.
+	//
+	// Default: 0 (disabled). Set to a positive integer to enable.
+	// Recommended: 10 (fires after every 10 tool responses, ~50 tokens overhead).
+	// Example: reinforcement_interval: 10
+	ReinforcementInterval int `json:"reinforcement_interval,omitempty"`
 }
 
 // HibernateConfig configures the project hibernation lifecycle.

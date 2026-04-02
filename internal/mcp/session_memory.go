@@ -242,8 +242,10 @@ func (s *Server) handleEndSession(
 	}
 	synapseSessionID := s.getSynapseSessionID(mcpSessionID)
 	// Sprint 27.3: clear per-session tool counts.
+	// Sprint 25.6: clear goal reinforcer counter so resumed sessions start fresh.
 	if synapseSessionID != "" {
 		s.toolTracker.clear(synapseSessionID)
+		s.goalReinforcer.clear(synapseSessionID)
 	}
 	var retro *store.ToolCallSummary
 	if s.store != nil && synapseSessionID != "" {
@@ -1299,14 +1301,26 @@ func (s *Server) buildHandoffPayload(agentID, summary string, sessSummary *sessi
 		return ""
 	}
 
+	// Cap agent_summary to 500 chars — consistent with the exploration log's
+	// 300-char FindingSummary cap. Prevents unbounded payload growth when agents
+	// pass very long summaries.
+	agentSummary := summary
+	if len([]rune(agentSummary)) > 500 {
+		agentSummary = string([]rune(agentSummary)[:500]) + "…"
+	}
+
 	payload := handoffPayload{
 		SessionAt:    time.Now().Unix(),
-		AgentSummary: summary,
+		AgentSummary: agentSummary,
 	}
 
 	// Accomplished: resolve tasks updated this session and keep completed ones.
+	// Capped at 5 to bound payload size — mirrors the Remaining cap.
 	if sessSummary != nil {
 		for _, tid := range sessSummary.TasksUpdated {
+			if len(payload.Accomplished) >= 5 {
+				break
+			}
 			t, err := s.store.GetTask(tid)
 			if err != nil || t == nil {
 				continue
