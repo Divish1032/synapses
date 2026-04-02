@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -165,6 +166,74 @@ func (s *Store) GetHypotheses(agentID, projectID, stateFilter string, limit int)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get hypotheses: %w", err)
+	}
+	defer rows.Close()
+	return scanHypotheses(rows)
+}
+
+// SearchHypotheses performs a case-insensitive keyword search across content
+// and evidence fields for the given project. When agentID is non-empty, results
+// are scoped to that agent; otherwise all agents in the project are searched.
+// When query is empty, returns the most recent hypotheses.
+// Used by intent-aware memory retrieval (Sprint 25.3).
+func (s *Store) SearchHypotheses(agentID, projectID, query string, limit int) ([]Hypothesis, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	query = strings.TrimSpace(query)
+	if query == "" {
+		if agentID == "" {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, content, state, evidence, created_at, updated_at
+				FROM hypotheses
+				WHERE project_id = ?
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				projectID, limit,
+			)
+		} else {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, content, state, evidence, created_at, updated_at
+				FROM hypotheses
+				WHERE agent_id = ? AND project_id = ?
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				agentID, projectID, limit,
+			)
+		}
+	} else {
+		like := "%" + escapeLike(query) + "%"
+		if agentID == "" {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, content, state, evidence, created_at, updated_at
+				FROM hypotheses
+				WHERE project_id = ?
+				  AND (content LIKE ? ESCAPE '\'
+				    OR evidence LIKE ? ESCAPE '\')
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				projectID, like, like, limit,
+			)
+		} else {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, content, state, evidence, created_at, updated_at
+				FROM hypotheses
+				WHERE agent_id = ? AND project_id = ?
+				  AND (content LIKE ? ESCAPE '\'
+				    OR evidence LIKE ? ESCAPE '\')
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				agentID, projectID, like, like, limit,
+			)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("search hypotheses: %w", err)
 	}
 	defer rows.Close()
 	return scanHypotheses(rows)

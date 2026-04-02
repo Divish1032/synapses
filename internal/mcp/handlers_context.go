@@ -92,6 +92,7 @@ type directionalContext struct {
 	GraphFreshness         string                    `json:"graph_freshness,omitempty"`          // GAP-4: warning when entity's file was recently modified
 	AdaptiveHint           string                    `json:"adaptive_hint,omitempty"`            // F17: set when BFS depth/detail was auto-expanded based on prior feedback
 	EntityMemories         []entityMemoryHint        `json:"entity_memories,omitempty"`          // R10: institutional knowledge attached to this entity
+	IntentMemories         *intentMemorySummary      `json:"intent_memories,omitempty"`          // Sprint 25.3: decisions/hypotheses for this entity area, shaped by intent
 	QualityGaps            []store.QualityGap        `json:"quality_gaps,omitempty"`             // R32: open quality gaps on this entity
 	EntityHash             string                    `json:"entity_hash,omitempty"`              // R14: SHA1 of node+neighbor IDs; stable cache key for clients
 	CallerCountWarning     string                    `json:"caller_count_warning,omitempty"`     // DIAG-3: set when caller count is 0 for a method and use_go_types=false
@@ -211,6 +212,28 @@ type entityMemoryHint struct {
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
 	Source    string `json:"source"`
+}
+
+// intentMemorySummary is the Sprint 25.3 intent-aware memory section injected
+// into get_context when intent is modify/debug/add/review. Surfaces decisions
+// and hypotheses relevant to the entity area based on what the agent is about to do.
+type intentMemorySummary struct {
+	Intent     string                `json:"intent"`
+	Note       string                `json:"note,omitempty"`
+	Decisions  []intentDecisionHint  `json:"decisions,omitempty"`
+	Hypotheses []intentHypothesisHint `json:"hypotheses,omitempty"`
+}
+
+// intentDecisionHint is a compact decision record for intent-aware retrieval.
+type intentDecisionHint struct {
+	Choice    string `json:"choice"`
+	Reasoning string `json:"reasoning,omitempty"`
+}
+
+// intentHypothesisHint is a compact hypothesis record for intent-aware retrieval.
+type intentHypothesisHint struct {
+	Content string `json:"content"`
+	State   string `json:"state"`
 }
 
 // handleGetContext returns an N-hop ego-subgraph around the named entity,
@@ -1119,6 +1142,64 @@ func (s *Server) handleGetContext(
 			s.store.TouchMemory(m.ID)
 		}
 		dc.EntityMemories = hints
+	}()
+
+	// 6. Sprint 25.3: Intent-aware memory retrieval — surface decisions and
+	// hypotheses for the entity area based on the agent's stated intent.
+	// Only fires for intents that have actionable memory categories (modify/debug/add/review).
+	// Uses the entity name as the search query so results are relevant to the area.
+	enrichWg.Add(1)
+	go func() {
+		defer enrichWg.Done()
+		if s.store == nil || best == nil || best.Name == "" {
+			return
+		}
+		intentStr, _ := req.GetArguments()["intent"].(string)
+		if intentStr == "" {
+			return
+		}
+		categories := intentMemoryCategories(intentStr)
+		if len(categories) == 0 {
+			return
+		}
+
+		entityQuery := best.Name
+		var im intentMemorySummary
+		im.Intent = intentStr
+		im.Note = intentContextNote(intentStr)
+
+		if categories["decisions"] {
+			ds, err := s.store.SearchDecisions("", s.projectID, entityQuery, 3)
+			if err == nil && len(ds) > 0 {
+				hints := make([]intentDecisionHint, 0, len(ds))
+				for _, d := range ds {
+					hints = append(hints, intentDecisionHint{
+						Choice:    d.Choice,
+						Reasoning: d.Reasoning,
+					})
+				}
+				im.Decisions = hints
+			}
+		}
+
+		if categories["hypotheses"] {
+			hs, err := s.store.SearchHypotheses("", s.projectID, entityQuery, 3)
+			if err == nil && len(hs) > 0 {
+				hints := make([]intentHypothesisHint, 0, len(hs))
+				for _, h := range hs {
+					hints = append(hints, intentHypothesisHint{
+						Content: h.Content,
+						State:   h.State,
+					})
+				}
+				im.Hypotheses = hints
+			}
+		}
+
+		// Only set IntentMemories if there is something to show.
+		if len(im.Decisions) > 0 || len(im.Hypotheses) > 0 {
+			dc.IntentMemories = &im
+		}
 	}()
 
 	// Wait for all enrichment goroutines to complete.

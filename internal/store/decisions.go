@@ -96,7 +96,9 @@ func (s *Store) GetRecentDecisions(agentID, projectID string, limit int) ([]Deci
 }
 
 // SearchDecisions performs a case-insensitive keyword search across choice,
-// reasoning, and context fields for the given agent and project.
+// reasoning, and context fields for the given project.
+// When agentID is non-empty, results are scoped to that agent; otherwise all
+// agents in the project are searched (project-wide intent-aware retrieval).
 // When query is empty, returns the most recent decisions (equivalent to GetRecentDecisions).
 func (s *Store) SearchDecisions(agentID, projectID, query string, limit int) ([]Decision, error) {
 	if limit <= 0 {
@@ -109,30 +111,56 @@ func (s *Store) SearchDecisions(agentID, projectID, query string, limit int) ([]
 	)
 	query = strings.TrimSpace(query)
 	if query == "" {
-		rows, err = s.knowledgeDB.Query(`
-			SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
-			FROM decisions
-			WHERE agent_id = ? AND project_id = ?
-			ORDER BY created_at DESC
-			LIMIT ?`,
-			agentID, projectID, limit,
-		)
+		if agentID == "" {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
+				FROM decisions
+				WHERE project_id = ?
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				projectID, limit,
+			)
+		} else {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
+				FROM decisions
+				WHERE agent_id = ? AND project_id = ?
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				agentID, projectID, limit,
+			)
+		}
 	} else {
 		// escapeLike ensures % and _ metacharacters in the user's query are
 		// treated as literals. ESCAPE '\' activates the escape sequences.
 		like := "%" + escapeLike(query) + "%"
-		rows, err = s.knowledgeDB.Query(`
-			SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
-			FROM decisions
-			WHERE agent_id = ? AND project_id = ?
-			  AND (choice LIKE ? ESCAPE '\'
-			    OR reasoning LIKE ? ESCAPE '\'
-			    OR context LIKE ? ESCAPE '\'
-			    OR alternatives LIKE ? ESCAPE '\')
-			ORDER BY created_at DESC
-			LIMIT ?`,
-			agentID, projectID, like, like, like, like, limit,
-		)
+		if agentID == "" {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
+				FROM decisions
+				WHERE project_id = ?
+				  AND (choice LIKE ? ESCAPE '\'
+				    OR reasoning LIKE ? ESCAPE '\'
+				    OR context LIKE ? ESCAPE '\'
+				    OR alternatives LIKE ? ESCAPE '\')
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				projectID, like, like, like, like, limit,
+			)
+		} else {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
+				FROM decisions
+				WHERE agent_id = ? AND project_id = ?
+				  AND (choice LIKE ? ESCAPE '\'
+				    OR reasoning LIKE ? ESCAPE '\'
+				    OR context LIKE ? ESCAPE '\'
+				    OR alternatives LIKE ? ESCAPE '\')
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				agentID, projectID, like, like, like, like, limit,
+			)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("search decisions: %w", err)

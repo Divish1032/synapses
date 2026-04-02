@@ -107,6 +107,33 @@ func buildEnrichedQuery(query, intent, taskTitle string) string {
 	return query + " " + strings.Join(extras, " ")
 }
 
+// intentMemoryCategories maps an intent string to which additional memory
+// stores should be searched alongside the quad-channel recall. Returns a set
+// of category keys. An empty map means no extra queries are needed.
+//
+// The mapping reflects what the agent is most likely to need:
+//   - modify  → decisions (what was decided here) + active hypotheses (open theories)
+//   - debug   → active/confirmed hypotheses (working theories) + rejected approaches (what failed)
+//   - add     → decisions (established patterns to follow)
+//   - review  → decisions + rejected approaches (what was tried and rejected)
+//   - understand / "" → no extra queries (semantic search covers broad exploration)
+//
+// Sprint 25.3: intent-aware memory retrieval.
+func intentMemoryCategories(intent string) map[string]bool {
+	switch strings.ToLower(intent) {
+	case "modify":
+		return map[string]bool{"decisions": true, "hypotheses": true}
+	case "debug":
+		return map[string]bool{"hypotheses": true, "rejected": true}
+	case "add":
+		return map[string]bool{"decisions": true}
+	case "review":
+		return map[string]bool{"decisions": true, "rejected": true}
+	default:
+		return nil
+	}
+}
+
 // quadRecallSearch runs 4 parallel retrieval channels and merges via RRF.
 // Returns memories ranked by fused score, plus per-memory channel attribution,
 // stale embedding IDs, and optional graph traversal info.

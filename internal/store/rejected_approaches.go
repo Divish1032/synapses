@@ -93,8 +93,10 @@ func (s *Store) GetRecentRejectedApproaches(agentID, projectID string, limit int
 }
 
 // SearchRejectedApproaches performs a case-insensitive keyword search across
-// approach, failure_reason, blocker, and context fields for the given agent
-// and project. When query is empty, returns the most recent entries.
+// approach, failure_reason, blocker, and context fields for the given project.
+// When agentID is non-empty, results are scoped to that agent; otherwise all
+// agents in the project are searched (project-wide intent-aware retrieval).
+// When query is empty, returns the most recent entries.
 func (s *Store) SearchRejectedApproaches(agentID, projectID, query string, limit int) ([]RejectedApproach, error) {
 	if limit <= 0 {
 		limit = 20
@@ -106,25 +108,55 @@ func (s *Store) SearchRejectedApproaches(agentID, projectID, query string, limit
 	)
 	query = strings.TrimSpace(query)
 	if query == "" {
-		rows, err = s.knowledgeDB.Query(`
-			SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
-			FROM rejected_approaches
-			WHERE agent_id = ? AND project_id = ?
-			ORDER BY created_at DESC
-			LIMIT ?`,
-			agentID, projectID, limit,
-		)
+		if agentID == "" {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
+				FROM rejected_approaches
+				WHERE project_id = ?
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				projectID, limit,
+			)
+		} else {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
+				FROM rejected_approaches
+				WHERE agent_id = ? AND project_id = ?
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				agentID, projectID, limit,
+			)
+		}
 	} else {
-		like := "%" + query + "%"
-		rows, err = s.knowledgeDB.Query(`
-			SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
-			FROM rejected_approaches
-			WHERE agent_id = ? AND project_id = ?
-			  AND (approach LIKE ? OR failure_reason LIKE ? OR blocker LIKE ? OR context LIKE ?)
-			ORDER BY created_at DESC
-			LIMIT ?`,
-			agentID, projectID, like, like, like, like, limit,
-		)
+		// escapeLike guards against LIKE metacharacters (%, _) in the query.
+		like := "%" + escapeLike(query) + "%"
+		if agentID == "" {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
+				FROM rejected_approaches
+				WHERE project_id = ?
+				  AND (approach LIKE ? ESCAPE '\'
+				    OR failure_reason LIKE ? ESCAPE '\'
+				    OR blocker LIKE ? ESCAPE '\'
+				    OR context LIKE ? ESCAPE '\')
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				projectID, like, like, like, like, limit,
+			)
+		} else {
+			rows, err = s.knowledgeDB.Query(`
+				SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
+				FROM rejected_approaches
+				WHERE agent_id = ? AND project_id = ?
+				  AND (approach LIKE ? ESCAPE '\'
+				    OR failure_reason LIKE ? ESCAPE '\'
+				    OR blocker LIKE ? ESCAPE '\'
+				    OR context LIKE ? ESCAPE '\')
+				ORDER BY created_at DESC
+				LIMIT ?`,
+				agentID, projectID, like, like, like, like, limit,
+			)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("search rejected approaches: %w", err)

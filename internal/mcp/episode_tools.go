@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
@@ -498,6 +499,12 @@ func (s *Server) handleRecall(
 		depth = int(v)
 	}
 
+	// Sprint 25.3: explicit intent parameter for intent-aware memory retrieval.
+	// When provided, takes precedence over agent record intent for query enrichment
+	// AND drives which additional memory stores (decisions, hypotheses) are searched.
+	// Valid values: understand, modify, debug, add, review (matches get_context model).
+	intentMode := stringArg(req, "intent")
+
 	// Search mode: quad-channel recall (BM25 + semantic + graph + temporal).
 	searchLimit := limit
 	if searchLimit > 5 {
@@ -536,11 +543,16 @@ func (s *Server) handleRecall(
 	var contextEnrichment map[string]interface{}
 	if agentIDStr := stringArg(req, "agent_id"); agentIDStr != "" && query != "" {
 		if agent, agentErr := s.store.GetAgent(agentIDStr); agentErr == nil && agent != nil {
-			enrichedQuery = buildEnrichedQuery(query, agent.Intent, agent.CurrentTaskTitle)
+			// Sprint 25.3: explicit intent= param takes precedence over agent record intent.
+			effectiveIntent := intentMode
+			if effectiveIntent == "" {
+				effectiveIntent = agent.Intent
+			}
+			enrichedQuery = buildEnrichedQuery(query, effectiveIntent, agent.CurrentTaskTitle)
 			applied := enrichedQuery != query
 			contextEnrichment = map[string]interface{}{
 				"applied":    applied,
-				"intent":     agent.Intent,
+				"intent":     effectiveIntent,
 				"task_title": agent.CurrentTaskTitle,
 			}
 			if applied {
@@ -548,6 +560,18 @@ func (s *Server) handleRecall(
 			}
 		}
 		// Lookup errors are silently swallowed — recall degrades to non-enriched.
+	} else if intentMode != "" && query != "" {
+		// Sprint 25.3: when intent= is provided WITHOUT agent_id, still enrich the
+		// query with the intent keyword so BM25/semantic channels benefit from it.
+		enrichedQuery = buildEnrichedQuery(query, intentMode, "")
+		applied := enrichedQuery != query
+		contextEnrichment = map[string]interface{}{
+			"applied": applied,
+			"intent":  intentMode,
+		}
+		if applied {
+			contextEnrichment["enriched_query"] = enrichedQuery
+		}
 	}
 	// episodeQuery uses enrichedQuery when available (episode search is also FTS5/BM25).
 	episodeQuery := query
@@ -985,6 +1009,129 @@ func (s *Server) handleRecall(
 		resp["query_enrichment"] = contextEnrichment
 	}
 
+	// Sprint 25.3: intent-aware memory retrieval — when intent= is provided,
+	// additionally surface decisions, hypotheses, and/or rejected approaches
+	// relevant to the query based on the intent's information needs.
+	// Runs in parallel goroutines capped at 3 items per category to avoid
+	// overwhelming the agent. Silently skips unavailable stores.
+	if s.store != nil && intentMode != "" && query != "" {
+		categories := intentMemoryCategories(intentMode)
+		if len(categories) > 0 {
+			type intentCtxResult struct {
+				decisions []store.Decision
+				hyps      []store.Hypothesis
+				rejected  []store.RejectedApproach
+			}
+			var icMu sync.Mutex
+			var icRes intentCtxResult
+			var icWg sync.WaitGroup
+			icCtx, icCancel := context.WithTimeout(ctx, 3*time.Second)
+			defer icCancel()
+
+			if categories["decisions"] {
+				icWg.Add(1)
+				go func() {
+					defer icWg.Done()
+					select {
+					case <-icCtx.Done():
+						return
+					default:
+					}
+					// Search project-wide (agentID="") — decisions are project-level records.
+					ds, err := s.store.SearchDecisions("", s.projectID, query, 3)
+					if err != nil || len(ds) == 0 {
+						return
+					}
+					icMu.Lock()
+					icRes.decisions = ds
+					icMu.Unlock()
+				}()
+			}
+
+			if categories["hypotheses"] {
+				icWg.Add(1)
+				go func() {
+					defer icWg.Done()
+					select {
+					case <-icCtx.Done():
+						return
+					default:
+					}
+					hs, err := s.store.SearchHypotheses("", s.projectID, query, 3)
+					if err != nil || len(hs) == 0 {
+						return
+					}
+					icMu.Lock()
+					icRes.hyps = hs
+					icMu.Unlock()
+				}()
+			}
+
+			if categories["rejected"] {
+				icWg.Add(1)
+				go func() {
+					defer icWg.Done()
+					select {
+					case <-icCtx.Done():
+						return
+					default:
+					}
+					rs, err := s.store.SearchRejectedApproaches("", s.projectID, query, 3)
+					if err != nil || len(rs) == 0 {
+						return
+					}
+					icMu.Lock()
+					icRes.rejected = rs
+					icMu.Unlock()
+				}()
+			}
+
+			icWg.Wait()
+
+			// Only add intent_context if at least one category returned results.
+			if len(icRes.decisions) > 0 || len(icRes.hyps) > 0 || len(icRes.rejected) > 0 {
+				ic := map[string]interface{}{
+					"intent": intentMode,
+					"note":   intentContextNote(intentMode),
+				}
+				if len(icRes.decisions) > 0 {
+					type decHint struct {
+						Choice    string `json:"choice"`
+						Reasoning string `json:"reasoning,omitempty"`
+					}
+					hints := make([]decHint, 0, len(icRes.decisions))
+					for _, d := range icRes.decisions {
+						hints = append(hints, decHint{Choice: d.Choice, Reasoning: d.Reasoning})
+					}
+					ic["decisions"] = hints
+				}
+				if len(icRes.hyps) > 0 {
+					type hypHint struct {
+						Content string `json:"content"`
+						State   string `json:"state"`
+					}
+					hints := make([]hypHint, 0, len(icRes.hyps))
+					for _, h := range icRes.hyps {
+						hints = append(hints, hypHint{Content: h.Content, State: h.State})
+					}
+					ic["hypotheses"] = hints
+				}
+				if len(icRes.rejected) > 0 {
+					type rejHint struct {
+						Approach string `json:"approach"`
+						Reason   string `json:"failure_reason,omitempty"`
+					}
+					hints := make([]rejHint, 0, len(icRes.rejected))
+					for _, r := range icRes.rejected {
+						hints = append(hints, rejHint{Approach: r.Approach, Reason: r.FailureReason})
+					}
+					ic["rejected_approaches"] = hints
+				}
+				resp["intent_context"] = ic
+			}
+		}
+	}
+
 	// Record recall footprint for recall-to-action quality correlation.
 	fpSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
 	if fpSessID != "" && (len(memories) > 0 || len(episodes) > 0) {
@@ -1327,4 +1474,22 @@ func parseFlexibleTime(s string, endOfDay bool) (time.Time, error) {
 		t = t.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
 	}
 	return t.UTC(), nil
+}
+
+// intentContextNote returns a human-readable explanation of why decisions/
+// hypotheses/rejected approaches were surfaced for the given intent.
+// Sprint 25.3: intent-aware memory retrieval.
+func intentContextNote(intent string) string {
+	switch strings.ToLower(intent) {
+	case "modify":
+		return "Decisions and active hypotheses related to your query — surfaced because intent=modify. Review prior decisions before changing this area."
+	case "debug":
+		return "Active hypotheses and previously rejected approaches related to your query — surfaced because intent=debug. Check what was already tried before investigating further."
+	case "add":
+		return "Decisions related to your query — surfaced because intent=add. Follow established patterns recorded in prior sessions."
+	case "review":
+		return "Decisions and rejected approaches related to your query — surfaced because intent=review. Context on what was chosen and what was abandoned."
+	default:
+		return "Additional context from prior sessions related to your query."
+	}
 }
