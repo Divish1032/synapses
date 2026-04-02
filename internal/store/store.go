@@ -984,6 +984,21 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_hyp_agent   ON hypotheses(agent_id, project_id, state)`,
 		`CREATE INDEX IF NOT EXISTS idx_hyp_project ON hypotheses(project_id, state)`,
+		// Sprint 24.5: Decision journaling — immutable structured records of architectural
+		// and implementation decisions (what was chosen, alternatives, reasoning, context).
+		// Unlike hypotheses (mutable state machine), decisions are permanent audit trail entries.
+		`CREATE TABLE IF NOT EXISTS decisions (
+			id           TEXT PRIMARY KEY,
+			agent_id     TEXT NOT NULL,
+			project_id   TEXT NOT NULL DEFAULT '',
+			choice       TEXT NOT NULL,
+			alternatives TEXT NOT NULL DEFAULT '',
+			reasoning    TEXT NOT NULL DEFAULT '',
+			context      TEXT NOT NULL DEFAULT '',
+			created_at   INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_dec_agent   ON decisions(agent_id, project_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_dec_project ON decisions(project_id, created_at DESC)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

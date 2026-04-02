@@ -119,7 +119,7 @@ func (s *Server) handleMemoryDispatch(
 ) (*mcp.CallToolResult, error) {
 	action, _ := req.GetArguments()["action"].(string)
 	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses)"), nil
+		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses, decide, list_decisions)"), nil
 	}
 	switch action {
 	case "save":
@@ -144,9 +144,14 @@ func (s *Server) handleMemoryDispatch(
 		return s.handleHypothesize(ctx, req)
 	case "list_hypotheses":
 		return s.handleListHypotheses(ctx, req)
+	// Sprint 24.5: decision journaling.
+	case "decide":
+		return s.handleDecide(ctx, req)
+	case "list_decisions":
+		return s.handleListDecisions(ctx, req)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf(
-			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses)", action)), nil
+			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses, decide, list_decisions)", action)), nil
 	}
 }
 

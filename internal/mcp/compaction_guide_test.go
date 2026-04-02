@@ -375,3 +375,72 @@ func TestBuildCompactionRecovery_IncludesActiveHypotheses(t *testing.T) {
 	}
 }
 
+// ── Decisions in compaction recovery (Sprint 24.5) ──────────────────────────
+
+// TestBuildCompactionRecovery_IncludesRecentDecisions verifies that structured
+// decisions recorded via InsertDecision appear in the recovery packet under
+// "recent_decisions", newest-first, up to 5 entries.
+func TestBuildCompactionRecovery_IncludesRecentDecisions(t *testing.T) {
+	srv := newTestServer(t)
+
+	_, _ = srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "dec-agent",
+		"scope":    "standard",
+	}))
+	sessionID := srv.getSynapseSessionID(SessionIDFromContext(ctx))
+	if sessionID == "" {
+		t.Skip("no session ID — skipping compaction recovery test")
+	}
+
+	base := time.Now().Unix()
+	// Insert three decisions with distinct timestamps.
+	for i, choice := range []string{
+		"Use JWT for auth",
+		"Use PostgreSQL for storage",
+		"Use repository pattern",
+	} {
+		_, err := srv.store.InsertDecision(store.Decision{
+			AgentID:   "dec-agent",
+			ProjectID: srv.projectID,
+			Choice:    choice,
+			Reasoning: "because it fits",
+			CreatedAt: base + int64(i),
+		})
+		if err != nil {
+			t.Fatalf("InsertDecision: %v", err)
+		}
+	}
+
+	recovery := srv.buildCompactionRecovery("dec-agent", sessionID)
+	if recovery == nil {
+		t.Fatal("expected non-nil recovery packet")
+	}
+
+	raw, ok := recovery["recent_decisions"]
+	if !ok {
+		t.Fatal("expected recent_decisions in recovery packet")
+	}
+
+	b, jsonErr := json.Marshal(raw)
+	if jsonErr != nil {
+		t.Fatalf("marshal recent_decisions: %v", jsonErr)
+	}
+	var decs []map[string]interface{}
+	if err := json.Unmarshal(b, &decs); err != nil {
+		t.Fatalf("unmarshal recent_decisions: %v", err)
+	}
+	if len(decs) != 3 {
+		t.Errorf("expected 3 decisions in recovery, got %d", len(decs))
+	}
+	// Newest-first: "Use repository pattern" has the highest created_at.
+	if choice, _ := decs[0]["choice"].(string); choice != "Use repository pattern" {
+		t.Errorf("expected newest decision first, got %q", choice)
+	}
+	// All decisions must have the choice field.
+	for _, d := range decs {
+		if d["choice"] == nil || d["choice"] == "" {
+			t.Error("each decision must have a non-empty choice field")
+		}
+	}
+}
+

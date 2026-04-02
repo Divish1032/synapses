@@ -1247,6 +1247,35 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// ── Sprint 24.5: Recent decisions ────────────────────────────────────
+	// Surface the 3 most recent decisions so the agent knows what architectural
+	// choices were already evaluated — prevents re-deriving prior evaluations.
+	// "This decision was already evaluated. X was chosen because Y."
+	if s.store != nil {
+		if recentDecs, err := s.store.GetRecentDecisions(agentID, s.projectID, 3); err == nil && len(recentDecs) > 0 {
+			type decItem struct {
+				ID        string `json:"id"`
+				Choice    string `json:"choice"`
+				Reasoning string `json:"reasoning,omitempty"`
+				Context   string `json:"context,omitempty"`
+			}
+			items := make([]decItem, 0, len(recentDecs))
+			for _, d := range recentDecs {
+				items = append(items, decItem{
+					ID:        d.ID,
+					Choice:    d.Choice,
+					Reasoning: d.Reasoning,
+					Context:   d.Context,
+				})
+			}
+			resp["recent_decisions"] = map[string]interface{}{
+				"count":     len(items),
+				"decisions": items,
+				"note":      "These decisions were already evaluated. Use memory(action='list_decisions') to search all decisions or memory(action='decide') to record new ones.",
+			}
+		}
+	}
+
 	// ── AM-3: Invalidated memories ──────────────────────────────────────
 	// Surface stale memories not yet shown to THIS agent. Per-agent tracking
 	// via memory_surfaced table ensures every agent sees each invalidation.
@@ -2449,7 +2478,31 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 		recovery["active_hypotheses"] = items
 	}
 
-	// 10. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
+	// 10. Sprint 24.5: Recent decisions — inject structured decision records so the
+	// agent doesn't re-derive past architectural choices after context compaction.
+	// Up to 5 most recent decisions; omitted when none exist for this agent/project.
+	if decisions, err := s.store.GetRecentDecisions(agentID, s.projectID, 5); err == nil && len(decisions) > 0 {
+		type compactDecision struct {
+			ID           string `json:"id"`
+			Choice       string `json:"choice"`
+			Alternatives string `json:"alternatives,omitempty"`
+			Reasoning    string `json:"reasoning,omitempty"`
+			Context      string `json:"context,omitempty"`
+		}
+		items := make([]compactDecision, 0, len(decisions))
+		for _, d := range decisions {
+			items = append(items, compactDecision{
+				ID:           d.ID,
+				Choice:       d.Choice,
+				Alternatives: d.Alternatives,
+				Reasoning:    d.Reasoning,
+				Context:      d.Context,
+			})
+		}
+		recovery["recent_decisions"] = items
+	}
+
+	// 11. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
 	truncateCompactionPacket(recovery, 8000)
 
 	return recovery
@@ -2522,7 +2575,7 @@ func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
 	// task_progress is high-value (answers "what was I doing?") so drops late.
 	// explored_entities is dropped after entity_memories (high-value intelligence,
 	// but work_summary already captures entity/file names as a fallback).
-	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "active_rules", "task_progress", "context_snapshot"}
+	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "recent_decisions", "active_hypotheses", "active_rules", "task_progress", "context_snapshot"}
 	for _, key := range dropOrder {
 		if len(data) <= maxChars {
 			return

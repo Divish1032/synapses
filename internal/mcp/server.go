@@ -2116,11 +2116,14 @@ func (s *Server) registerTools() {
 					"action='add_gap' / 'list_gaps': track and query quality gaps. "+
 					"action='history': entity change timeline. "+
 					"action='hypothesize': record a working theory (ACTIVE state); update with state=confirmed or state=rejected as evidence accumulates. Hypotheses survive compaction. "+
-					"action='list_hypotheses': retrieve current hypotheses, filtered by state.",
+					"action='list_hypotheses': retrieve current hypotheses, filtered by state. "+
+					"action='decide': record a structured decision — what was chosen, alternatives evaluated, reasoning, and context. "+
+					"Prevents re-deriving the same architectural choices next session. Appears in future session_init as 'This decision was already evaluated.' "+
+					"action='list_decisions': search or browse past decisions by keyword.",
 			),
 			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history', 'hypothesize', 'list_hypotheses'."),
+				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history', 'hypothesize', 'list_hypotheses', 'decide', 'list_decisions'."),
 			),
 			// action=save params
 			mcp.WithString("agent_id",
@@ -2241,6 +2244,20 @@ func (s *Server) registerTools() {
 			mcp.WithString("state_filter",
 				mcp.Description("Filter by state: active (default), confirmed, rejected, all. action=list_hypotheses."),
 			),
+			// action=decide params (Sprint 24.5)
+			mcp.WithString("choice",
+				mcp.Description("What was decided/chosen (e.g. 'Use JWT with RS256'). Required for action=decide."),
+			),
+			mcp.WithString("alternatives",
+				mcp.Description("What else was considered (free text). action=decide."),
+			),
+			mcp.WithString("reasoning",
+				mcp.Description("Why this choice was made. action=decide."),
+			),
+			mcp.WithString("context",
+				mcp.Description("When/where this decision was made (e.g. 'Adding OAuth to /api/auth'). action=decide."),
+			),
+			// action=list_decisions uses the existing 'query' and 'limit' params.
 		),
 		s.handleMemoryDispatch,
 	)
