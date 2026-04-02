@@ -2489,6 +2489,110 @@ func TestHandleSessionInit_Briefing_Conventions_LongDescTruncated(t *testing.T) 
 	}
 }
 
+// TestHandleSessionInit_Briefing_Conventions_FormatterDetected verifies
+// that when s.projectPath contains a formatter config file, the formatter
+// convention ("This project auto-formats with Prettier on save…") appears
+// in _briefing.conventions. This tests the integration wiring between
+// detectFormatterConventions and handleSessionInit.
+func TestHandleSessionInit_Briefing_Conventions_FormatterDetected(t *testing.T) {
+	dir := t.TempDir()
+	// Place a Prettier config in the temp dir.
+	if err := os.WriteFile(filepath.Join(dir, ".prettierrc"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	s := New(g, cfg, st)
+	s.projectPath = dir // point at the dir with .prettierrc
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "fmt-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be []any, got %T", briefing["conventions"])
+	}
+	var found bool
+	for _, c := range convs {
+		if msg, ok := c.(string); ok && strings.Contains(msg, "Prettier") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("_briefing.conventions missing Prettier formatter convention; got: %v", convs)
+	}
+}
+
+// TestHandleSessionInit_Briefing_Conventions_FormatterNotInCap verifies that
+// formatter conventions are NOT counted against the 8-item prompt+rule cap.
+// A project with a formatter config AND 8 rules should have >8 total conventions.
+func TestHandleSessionInit_Briefing_Conventions_FormatterNotInCap(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".prettierrc"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	for i := 0; i < 8; i++ {
+		cfg.Rules = append(cfg.Rules, config.Rule{
+			ID:          fmt.Sprintf("rule-%d", i),
+			Description: fmt.Sprintf("Convention number %d", i),
+			Severity:    "warning",
+			RuleType:    "agent",
+		})
+	}
+	s := New(g, cfg, st)
+	s.projectPath = dir
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "cap-fmt-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be []any, got %T", briefing["conventions"])
+	}
+	// Formatter convention (1) + 8 rules = 9 total. Cap applies only to rules+prompts.
+	if len(convs) < 9 {
+		t.Errorf("expected ≥9 conventions (1 formatter + 8 rules), got %d: %v", len(convs), convs)
+	}
+	// The Prettier convention must be present.
+	var found bool
+	for _, c := range convs {
+		if msg, ok := c.(string); ok && strings.Contains(msg, "Prettier") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("formatter convention missing even though cap should not apply to it; got: %v", convs)
+	}
+}
+
 func TestHandleSessionInit_WithPendingTasks(t *testing.T) {
 	st := openMCPTestStore(t)
 	g := graph.New("test-repo")
