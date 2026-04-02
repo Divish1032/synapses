@@ -2321,3 +2321,112 @@ func TestInsertMemoryDedupAtomicity(t *testing.T) {
 		t.Fatalf("rows error: %v", err)
 	}
 }
+
+// ── Sprint 25.5: GetLatestHandoff store-level tests ──────────────────────────
+
+func TestGetLatestHandoff_ReturnsLatestForAgent(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Insert a handoff memory for agent-a.
+	_, err := st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"agent_summary":"completed auth sprint","session_at":1000}`,
+		AgentID:       "agent-a",
+		Source:        SourceAuto,
+		Tags:          `["handoff","session_end","auto"]`,
+		SourceProject: "proj-x",
+	})
+	if err != nil {
+		t.Fatalf("InsertMemory handoff: %v", err)
+	}
+
+	mem, err := st.GetLatestHandoff("agent-a", "proj-x")
+	if err != nil {
+		t.Fatalf("GetLatestHandoff: %v", err)
+	}
+	if mem == nil {
+		t.Fatal("expected handoff memory, got nil")
+	}
+	if mem.AgentID != "agent-a" {
+		t.Errorf("expected agent_id=agent-a, got %q", mem.AgentID)
+	}
+}
+
+func TestGetLatestHandoff_AgentIsolation(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Only agent-a has a handoff.
+	_, _ = st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"agent_summary":"agent-a work","session_at":1001}`,
+		AgentID:       "agent-a",
+		Source:        SourceAuto,
+		Tags:          `["handoff","session_end","auto"]`,
+		SourceProject: "proj-y",
+	})
+
+	// agent-b has no handoff — must return nil.
+	mem, err := st.GetLatestHandoff("agent-b", "proj-y")
+	if err != nil {
+		t.Fatalf("GetLatestHandoff agent-b: %v", err)
+	}
+	if mem != nil {
+		t.Error("agent-b must not see agent-a's handoff")
+	}
+}
+
+func TestGetLatestHandoff_ProjectIsolation(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// agent-a has a handoff for proj-1 but NOT proj-2.
+	_, _ = st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"agent_summary":"proj-1 work","session_at":1002}`,
+		AgentID:       "agent-a",
+		Source:        SourceAuto,
+		Tags:          `["handoff","session_end","auto"]`,
+		SourceProject: "proj-1",
+	})
+
+	mem, err := st.GetLatestHandoff("agent-a", "proj-2")
+	if err != nil {
+		t.Fatalf("GetLatestHandoff proj-2: %v", err)
+	}
+	if mem != nil {
+		t.Error("proj-2 must not see proj-1's handoff")
+	}
+}
+
+func TestGetLatestHandoff_EmptyAgentID_ReturnsNil(t *testing.T) {
+	st := openMemTestStore(t)
+
+	mem, err := st.GetLatestHandoff("", "proj-x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mem != nil {
+		t.Error("empty agentID must return nil, not a memory")
+	}
+}
+
+func TestGetLatestHandoff_NonHandoffTagNotReturned(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// A session_log memory WITHOUT the "handoff" tag must not be returned.
+	_, _ = st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"packages":[],"session_at":1003}`,
+		AgentID:       "agent-work",
+		Source:        SourceAuto,
+		Tags:          `["work_summary","session_end","auto"]`,
+		SourceProject: "proj-z",
+	})
+
+	mem, err := st.GetLatestHandoff("agent-work", "proj-z")
+	if err != nil {
+		t.Fatalf("GetLatestHandoff: %v", err)
+	}
+	if mem != nil {
+		t.Error("work_summary memory must not be returned by GetLatestHandoff")
+	}
+}

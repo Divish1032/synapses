@@ -268,6 +268,58 @@ func TestHandoff_ActiveHypothesesIncluded(t *testing.T) {
 	}
 }
 
+// TestHandoff_RemainingTasksIncluded verifies that pending and in_progress tasks
+// for the agent appear in the handoff payload under "remaining".
+func TestHandoff_RemainingTasksIncluded(t *testing.T) {
+	srv, _, _ := newPopulatedServer(t)
+
+	// Create a plan with two pending tasks. The agentID parameter assigns them
+	// to "agent-remain" automatically (CreatePlan sets assigned_to from agentID
+	// when the task has no explicit assignment).
+	_, _, err := srv.store.CreatePlan("Sprint backlog", "test plan", "agent-remain", []store.TaskInput{
+		{Title: "Implement token refresh"},
+		{Title: "Write integration tests"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePlan: %v", err)
+	}
+
+	// End session with a summary so the handoff is persisted.
+	if _, err := srv.handleEndSession(context.Background(), callTool(map[string]any{
+		"agent_id": "agent-remain",
+		"summary":  "Starting the sprint",
+	})); err != nil {
+		t.Fatalf("handleEndSession: %v", err)
+	}
+
+	mem, err := srv.store.GetLatestHandoff("agent-remain", srv.projectID)
+	if err != nil || mem == nil {
+		t.Fatalf("GetLatestHandoff: err=%v, mem=%v", err, mem)
+	}
+
+	var payload handoffPayload
+	if err := json.Unmarshal([]byte(mem.Content), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(payload.Remaining) == 0 {
+		t.Fatal("expected Remaining to contain the pending tasks, got empty")
+	}
+	// Both tasks should appear (2 tasks, cap is 5).
+	if len(payload.Remaining) < 2 {
+		t.Errorf("expected at least 2 remaining tasks, got %d: %v", len(payload.Remaining), payload.Remaining)
+	}
+	found := false
+	for _, r := range payload.Remaining {
+		if r == "Implement token refresh" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Implement token refresh' in remaining, got: %v", payload.Remaining)
+	}
+}
+
 // TestHandoff_QuickModeSkipsHandoff verifies that session_init in quick mode
 // does NOT inject session_handoff, keeping lightweight sessions lean.
 func TestHandoff_QuickModeSkipsHandoff(t *testing.T) {
