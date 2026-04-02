@@ -506,8 +506,9 @@ var javaEnvFallbackRE = regexp.MustCompile(
 )
 
 // rustEnvFallbackRE detects: env::var("VAR").unwrap_or("fallback")
-//
-//	or std::env::var("VAR").unwrap_or_else(|_| "fallback".to_string())
+// Also matches std::env::var("VAR").unwrap_or("fallback") since "env::var" is a suffix.
+// Note: unwrap_or_else closures (e.g. |_| "fallback".to_string()) are not matched by
+// this regex — the string literal is nested inside the closure, not a direct argument.
 var rustEnvFallbackRE = regexp.MustCompile(
 	`env::var\s*\([^)]+\)\.unwrap_or(?:_else\s*\(\s*[^)]+\s*\))?\s*\(\s*["']([^"'\r\n]{1,})["']`,
 )
