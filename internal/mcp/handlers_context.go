@@ -2846,14 +2846,14 @@ func observeFileNorms(g *graph.Graph, file string) []string {
 			funcNodes = append(funcNodes, n)
 		}
 	}
-	total := len(funcNodes)
-	if total < 2 {
+	realTotal := len(funcNodes)
+	if realTotal < 2 {
 		return nil
 	}
 	// Cap to prevent O(N×M) blowup on files with many functions.
 	const maxNodes = 30
-	if total > maxNodes {
-		total = maxNodes
+	sampled := realTotal > maxNodes
+	if sampled {
 		funcNodes = funcNodes[:maxNodes]
 	}
 
@@ -2875,8 +2875,14 @@ func observeFileNorms(g *graph.Graph, file string) []string {
 		return nil
 	}
 
-	norm := fmt.Sprintf("Observed: %d/%d functions in this file call auth/security patterns",
-		securityCallers, total)
+	var norm string
+	if sampled {
+		norm = fmt.Sprintf("Observed: %d/%d sampled functions call auth/security patterns (file has %d+ functions)",
+			securityCallers, maxNodes, realTotal)
+	} else {
+		norm = fmt.Sprintf("Observed: %d/%d functions in this file call auth/security patterns",
+			securityCallers, realTotal)
+	}
 	return []string{norm}
 }
 

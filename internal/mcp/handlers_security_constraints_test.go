@@ -493,6 +493,110 @@ func TestGetContext_SecurityConstraints_AgentRulesExcluded(t *testing.T) {
 	}
 }
 
+func TestGetContext_SecurityConstraints_FilePatternExclusion(t *testing.T) {
+	// Rule with FromFilePattern "api/*.go" must NOT appear for entity in "service/service.go".
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = []config.Rule{
+		{
+			ID:          "api-only-rule",
+			Description: "API handlers must use AuthMiddleware",
+			Severity:    "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "api/*.go",
+			},
+		},
+	}
+
+	fnID := g.MakeNodeID("service/service.go", "ProcessOrder")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "ProcessOrder", File: "service/service.go", Line: 1,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{
+		"entity": "ProcessOrder",
+		"intent": "add",
+		"format": "json",
+	})
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	if enrichRaw, ok := m["enrichment"]; ok {
+		if enrichMap, ok := enrichRaw.(map[string]any); ok {
+			if constraintsRaw, ok := enrichMap["security_constraints"]; ok {
+				constraints := constraintsRaw.([]any)
+				for _, c := range constraints {
+					if s, ok := c.(string); ok && strings.Contains(s, "API handlers must use AuthMiddleware") {
+						t.Errorf("rule with FromFilePattern 'api/*.go' must not appear for 'service/service.go', got: %s", s)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestGetContext_SecurityConstraints_SeverityFormat(t *testing.T) {
+	// Verify severity is uppercased: "error" → "[ERROR]", empty → "[WARNING]".
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = []config.Rule{
+		{ID: "r-error", Description: "Error level rule", Severity: "error"},
+		{ID: "r-empty", Description: "No-severity rule", Severity: ""},
+	}
+
+	fnID := g.MakeNodeID("handler.go", "Handle")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "Handle", File: "handler.go", Line: 1,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{"entity": "Handle", "intent": "add", "format": "json"})
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	enrichMap := m["enrichment"].(map[string]any)
+	constraints := enrichMap["security_constraints"].([]any)
+
+	var foundError, foundWarning bool
+	for _, c := range constraints {
+		s, ok := c.(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(s, "Error level rule") && strings.Contains(s, "[ERROR]") {
+			foundError = true
+		}
+		if strings.Contains(s, "No-severity rule") && strings.Contains(s, "[WARNING]") {
+			foundWarning = true
+		}
+	}
+	if !foundError {
+		t.Errorf("severity 'error' should render as [ERROR], constraints: %v", constraints)
+	}
+	if !foundWarning {
+		t.Errorf("empty severity should render as [WARNING], constraints: %v", constraints)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // minimalDCWithRoot creates the smallest directionalContext that produces
