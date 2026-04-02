@@ -256,6 +256,39 @@ func TestExtractExplorationCapture_Validate_PrePhaseSkipped(t *testing.T) {
 	}
 }
 
+// TestExtractExplorationCapture_Search_NonJSONFallback verifies that a non-JSON
+// response still produces a capture with the query as EntityQueried, capped to 100.
+func TestExtractExplorationCapture_Search_NonJSONFallback(t *testing.T) {
+	// Simulate a non-JSON (plain text) tool response.
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{mcp.NewTextContent("not valid json {{")},
+	}
+	longQuery := strings.Repeat("q", 150)
+	cap := extractExplorationCapture("search", map[string]any{"query": longQuery}, result)
+	if cap == nil {
+		t.Fatal("expected non-nil capture for non-JSON search response")
+	}
+	if len([]rune(cap.EntityQueried)) > 100 {
+		t.Errorf("EntityQueried should be capped at 100 runes, got %d: %q", len([]rune(cap.EntityQueried)), cap.EntityQueried)
+	}
+}
+
+// TestExtractExplorationCapture_GetImpact_NonJSONFallback verifies that a non-JSON
+// response still produces a capture with the symbol as EntityQueried, capped to 100.
+func TestExtractExplorationCapture_GetImpact_NonJSONFallback(t *testing.T) {
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{mcp.NewTextContent("not valid json {{")},
+	}
+	longSymbol := strings.Repeat("S", 150)
+	cap := extractExplorationCapture("get_impact", map[string]any{"symbol": longSymbol}, result)
+	if cap == nil {
+		t.Fatal("expected non-nil capture for non-JSON get_impact response")
+	}
+	if len([]rune(cap.EntityQueried)) > 100 {
+		t.Errorf("EntityQueried should be capped at 100 runes, got %d: %q", len([]rune(cap.EntityQueried)), cap.EntityQueried)
+	}
+}
+
 // TestCapStrHelper verifies the cap/truncation helper.
 func TestCapStrHelper(t *testing.T) {
 	tests := []struct {

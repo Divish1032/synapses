@@ -137,7 +137,7 @@ func extractSearchCapture(args map[string]any, responseText string) *exploration
 	var resp map[string]any
 	if err := json.Unmarshal([]byte(responseText), &resp); err != nil {
 		return &explorationCapture{
-			EntityQueried: query,
+			EntityQueried: capStr(query, 100),
 		}
 	}
 
@@ -186,7 +186,7 @@ func extractGetImpactCapture(args map[string]any, responseText string) *explorat
 	var resp map[string]any
 	if err := json.Unmarshal([]byte(responseText), &resp); err != nil {
 		return &explorationCapture{
-			EntityQueried: symbol,
+			EntityQueried: capStr(symbol, 100),
 		}
 	}
 
