@@ -281,3 +281,34 @@ func TestDecision_MinimalFields(t *testing.T) {
 		t.Errorf("context should default to empty, got %q", got.Context)
 	}
 }
+
+// TestDecision_Search_LikeEscape verifies that % and _ metacharacters in the
+// search query are treated as literals, not SQLite LIKE wildcards.
+func TestDecision_Search_LikeEscape(t *testing.T) {
+	s := openTestStoreDec(t)
+
+	// Insert a decision whose choice contains a literal underscore.
+	_, _ = s.InsertDecision(store.Decision{
+		AgentID:   "a",
+		ProjectID: "p",
+		Choice:    "Use jwt_rs256 token format",
+	})
+	// Insert a decoy that would match "_" as a wildcard (any single char).
+	_, _ = s.InsertDecision(store.Decision{
+		AgentID:   "a",
+		ProjectID: "p",
+		Choice:    "Use jwtXrs256 token format",
+	})
+
+	// Searching for "jwt_rs256" should only find the first (literal underscore).
+	res, err := s.SearchDecisions("a", "p", "jwt_rs256", 20)
+	if err != nil {
+		t.Fatalf("SearchDecisions: %v", err)
+	}
+	if len(res) != 1 {
+		t.Errorf("expected 1 literal-underscore match, got %d (wildcard escaping failed)", len(res))
+	}
+	if len(res) > 0 && res[0].Choice != "Use jwt_rs256 token format" {
+		t.Errorf("wrong match: %q", res[0].Choice)
+	}
+}

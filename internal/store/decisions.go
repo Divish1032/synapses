@@ -118,12 +118,17 @@ func (s *Store) SearchDecisions(agentID, projectID, query string, limit int) ([]
 			agentID, projectID, limit,
 		)
 	} else {
-		like := "%" + query + "%"
+		// escapeLike ensures % and _ metacharacters in the user's query are
+		// treated as literals. ESCAPE '\' activates the escape sequences.
+		like := "%" + escapeLike(query) + "%"
 		rows, err = s.knowledgeDB.Query(`
 			SELECT id, agent_id, project_id, choice, alternatives, reasoning, context, created_at
 			FROM decisions
 			WHERE agent_id = ? AND project_id = ?
-			  AND (choice LIKE ? OR reasoning LIKE ? OR context LIKE ? OR alternatives LIKE ?)
+			  AND (choice LIKE ? ESCAPE '\'
+			    OR reasoning LIKE ? ESCAPE '\'
+			    OR context LIKE ? ESCAPE '\'
+			    OR alternatives LIKE ? ESCAPE '\')
 			ORDER BY created_at DESC
 			LIMIT ?`,
 			agentID, projectID, like, like, like, like, limit,

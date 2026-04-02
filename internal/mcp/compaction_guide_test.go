@@ -444,3 +444,66 @@ func TestBuildCompactionRecovery_IncludesRecentDecisions(t *testing.T) {
 	}
 }
 
+// ── Decisions in session_init normal flow (Sprint 24.5) ─────────────────────
+
+// TestSessionInit_SurfacesRecentDecisions verifies that decisions inserted before
+// session_init appear in the response under "recent_decisions", including the
+// alternatives field (required by spec: "Z was rejected because W").
+func TestSessionInit_SurfacesRecentDecisions(t *testing.T) {
+	srv := newTestServer(t)
+
+	base := time.Now().Unix()
+	// Insert two decisions before the session starts.
+	for i, d := range []store.Decision{
+		{
+			AgentID:      "sinit-agent",
+			Choice:       "Use JWT with RS256",
+			Alternatives: "session cookies; opaque tokens",
+			Reasoning:    "RS256 public key distributable without secret",
+			Context:      "auth refactor",
+		},
+		{
+			AgentID:      "sinit-agent",
+			Choice:       "Use PostgreSQL",
+			Alternatives: "MySQL; SQLite",
+			Reasoning:    "ACID + JSON support",
+			Context:      "storage selection",
+		},
+	} {
+		d.ProjectID = srv.projectID
+		d.CreatedAt = base + int64(i)*10
+		_, err := srv.store.InsertDecision(d)
+		if err != nil {
+			t.Fatalf("InsertDecision %d: %v", i, err)
+		}
+	}
+
+	result, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "sinit-agent",
+		"scope":    "standard",
+	}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+	m := mustResult(t, result, nil)
+
+	rawDecs, ok := m["recent_decisions"]
+	if !ok {
+		t.Fatal("expected recent_decisions in session_init response")
+	}
+	envelope, ok := rawDecs.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map for recent_decisions, got %T", rawDecs)
+	}
+	decs, _ := envelope["decisions"].([]interface{})
+	if len(decs) != 2 {
+		t.Errorf("expected 2 recent decisions, got %d", len(decs))
+	}
+
+	// Verify alternatives field is present (spec: "Z was rejected because W").
+	first, _ := decs[0].(map[string]interface{})
+	if first["alternatives"] == nil || first["alternatives"] == "" {
+		t.Error("alternatives must be included in session_init recent_decisions")
+	}
+}
+

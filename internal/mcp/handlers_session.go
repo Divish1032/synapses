@@ -1254,24 +1254,61 @@ func (s *Server) handleSessionInit(
 	if s.store != nil {
 		if recentDecs, err := s.store.GetRecentDecisions(agentID, s.projectID, 3); err == nil && len(recentDecs) > 0 {
 			type decItem struct {
-				ID        string `json:"id"`
-				Choice    string `json:"choice"`
-				Reasoning string `json:"reasoning,omitempty"`
-				Context   string `json:"context,omitempty"`
+				ID           string `json:"id"`
+				Choice       string `json:"choice"`
+				Alternatives string `json:"alternatives,omitempty"`
+				Reasoning    string `json:"reasoning,omitempty"`
+				Context      string `json:"context,omitempty"`
 			}
 			items := make([]decItem, 0, len(recentDecs))
 			for _, d := range recentDecs {
 				items = append(items, decItem{
-					ID:        d.ID,
-					Choice:    d.Choice,
-					Reasoning: d.Reasoning,
-					Context:   d.Context,
+					ID:           d.ID,
+					Choice:       d.Choice,
+					Alternatives: d.Alternatives,
+					Reasoning:    d.Reasoning,
+					Context:      d.Context,
 				})
 			}
 			resp["recent_decisions"] = map[string]interface{}{
 				"count":     len(items),
 				"decisions": items,
 				"note":      "These decisions were already evaluated. Use memory(action='list_decisions') to search all decisions or memory(action='decide') to record new ones.",
+			}
+		}
+	}
+
+	// ── Sprint 24.6: Rejected approaches ────────────────────────────────
+	// Surface the 3 most recent rejected approaches so the agent knows which
+	// paths have already been explored and abandoned. Prevents agents from
+	// re-attempting approaches that failed in prior sessions.
+	// Warning: "A previous session tried X and abandoned it because Y."
+	if s.store != nil {
+		if recentRej, err := s.store.GetRecentRejectedApproaches(agentID, s.projectID, 3); err == nil && len(recentRej) > 0 {
+			type rejItem struct {
+				ID            string `json:"id"`
+				Approach      string `json:"approach"`
+				FailureReason string `json:"failure_reason"`
+				Blocker       string `json:"blocker,omitempty"`
+				Context       string `json:"context,omitempty"`
+				CreatedAt     int64  `json:"created_at"`
+			}
+			items := make([]rejItem, 0, len(recentRej))
+			for _, r := range recentRej {
+				items = append(items, rejItem{
+					ID:            r.ID,
+					Approach:      r.Approach,
+					FailureReason: r.FailureReason,
+					Blocker:       r.Blocker,
+					Context:       r.Context,
+					CreatedAt:     r.CreatedAt,
+				})
+			}
+			resp["rejected_approaches"] = map[string]interface{}{
+				"count":    len(items),
+				"entries":  items,
+				"warning":  "The following approaches were tried in prior sessions and explicitly abandoned. Avoid re-attempting these paths unless the underlying blocker has been resolved.",
+				"note":     "Use memory(action='list_rejected') to search all rejected approaches or memory(action='abandon') to record new ones.",
 			}
 		}
 	}
@@ -2502,7 +2539,29 @@ func (s *Server) buildCompactionRecovery(agentID, sessionID string) map[string]i
 		recovery["recent_decisions"] = items
 	}
 
-	// 11. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
+	// 11. Sprint 24.6: Rejected approaches — surface approaches abandoned in prior
+	// sessions so the agent doesn't re-attempt them after context compaction.
+	// Up to 3 most recent; omitted when none exist for this agent/project.
+	if rejApproaches, err := s.store.GetRecentRejectedApproaches(agentID, s.projectID, 3); err == nil && len(rejApproaches) > 0 {
+		type compactRejectedApproach struct {
+			ID            string `json:"id"`
+			Approach      string `json:"approach"`
+			FailureReason string `json:"failure_reason"`
+			Blocker       string `json:"blocker,omitempty"`
+		}
+		items := make([]compactRejectedApproach, 0, len(rejApproaches))
+		for _, r := range rejApproaches {
+			items = append(items, compactRejectedApproach{
+				ID:            r.ID,
+				Approach:      r.Approach,
+				FailureReason: r.FailureReason,
+				Blocker:       r.Blocker,
+			})
+		}
+		recovery["rejected_approaches"] = items
+	}
+
+	// 12. Token budget enforcement: truncate if over ~8000 chars (~2000 tokens)
 	truncateCompactionPacket(recovery, 8000)
 
 	return recovery
@@ -2575,7 +2634,7 @@ func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
 	// task_progress is high-value (answers "what was I doing?") so drops late.
 	// explored_entities is dropped after entity_memories (high-value intelligence,
 	// but work_summary already captures entity/file names as a fallback).
-	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "recent_decisions", "active_hypotheses", "active_rules", "task_progress", "context_snapshot"}
+	dropOrder := []string{"relationship_map", "entity_importance", "active_violations", "entity_memories", "explored_entities", "session_failures", "session_decisions", "recent_decisions", "rejected_approaches", "active_hypotheses", "active_rules", "task_progress", "context_snapshot"}
 	for _, key := range dropOrder {
 		if len(data) <= maxChars {
 			return
