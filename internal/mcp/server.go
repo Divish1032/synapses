@@ -2254,7 +2254,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Why this choice was made. action=decide."),
 			),
 			mcp.WithString("context",
-				mcp.Description("When/where this decision was made (e.g. 'Adding OAuth to /api/auth'). action=decide."),
+				mcp.Description("When/where this decision was made or approach was tried (e.g. 'Adding OAuth to /api/auth'). action=decide, action=abandon."),
 			),
 			// action=list_decisions uses the existing 'query' and 'limit' params.
 			// action=abandon params (Sprint 24.6)
