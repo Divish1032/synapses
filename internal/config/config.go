@@ -421,9 +421,11 @@ type SessionConfig struct {
 	// 3 active conventions. Prevents mid-session drift where the task and project
 	// conventions decay into the "middle of context" and stop influencing the agent.
 	//
-	// Default: 0 (disabled). Set to a positive integer to enable.
-	// Recommended: 10 (fires after every 10 tool responses, ~50 tokens overhead).
-	// Example: reinforcement_interval: 10
+	// Default: 0 (uses built-in default of 10 — fires every 10 tool responses).
+	// Set to a positive integer to override the default interval.
+	// Set to -1 to disable reinforcement entirely.
+	// Example: reinforcement_interval: 5   # fire more often
+	// Example: reinforcement_interval: -1  # disable
 	ReinforcementInterval int `json:"reinforcement_interval,omitempty"`
 }
 

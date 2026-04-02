@@ -15,6 +15,51 @@ import (
 
 // ── goalReinforcer unit tests ─────────────────────────────────────────────────
 
+// TestGoalReinforcer_DefaultInterval verifies that New() applies the built-in
+// default of 10 when ReinforcementInterval is 0 (not configured).
+func TestGoalReinforcer_DefaultInterval(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// cfg.Session.ReinforcementInterval is 0 (zero value — not configured).
+	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
+
+	// Built-in default is 10. Verify the reinforcer is armed (interval > 0).
+	if srv.goalReinforcer.interval <= 0 {
+		t.Errorf("expected default interval > 0, got %d", srv.goalReinforcer.interval)
+	}
+	if srv.goalReinforcer.interval != 10 {
+		t.Errorf("expected default interval=10, got %d", srv.goalReinforcer.interval)
+	}
+}
+
+// TestGoalReinforcer_ExplicitDisable verifies that reinforcement_interval=-1 disables it.
+func TestGoalReinforcer_ExplicitDisable(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Session.ReinforcementInterval = -1
+	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
+
+	if srv.goalReinforcer.interval != -1 {
+		t.Errorf("expected interval=-1, got %d", srv.goalReinforcer.interval)
+	}
+	// Verify it truly never fires.
+	for i := 0; i < 20; i++ {
+		if srv.goalReinforcer.recordAndShouldFire("s1") {
+			t.Errorf("disabled reinforcer fired at call %d", i+1)
+		}
+	}
+}
+
 func TestGoalReinforcer_Disabled(t *testing.T) {
 	r := newGoalReinforcer(0)
 	for i := 0; i < 20; i++ {

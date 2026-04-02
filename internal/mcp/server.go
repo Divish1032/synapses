@@ -607,10 +607,12 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
-	// Sprint 25.6: goal+convention reinforcer — interval from config (0 = disabled).
+	// Sprint 25.6: goal+convention reinforcer.
+	// 0 = use built-in default (10). Negative = explicitly disabled.
 	{
-		interval := 0
-		if cfg != nil {
+		const defaultReinforcementInterval = 10
+		interval := defaultReinforcementInterval
+		if cfg != nil && cfg.Session.ReinforcementInterval != 0 {
 			interval = cfg.Session.ReinforcementInterval
 		}
 		s.goalReinforcer = newGoalReinforcer(interval)
