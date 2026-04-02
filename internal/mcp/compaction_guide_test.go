@@ -194,6 +194,55 @@ func TestSessionInit_Standard_NoAutoRecovery(t *testing.T) {
 	noKey(t, resp, "compaction_recovery")
 }
 
+// TestSessionInit_HibernateResume_CompactionScopeWins verifies that when
+// scope="compaction" is passed on a hibernate resume, the compaction path
+// (using current session ID) takes priority — no double-injection via the
+// hibernate auto-inject path.
+func TestSessionInit_HibernateResume_CompactionScopeWins(t *testing.T) {
+	srv := newTestServer(t)
+
+	ctxA := WithSessionID(ctx, "mcp-conn-C")
+	_, _ = srv.handleSessionInit(ctxA, callTool(map[string]any{
+		"agent_id": "scope-agent",
+		"scope":    "standard",
+	}))
+	sessionID := srv.getSynapseSessionID(SessionIDFromContext(ctxA))
+	if sessionID == "" {
+		t.Skip("no session ID resolved")
+	}
+
+	// Simulate a break so Phase 2 (hibernate) triggers on the next call.
+	backdated := time.Now().UTC().Unix() - 3600
+	if err := srv.store.SetSessionLastSeen(sessionID, backdated); err != nil {
+		t.Fatalf("SetSessionLastSeen: %v", err)
+	}
+
+	// Call with scope=compaction AND a new connection — the explicit compaction
+	// scope must win (uses synapseSessionID, not ParentID).
+	ctxC := WithSessionID(ctx, "mcp-conn-D")
+	result, err := srv.handleSessionInit(ctxC, callTool(map[string]any{
+		"agent_id": "scope-agent",
+		"scope":    "compaction",
+	}))
+	resp := mustResult(t, result, err)
+
+	// compaction_recovery must come from the compaction path (present because
+	// scope=compaction was explicitly set).
+	hasKey(t, resp, "compaction_recovery")
+
+	// The recovery packet hint must reflect the compaction (not resume) language,
+	// since scope=compaction takes precedence.
+	recoveryRaw, _ := resp["compaction_recovery"].(map[string]any)
+	if recoveryRaw != nil {
+		hint, _ := recoveryRaw["hint"].(string)
+		// compaction path sets the default hint (no override), so it should NOT
+		// say "resuming" — that word is only injected by the hibernate path.
+		if strings.Contains(hint, "resuming") {
+			t.Errorf("compaction scope should use compaction hint, not resume hint: %q", hint)
+		}
+	}
+}
+
 // TestSynthesizeWorkSummary_Empty verifies fallback for empty input.
 func TestSynthesizeWorkSummary_Empty(t *testing.T) {
 	result := synthesizeWorkSummary(nil, nil, nil)

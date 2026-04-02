@@ -177,13 +177,15 @@ func (s *Server) handleSessionInit(
 	// project always get independent sessions — never steal from each other.
 	// Stale detection runs later (after recentChanges). Skipped on same-connection resume.
 	var synapseSessionID string
+	// effectiveAgentID normalises "" to "anonymous" so session storage, task
+	// queries, and recovery packet assembly all use a consistent non-empty value.
+	effectiveAgentID := agentID
+	if effectiveAgentID == "" {
+		effectiveAgentID = "anonymous"
+	}
 	var sessionResumed bool
 	var hibernateCtx *store.HibernateResumeContext
 	if s.store != nil {
-		effectiveAgentID := agentID
-		if effectiveAgentID == "" {
-			effectiveAgentID = "anonymous"
-		}
 		mcpSessionID := synapseSessionKey(SessionIDFromContext(ctx)) // normalise "" → "stdio"
 		reconnectWindow := 0
 		hibernateWindow := 0
@@ -756,7 +758,7 @@ func (s *Server) handleSessionInit(
 		// a hibernate resume is a concrete signal of context loss that requires
 		// no agent awareness of compaction.
 		if s.store != nil && hibernateCtx.ParentID != "" && !compactionMode {
-			recovery := s.buildCompactionRecovery(agentID, hibernateCtx.ParentID)
+			recovery := s.buildCompactionRecovery(effectiveAgentID, hibernateCtx.ParentID)
 			if recovery != nil {
 				recovery["hint"] = "You're resuming a prior session. This packet contains your working state from before the break. File contents can be re-read — focus on decisions and progress."
 				resp["compaction_recovery"] = recovery
@@ -791,7 +793,7 @@ func (s *Server) handleSessionInit(
 	// Compaction recovery: when compaction mode is active, enrich the response
 	// with a structured recovery packet so the agent can resume effectively.
 	if compactionMode && s.store != nil && synapseSessionID != "" {
-		recovery := s.buildCompactionRecovery(agentID, synapseSessionID)
+		recovery := s.buildCompactionRecovery(effectiveAgentID, synapseSessionID)
 		if recovery != nil {
 			resp["compaction_recovery"] = recovery
 		}
