@@ -766,6 +766,27 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
+	// Sprint 24.3: Signal 1 — re-init detection.
+	// When the agent calls session_init again on an already-active session (Phase 1
+	// same-connection resume: resumed=true, hibernateCtx=nil), it almost certainly
+	// just recovered from context compaction. The hibernate resume path (24.2) handles
+	// cross-connection resumes; this handles the more common within-connection case.
+	// compactionMode is excluded — that path already injects recovery below.
+	if sessionResumed && hibernateCtx == nil && !compactionMode && s.store != nil && synapseSessionID != "" {
+		cs := s.getCompactDetectState(synapseSessionID)
+		if cs.tryMarkInjected() {
+			recovery := s.buildCompactionRecovery(effectiveAgentID, synapseSessionID)
+			if recovery != nil {
+				recovery["hint"] = "You called session_init again on an active session — this typically indicates context compaction. Here is your working state from before."
+				resp["compaction_recovery"] = recovery
+			} else {
+				// Recovery returned nil (empty session) — release the injection slot
+				// so future re-inits can retry once the session has accumulated state.
+				cs.unmarkInjected()
+			}
+		}
+	}
+
 	// Sprint 24: Work Ledger — include cross-session briefing on every session_init.
 	if s.store != nil && synapseSessionID != "" {
 		others, _ := s.store.ActiveSessionWork(s.projectID, synapseSessionID, 15)

@@ -230,6 +230,13 @@ type Server struct {
 	// Key: Synapses session ID (string), Value: *ledgerWatermark.
 	ledgerWatermarks sync.Map
 
+	// compactDetect tracks per-session compaction detection state (Sprint 24.3).
+	// Signal 1 (re-init): handleSessionInit fires when resumed=true and no hibernateCtx.
+	// Signal 2 (re-exploration): ledgerWrapped fires when get_context/search re-queries
+	//   an entity already explored in this session.
+	// Key: Synapses session ID (string), Value: *compactDetectState.
+	compactDetect sync.Map
+
 	// recallFootprints tracks recent recall results per session for recall-to-action
 	// quality correlation. Key: Synapses session ID (string), Value: *recallFootprintRing.
 	recallFootprints sync.Map
@@ -1462,6 +1469,30 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 			s.goBackground(func() {
 				_ = s.store.AppendExplorationEntry(elogEntry)
 			})
+		}
+
+		// Sprint 24.3: Signal 2 — re-exploration detection.
+		// When get_context or search queries an entity already explored this session,
+		// the agent may have lost context after compaction and is re-discovering
+		// prior work. Inject the compaction recovery packet proactively.
+		// Check happens BEFORE markExplored so the first query is never a re-exploration.
+		// Note: Signal 3 (token gap) is deferred to Sprint 24.8 (token budget tracking).
+		if entity := extractQueryEntity(toolName, args); entity != "" {
+			cs := s.getCompactDetectState(sessionID)
+			// tryMarkInjected is used here instead of separate shouldInject+markInjected
+			// to prevent duplicate recovery blocks when concurrent tool calls both
+			// observe isReExplored=true before either records the injection.
+			if cs.isReExplored(entity) && cs.tryMarkInjected() {
+				recovery := s.buildCompactionRecovery(s.getLastAgent(), sessionID)
+				if recovery != nil {
+					recovery["hint"] = "You appear to be re-exploring entities from earlier in this session. This may indicate context compaction. Here is your working state from before."
+					injectCompactionRecovery(result, recovery, "re-exploration")
+				} else {
+					// Empty session — release slot so future signals can still fire.
+					cs.unmarkInjected()
+				}
+			}
+			cs.markExplored(entity)
 		}
 
 		// Sprint 27.3: Track tool calls per session for suggestion suppression.
