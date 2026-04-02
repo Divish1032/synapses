@@ -1672,7 +1672,8 @@ func (s *Server) handleSessionInit(
 		{
 			// Prepend formatter conventions so they are always delivered
 			// regardless of how many prompts or rules the project has.
-			convs := detectFormatterConventions(s.getProjectRoot())
+			// cachedFormatterConventions computes once per server lifetime.
+			convs := s.cachedFormatterConventions()
 			// promptsAdded tracks how many prompt bodies have been appended so
 			// that the per-prompt cap (5) is counted independently of the
 			// formatter conventions already in convs.

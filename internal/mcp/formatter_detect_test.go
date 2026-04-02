@@ -68,20 +68,18 @@ func TestDetectFormatterConventions_Rustfmt(t *testing.T) {
 	}
 }
 
-func TestDetectFormatterConventions_GolangCI(t *testing.T) {
-	for _, filename := range []string{".golangci.yml", ".golangci.yaml"} {
-		t.Run(filename, func(t *testing.T) {
-			dir := t.TempDir()
-			touchFile(t, dir, filename)
-			got := detectFormatterConventions(dir)
-			if len(got) != 1 {
-				t.Fatalf("expected 1 convention, got %d: %v", len(got), got)
-			}
-			if !strings.Contains(got[0], "gofmt") {
-				t.Errorf("expected gofmt in convention, got: %q", got[0])
-			}
-		})
+func TestDetectFormatterConventions_GoMod(t *testing.T) {
+	// go.mod is the canonical Go presence signal; gofmt is universal in Go.
+	dir := t.TempDir()
+	touchFile(t, dir, "go.mod")
+	got := detectFormatterConventions(dir)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 convention, got %d: %v", len(got), got)
 	}
+	if !strings.Contains(got[0], "gofmt") {
+		t.Errorf("expected gofmt in convention, got: %q", got[0])
+	}
+	assertFormatterMsg(t, got[0])
 }
 
 func TestDetectFormatterConventions_EditorConfig(t *testing.T) {

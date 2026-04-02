@@ -40,9 +40,13 @@ var knownFormatters = []formatterConvention{
 		name:  "rustfmt",
 		files: []string{"rustfmt.toml", ".rustfmt.toml"},
 	},
+	// go.mod signals a Go module project; gofmt is universally active in all
+	// Go projects regardless of whether a linter config is present.
+	// Previously detected via .golangci.yml but that missed the majority of
+	// Go projects — go.mod is the canonical Go presence signal.
 	{
-		name:  "golangci-lint/gofmt",
-		files: []string{".golangci.yml", ".golangci.yaml", ".golangci.json", ".golangci.toml"},
+		name:  "gofmt",
+		files: []string{"go.mod"},
 	},
 	{
 		name:  "EditorConfig",

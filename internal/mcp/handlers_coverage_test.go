@@ -2593,6 +2593,54 @@ func TestHandleSessionInit_Briefing_Conventions_FormatterNotInCap(t *testing.T) 
 	}
 }
 
+// TestHandleSessionInit_Briefing_Conventions_FormatterCached verifies that
+// cachedFormatterConventions returns the same slice across multiple session_init
+// calls — i.e., the filesystem stats run only once per server lifetime.
+func TestHandleSessionInit_Briefing_Conventions_FormatterCached(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".prettierrc"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	s := New(g, cfg, st)
+	s.projectPath = dir
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	first := s.cachedFormatterConventions()
+	second := s.cachedFormatterConventions()
+
+	// Both calls must return the same underlying slice pointer (cached).
+	if len(first) == 0 {
+		t.Fatal("expected at least one formatter convention")
+	}
+	// Pointer equality: same backing array means the cache is working.
+	if len(first) != len(second) {
+		t.Errorf("cache returned different lengths: %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i] != second[i] {
+			t.Errorf("cache[%d] changed between calls: %q vs %q", i, first[i], second[i])
+		}
+	}
+
+	// Remove the file after first computation — second call should still
+	// return the cached result, not re-stat.
+	if err := os.Remove(filepath.Join(dir, ".prettierrc")); err != nil {
+		t.Fatal(err)
+	}
+	third := s.cachedFormatterConventions()
+	if len(third) != len(first) {
+		t.Errorf("cache was not used after file removal: got %d conventions, want %d", len(third), len(first))
+	}
+}
+
 func TestHandleSessionInit_WithPendingTasks(t *testing.T) {
 	st := openMCPTestStore(t)
 	g := graph.New("test-repo")

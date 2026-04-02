@@ -234,6 +234,13 @@ type Server struct {
 	// quality correlation. Key: Synapses session ID (string), Value: *recallFootprintRing.
 	recallFootprints sync.Map
 
+	// formatterConvsMu protects formatterConvsPtr, which caches the result of
+	// detectFormatterConventions so the filesystem stats run only once per
+	// server lifetime (not on every session_init call).
+	// nil = not yet computed; non-nil = computed (may point to an empty slice).
+	formatterConvsMu  sync.Mutex
+	formatterConvsPtr *[]string
+
 	// toolHandlers is the dispatch table for the REST API (POST /v1/tools/{name}).
 	// Populated in addOrDefer alongside mcp-go registration so REST and MCP share
 	// the exact same handler functions. In knowledge mode, graph-tool entries hold
@@ -1037,6 +1044,27 @@ func (s *Server) getProjectRoot() string {
 		}
 	}
 	return s.projectPath
+}
+
+// cachedFormatterConventions returns the formatter conventions for the project
+// root. The result is computed once on the first call where the project root is
+// non-empty, then cached for the server's lifetime — satisfying the "one-time
+// detection" intent without requiring graph schema changes.
+//
+// Thread-safe: concurrent session_init calls will block briefly on the first
+// computation, then read from the cache without contention.
+func (s *Server) cachedFormatterConventions() []string {
+	root := s.getProjectRoot()
+	if root == "" {
+		return nil
+	}
+	s.formatterConvsMu.Lock()
+	defer s.formatterConvsMu.Unlock()
+	if s.formatterConvsPtr == nil {
+		val := detectFormatterConventions(root)
+		s.formatterConvsPtr = &val
+	}
+	return *s.formatterConvsPtr
 }
 
 // SetPulseClient wires a *pulse.Client into the server so that every tool
