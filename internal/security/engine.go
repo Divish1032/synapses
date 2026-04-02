@@ -505,12 +505,16 @@ var javaEnvFallbackRE = regexp.MustCompile(
 		`["']([^"'\r\n]{1,})["']`,
 )
 
-// rustEnvFallbackRE detects: env::var("VAR").unwrap_or("fallback")
-// Also matches std::env::var("VAR").unwrap_or("fallback") since "env::var" is a suffix.
-// Note: unwrap_or_else closures (e.g. |_| "fallback".to_string()) are not matched by
-// this regex — the string literal is nested inside the closure, not a direct argument.
+// rustEnvFallbackRE detects two forms:
+//
+//	unwrap_or("fallback")               — direct string argument
+//	unwrap_or_else(|param| "fallback")  — closure returning a string literal directly
+//
+// Also matches std::env::var("VAR").* since "env::var" is a suffix match.
+// Does NOT match unwrap_or_else(|_| String::from("fallback")) — the string is nested
+// inside a function call, not a direct closure return value.
 var rustEnvFallbackRE = regexp.MustCompile(
-	`env::var\s*\([^)]+\)\.unwrap_or(?:_else\s*\(\s*[^)]+\s*\))?\s*\(\s*["']([^"'\r\n]{1,})["']`,
+	`env::var\s*\([^)]+\)\.unwrap_or(?:_else\s*\(\s*\|[^|]*\|\s*|\s*\(\s*)["']([^"'\r\n]{1,})["']`,
 )
 
 // placeholderRE matches string values that are obviously placeholder / demo credentials,

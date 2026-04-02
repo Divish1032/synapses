@@ -505,6 +505,24 @@ fn get_secret() -> String {
 	}
 }
 
+func TestFallbackSecret_Rust_UnwrapOrElse_Closure(t *testing.T) {
+	p := makeSecretPattern(nil, true, "rust")
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/src/auth.rs")
+
+	content := []byte(`use std::env;
+
+fn jwt_secret() -> String {
+    env::var("JWT_SECRET").unwrap_or_else(|_| "production-jwt-secret-value")
+}
+`)
+	violations := e.CheckFile(g, "/project/src/auth.rs", content)
+	if len(violations) == 0 {
+		t.Error("expected violation: Rust env::var().unwrap_or_else closure fallback")
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Test file severity downgrade still works with new patterns
 // ──────────────────────────────────────────────────────────────────────────────
