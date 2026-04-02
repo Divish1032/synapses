@@ -1,0 +1,168 @@
+{
+  "patterns": [
+    {
+      "id": "python-fastapi-missing-auth",
+      "name": "FastAPI endpoint registered without authentication",
+      "language": "python",
+      "framework": "fastapi",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A file using FastAPI registers HTTP endpoints but does not apply any authentication. FastAPI's primary auth mechanism is dependency injection via Depends(): @app.get('/path') async def handler(user = Depends(get_current_user)). Security schemes (HTTPBearer, OAuth2PasswordBearer) are registered globally or per-endpoint. This check fires when a file registers routes but calls no recognised auth function — including Depends(), bearer schemes, or common auth decorator patterns. Note: Depends() in required_call_patterns catches files that use dependency injection for auth even when the injected function has a custom name.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["fastapi"],
+        "required_call_patterns": [
+          "Depends",
+          "Security",
+          "HTTPBearer*", "HTTPBasic*",
+          "OAuth2*", "oauth2_scheme*",
+          "get_current_user*", "get_current_active_user*", "get_authenticated_user*",
+          "jwt_required*", "token_required*", "login_required*",
+          "Auth*", "authenticate*",
+          "verify_token*", "decode_token*", "validate_token*",
+          "requires_auth*", "require_auth*",
+          "current_user*", "current_token*",
+          "verify_jwt*", "decode_jwt*"
+        ],
+        "route_node_names": [
+          "get", "post", "put", "delete", "patch", "head", "options",
+          "api_route", "route"
+        ],
+        "middleware_node_names": ["add_middleware", "middleware"],
+        "scope": "file"
+      },
+      "message": "File {file} registers FastAPI endpoints without calling any authentication function. {count}/{total} other file(s) in this package use auth. Use Depends(get_current_user) per-endpoint or add_middleware() for global auth.",
+      "tags": ["owasp-a01", "auth", "fastapi", "production-critical"]
+    },
+    {
+      "id": "python-fastapi-missing-input-validation",
+      "name": "FastAPI mutation endpoint without Pydantic input validation",
+      "language": "python",
+      "framework": "fastapi",
+      "pattern_type": "input_validation",
+      "severity": "HIGH",
+      "description": "A file using FastAPI registers mutation endpoints (POST, PUT, PATCH) but shows no sign of Pydantic input validation. FastAPI's recommended pattern is to declare request bodies as Pydantic BaseModel subclasses, which provide automatic schema validation, type coercion, and clear error messages. Without Pydantic models, request data arrives as raw dicts via Body(), Form(), or Query() without validation. This check fires when mutation routes are registered but no Pydantic-related functions (validators, body parsers, schema helpers) are called. Note: it cannot detect Pydantic models used purely as type annotations — use this finding as a prompt to review, not a definitive violation.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["fastapi"],
+        "required_call_patterns": [
+          "BaseModel*",
+          "validator*", "field_validator*", "model_validator*",
+          "Body*", "Form*", "Query*", "Path*", "Header*",
+          "Schema*",
+          "conlist*", "conint*", "constr*", "confloat*",
+          "Field*",
+          "Annotated*"
+        ],
+        "route_node_names": ["post", "put", "patch"],
+        "middleware_node_names": [],
+        "scope": "file"
+      },
+      "message": "File {file} registers FastAPI mutation endpoints (POST/PUT/PATCH) without visible Pydantic validation. {count}/{total} other file(s) in this package use Pydantic models. Declare request bodies as Pydantic BaseModel subclasses for automatic schema validation.",
+      "tags": ["owasp-a03", "input-validation", "fastapi"]
+    },
+    {
+      "id": "python-django-missing-auth",
+      "name": "Django view without authentication decorator or mixin",
+      "language": "python",
+      "framework": "django",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A Django view file does not apply any authentication decorator or mixin. Django provides function-based auth decorators (@login_required, @permission_required, @user_passes_test) and class-based mixins (LoginRequiredMixin, PermissionRequiredMixin). Django REST Framework viewsets use permission_classes = [IsAuthenticated]. Without these, all views in the file are publicly accessible. Note: this check applies to files matching Django view naming patterns. Public views (e.g., login page, home page) that intentionally have no auth should be in separate files to avoid false positives. DRF viewsets using permission_classes as a class attribute assignment may trigger false positives if the AST parser does not create call edges for class attribute references.",
+      "detection": {
+        "check_type": "missing_annotation",
+        "framework_identifiers": ["django"],
+        "annotation_patterns": [
+          "login_required*", "permission_required*", "user_passes_test*",
+          "staff_member_required*",
+          "LoginRequiredMixin*", "PermissionRequiredMixin*",
+          "UserPassesTestMixin*", "AccessMixin*",
+          "jwt_required*", "token_required*",
+          "IsAuthenticated*", "IsAdminUser*", "permission_classes*",
+          "authenticate*",
+          "verify_token*", "decode_token*",
+          "requires_auth*", "require_auth*"
+        ],
+        "handler_file_patterns": [
+          "*/views.py", "*views.py", "*_views.py",
+          "*/views/*.py",
+          "*/viewsets.py", "*viewsets.py", "*_viewsets.py",
+          "*/viewsets/*.py"
+        ],
+        "scope": "file"
+      },
+      "message": "Django view file {file} does not call any authentication decorator or mixin. Views without auth are publicly accessible. Apply @login_required on function-based views or LoginRequiredMixin on class-based views.",
+      "tags": ["owasp-a01", "auth", "django", "production-critical"]
+    },
+    {
+      "id": "python-flask-missing-auth",
+      "name": "Flask route registered without authentication",
+      "language": "python",
+      "framework": "flask",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A file using Flask registers HTTP routes but does not apply any authentication. Flask's route registration is decorator-based: @app.route('/path'), @app.get('/path') (Flask 2.0+), or @blueprint.route('/path'). Authentication is typically applied via Flask-Login (@login_required), flask-jwt-extended (@jwt_required), or custom decorators. Before-request hooks (before_request) can also enforce auth globally for a blueprint. This check fires when a file registers routes but calls no recognised auth function.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["flask"],
+        "required_call_patterns": [
+          "login_required*",
+          "jwt_required*", "fresh_jwt_required*",
+          "token_required*",
+          "requires_auth*", "require_auth*",
+          "Auth*", "authenticate*",
+          "current_user*",
+          "verify_token*", "decode_token*", "validate_token*",
+          "before_request*",
+          "HTTPTokenAuth*", "HTTPBasicAuth*", "http_auth*"
+        ],
+        "route_node_names": [
+          "route", "get", "post", "put", "delete", "patch",
+          "head", "options",
+          "add_url_rule"
+        ],
+        "middleware_node_names": ["before_request", "before_app_request"],
+        "scope": "file"
+      },
+      "message": "File {file} registers Flask routes without calling any authentication function. {count}/{total} other file(s) in this package use auth. Apply @login_required (Flask-Login), @jwt_required (flask-jwt-extended), or a before_request hook for blueprint-level auth.",
+      "tags": ["owasp-a01", "auth", "flask", "production-critical"]
+    },
+    {
+      "id": "python-direct-db-import",
+      "name": "Python route/handler directly imports database driver",
+      "language": "python",
+      "framework": "*",
+      "pattern_type": "layer_violation",
+      "severity": "MEDIUM",
+      "description": "A Python route or handler file directly imports a raw database driver (SQLAlchemy, psycopg2, pymongo, etc.) instead of going through a repository or service layer. This couples the HTTP layer directly to data storage, making it harder to test, change storage backends, and enforce data access policies. FastAPI routes using SQLAlchemy sessions via Depends(get_db) — where the Session type is imported — may trigger this check; review whether a service or repository layer is appropriate. Django views importing django.db.models is intentional and is excluded via the framework gate.",
+      "detection": {
+        "check_type": "direct_import",
+        "framework_identifiers": ["fastapi", "flask"],
+        "handler_file_patterns": [
+          "*router*.py", "*/router/*.py", "*/routers/*.py",
+          "*route*.py", "*/route/*.py", "*/routes/*.py",
+          "*view*.py", "*/view/*.py", "*/views/*.py",
+          "*handler*.py", "*/handler/*.py", "*/handlers/*.py",
+          "*api*.py", "*/api/*.py",
+          "*controller*.py", "*/controller/*.py", "*/controllers/*.py",
+          "*endpoint*.py", "*/endpoint/*.py", "*/endpoints/*.py",
+          "*resource*.py", "*/resource/*.py", "*/resources/*.py"
+        ],
+        "forbidden_import_patterns": [
+          "sqlalchemy*",
+          "psycopg2*", "psycopg*",
+          "asyncpg*",
+          "pymysql*", "aiomysql*",
+          "pymongo*", "motor*",
+          "aiosqlite*",
+          "sqlite3",
+          "databases*",
+          "tortoise*"
+        ],
+        "scope": "file"
+      },
+      "message": "File {file} appears to be a route/handler but directly imports database package '{target}'. Consider accessing data through a repository or service layer instead.",
+      "tags": ["architecture", "layer-violation", "testability"]
+    }
+  ]
+}
