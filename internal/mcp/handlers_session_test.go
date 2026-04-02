@@ -2056,3 +2056,255 @@ func TestComputeFirstSessionHighlights_MainAndInitNotDeadCode(t *testing.T) {
 		}
 	}
 }
+
+// ── _briefing (Sprint 23.4) ───────────────────────────────────────────────────
+
+// TestHandleSessionInit_Briefing_Shape verifies that _briefing is present in
+// all scopes and contains the five required morning-briefing keys.
+func TestHandleSessionInit_Briefing_Shape(t *testing.T) {
+	scopes := []string{"standard", "quick", "full", "resume"}
+	for _, scope := range scopes {
+		t.Run("scope="+scope, func(t *testing.T) {
+			s := newTestServer(t)
+			res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+				"agent_id": "briefing-agent",
+				"scope":    scope,
+			}))
+			m := mustResult(t, res, err)
+
+			// _briefing must be present in ALL scopes — it is the agent's
+			// highest-priority orientation and must never be suppressed.
+			hasKey(t, m, "_briefing")
+
+			briefing, ok := m["_briefing"].(map[string]any)
+			if !ok {
+				t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+			}
+
+			// All five priority fields must be present.
+			for _, field := range []string{
+				"unfinished_work",
+				"conventions",
+				"drift_alerts",
+				"security_rules",
+			} {
+				if _, ok := briefing[field]; !ok {
+					t.Errorf("_briefing.%s missing for scope=%s", field, scope)
+				}
+			}
+
+			// unfinished_work must be a non-empty string.
+			uw, _ := briefing["unfinished_work"].(string)
+			if uw == "" {
+				t.Errorf("_briefing.unfinished_work must be a non-empty string for scope=%s", scope)
+			}
+
+			// drift_alerts must be a non-empty string.
+			da, _ := briefing["drift_alerts"].(string)
+			if da == "" {
+				t.Errorf("_briefing.drift_alerts must be a non-empty string for scope=%s", scope)
+			}
+
+			// conventions must be a slice (may be empty on fresh test server).
+			if _, ok := briefing["conventions"].([]any); !ok {
+				t.Errorf("_briefing.conventions must be a slice for scope=%s, got %T", scope, briefing["conventions"])
+			}
+
+			// security_rules must be a slice (may be empty when no rules configured).
+			if _, ok := briefing["security_rules"].([]any); !ok {
+				t.Errorf("_briefing.security_rules must be a slice for scope=%s, got %T", scope, briefing["security_rules"])
+			}
+		})
+	}
+}
+
+// TestHandleSessionInit_Briefing_UnfinishedWork_ReflectsTasks verifies that
+// _briefing.unfinished_work mentions in-progress tasks by name.
+func TestHandleSessionInit_Briefing_UnfinishedWork_ReflectsTasks(t *testing.T) {
+	s := newTestServer(t)
+
+	// Create a plan with one task and mark it in-progress.
+	_, taskIDs := makePlan(t, s, "Auth refactor", "Implement OAuth flow")
+	taskID := taskIDs[0]
+	if _, _, err := s.store.UpdateTask(taskID, "in_progress", "", "briefing-agent"); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "briefing-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	uw, _ := briefing["unfinished_work"].(string)
+	if !strings.Contains(uw, "in progress") {
+		t.Errorf("_briefing.unfinished_work should mention in-progress tasks, got: %q", uw)
+	}
+	if !strings.Contains(uw, "Implement OAuth flow") {
+		t.Errorf("_briefing.unfinished_work should include the task title, got: %q", uw)
+	}
+}
+
+// TestHandleSessionInit_Briefing_NoTasksDefaultsToNoUnfinishedWork verifies
+// the fallback message when no tasks exist.
+func TestHandleSessionInit_Briefing_NoTasksDefaultsToNoUnfinishedWork(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "fresh-agent"}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	uw, _ := briefing["unfinished_work"].(string)
+	if !strings.Contains(uw, "No unfinished work") {
+		t.Errorf("expected 'No unfinished work' default message, got: %q", uw)
+	}
+}
+
+// TestHandleSessionInit_Briefing_RecentDecisions verifies that decision episodes
+// recorded in the store appear in _briefing.recent_decisions.
+func TestHandleSessionInit_Briefing_RecentDecisions(t *testing.T) {
+	s := newTestServer(t)
+
+	// Record a recent decision episode using the project's repoID ("test-repo").
+	_, err := s.store.RememberEpisode(store.Episode{
+		AgentID:     "decision-agent",
+		ProjectID:   "test-repo",
+		EpisodeType: "decision",
+		Outcome:     "success",
+		Decision:    "Use JWT over session cookies for stateless scaling",
+		CreatedAt:   time.Now().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("RememberEpisode: %v", err)
+	}
+
+	res, initErr := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "decision-agent",
+		"scope":    "full",
+	}))
+	m := mustResult(t, res, initErr)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	decisions, ok := briefing["recent_decisions"].([]any)
+	if !ok || len(decisions) == 0 {
+		t.Fatalf("expected recent_decisions to contain at least one entry, got: %v", briefing["recent_decisions"])
+	}
+
+	d, ok := decisions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("recent_decisions[0] must be a map, got %T", decisions[0])
+	}
+	decision, _ := d["decision"].(string)
+	if !strings.Contains(decision, "JWT") {
+		t.Errorf("recent_decisions[0].decision should mention JWT, got: %q", decision)
+	}
+	if _, ok := d["outcome"]; !ok {
+		t.Error("recent_decisions[0] must have 'outcome' field")
+	}
+	if _, ok := d["when"]; !ok {
+		t.Error("recent_decisions[0] must have 'when' field")
+	}
+}
+
+// TestHandleSessionInit_Briefing_SecurityRules_FromConfig verifies that
+// structural config rules appear in _briefing.security_rules.
+func TestHandleSessionInit_Briefing_SecurityRules_FromConfig(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Add a structural rule (non-agent type — will appear in security_rules).
+	cfg.Rules = append(cfg.Rules, config.Rule{
+		ID:          "no-db-from-handler",
+		Description: "Handlers must not import the database package directly",
+		Severity:    "error",
+		RuleType:    "", // structural (default)
+	})
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, initErr := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "rule-agent"}))
+	m := mustResult(t, res, initErr)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	rules, ok := briefing["security_rules"].([]any)
+	if !ok || len(rules) == 0 {
+		t.Fatalf("expected security_rules to contain the structural rule, got: %v", briefing["security_rules"])
+	}
+
+	ruleStr, _ := rules[0].(string)
+	if !strings.Contains(ruleStr, "Handlers must not import") {
+		t.Errorf("security_rules[0] should include rule description, got: %q", ruleStr)
+	}
+	if !strings.Contains(ruleStr, "[ERROR]") {
+		t.Errorf("security_rules[0] should include severity [ERROR], got: %q", ruleStr)
+	}
+}
+
+// TestHandleSessionInit_Briefing_DriftAlerts_NoViolations verifies the
+// "no drift" default message when no violations or federation warnings exist.
+func TestHandleSessionInit_Briefing_DriftAlerts_NoViolations(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "clean-agent"}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	da, _ := briefing["drift_alerts"].(string)
+	if !strings.Contains(da, "No active drift") {
+		t.Errorf("expected 'No active drift' when no violations exist, got: %q", da)
+	}
+}
+
+// TestHandleSessionInit_Briefing_NeverContainsSourceCode verifies that none of
+// the _briefing string fields contain raw source code (function bodies, imports,
+// etc.). This enforces the Communication Protocol: NL intelligence only.
+func TestHandleSessionInit_Briefing_NeverContainsSourceCode(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "code-check-agent", "scope": "full"}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	// Serialise the entire briefing and scan for code-like patterns.
+	raw, _ := json.Marshal(briefing)
+	content := string(raw)
+
+	// These patterns appear in source code but not in natural language briefings.
+	codePatterns := []string{
+		"func ",
+		"import (",
+		"package ",
+		"return nil",
+		"if err != nil",
+		":= ",
+	}
+	for _, p := range codePatterns {
+		if strings.Contains(content, p) {
+			t.Errorf("_briefing contains code-like pattern %q — violates Communication Protocol. Content: %s", p, content)
+		}
+	}
+}

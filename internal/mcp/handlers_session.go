@@ -1084,6 +1084,9 @@ func (s *Server) handleSessionInit(
 	// the agent needing to re-discover or re-ask for them.
 	s.rulesMu.RLock()
 	var agentConstraints []map[string]string
+	// briefingSecurityRules collects NL descriptions of structural (non-agent)
+	// rules for the _briefing section. Capped at 5 to keep the briefing compact.
+	var briefingSecurityRules []string
 	for _, r := range s.config.Rules {
 		if r.IsAgentRule() {
 			agentConstraints = append(agentConstraints, map[string]string{
@@ -1091,6 +1094,12 @@ func (s *Server) handleSessionInit(
 				"description": r.Description,
 				"severity":    r.Severity,
 			})
+		} else if r.Description != "" && len(briefingSecurityRules) < 5 {
+			sev := strings.ToUpper(r.Severity)
+			if sev == "" {
+				sev = "WARNING"
+			}
+			briefingSecurityRules = append(briefingSecurityRules, fmt.Sprintf("%s [%s]", r.Description, sev))
 		}
 	}
 	s.rulesMu.RUnlock()
@@ -1577,6 +1586,174 @@ func (s *Server) handleSessionInit(
 					"or discover_tools(query=\"list all\") to see everything.",
 			}
 		}
+	}
+
+	// _briefing: morning briefing — the five highest-priority items an agent
+	// needs at session start. Natural language only; no code snippets. Present
+	// in ALL scopes (including quickMode) so every agent gets oriented first.
+	//
+	//   (1) unfinished_work  — in-progress/pending tasks + prior session summary
+	//   (2) conventions      — auto-load project prompts + key agent constraints
+	//   (3) drift_alerts     — federation drift + active architectural violations
+	//   (4) security_rules   — structural rule descriptions (NL, capped at 5)
+	//   (5) recent_decisions — decision episodes from last 30 days (capped at 3)
+	{
+		briefing := make(map[string]interface{})
+
+		// (1) Unfinished work.
+		{
+			var inProg, pend []string
+			if tasks, ok := pendingSection["tasks"].([]taskWithState); ok {
+				for _, t := range tasks {
+					title := strings.TrimSpace(t.Title)
+					// Normalize: use only the first line and cap length so
+					// multi-line task titles don't corrupt the NL briefing.
+					if nl := strings.IndexByte(title, '\n'); nl >= 0 {
+						title = title[:nl]
+					}
+					if rs := []rune(title); len(rs) > 80 {
+						title = string(rs[:80]) + "…"
+					}
+					if title == "" {
+						title = t.ID
+					}
+					switch t.Status {
+					case "in_progress":
+						inProg = append(inProg, title)
+					case "pending":
+						pend = append(pend, title)
+					}
+				}
+			}
+			// Cap displayed task names at 3 to keep the briefing compact.
+			inProgCap := inProg
+			if len(inProgCap) > 3 {
+				inProgCap = inProgCap[:3]
+			}
+			var prevPkgNote string
+			if pw, ok := resp["previous_session_work"].(map[string]interface{}); ok {
+				if pkgs, ok := pw["packages"].([]PackageWork); ok && len(pkgs) > 0 {
+					prevPkgNote = fmt.Sprintf(" Previous session: %d package(s) touched.", len(pkgs))
+				}
+			}
+			var staleNote string
+			if len(staleSessions) > 0 {
+				staleNote = fmt.Sprintf(" %d session(s) ended without clean shutdown (review stale_sessions).", len(staleSessions))
+			}
+			var w string
+			switch {
+			case len(inProg) > 0 && len(pend) > 0:
+				w = fmt.Sprintf("%d in-progress: %s. %d more pending.%s%s",
+					len(inProg), strings.Join(inProgCap, ", "),
+					len(pend), prevPkgNote, staleNote)
+			case len(inProg) > 0:
+				w = fmt.Sprintf("%d task(s) in progress: %s.%s%s",
+					len(inProg), strings.Join(inProgCap, ", "),
+					prevPkgNote, staleNote)
+			case len(pend) > 0:
+				w = fmt.Sprintf("%d task(s) pending (none in progress yet).%s%s",
+					len(pend), prevPkgNote, staleNote)
+			default:
+				w = "No unfinished work from prior sessions." + prevPkgNote + staleNote
+			}
+			briefing["unfinished_work"] = w
+		}
+
+		// (2) Conventions: auto-load project prompts + error-severity agent constraints.
+		{
+			var convs []string
+			if ap, ok := resp["active_prompts"].(map[string]interface{}); ok {
+				if pl, ok := ap["prompts"].([]map[string]string); ok {
+					for _, p := range pl {
+						body := p["body"]
+						if body == "" {
+							continue
+						}
+						// Surface only the first line to keep conventions terse.
+						if nl := strings.IndexByte(body, '\n'); nl > 0 {
+							body = body[:nl]
+						}
+						// Rune-safe truncation: avoid splitting multi-byte UTF-8 sequences.
+						if rs := []rune(body); len(rs) > 120 {
+							body = string(rs[:120]) + "…"
+						}
+						convs = append(convs, body)
+						if len(convs) >= 5 {
+							break
+						}
+					}
+				}
+			}
+			// Include error-severity agent constraints that weren't already surfaced.
+			for _, ac := range agentConstraints {
+				if ac["severity"] == "error" && len(convs) < 5 {
+					convs = append(convs, ac["description"])
+				}
+			}
+			if convs == nil {
+				convs = []string{}
+			}
+			briefing["conventions"] = convs
+		}
+
+		// (3) Drift alerts: federation drift warnings + active violations count.
+		{
+			driftCount := 0
+			if warnings, ok := resp["warnings"].([]string); ok {
+				driftCount = len(warnings)
+			}
+			violCount := 0
+			if ws, ok := resp["working_state"].(map[string]interface{}); ok {
+				if v, ok := ws["active_violations"].(int); ok {
+					violCount = v
+				}
+			}
+			var msg string
+			switch {
+			case driftCount > 0 && violCount > 0:
+				msg = fmt.Sprintf("%d federation drift alert(s) and %d active architectural violation(s). Review warnings and cross_project_drift before proceeding.",
+					driftCount, violCount)
+			case driftCount > 0:
+				msg = fmt.Sprintf("%d federation drift alert(s). Check cross_project_drift for details.", driftCount)
+			case violCount > 0:
+				msg = fmt.Sprintf("%d active architectural violation(s). Run validate() to review.", violCount)
+			default:
+				msg = "No active drift or violations."
+			}
+			briefing["drift_alerts"] = msg
+		}
+
+		// (4) Security rules: NL descriptions of structural (non-agent) rules.
+		// Collected alongside agentConstraints above; capped at 5.
+		if briefingSecurityRules == nil {
+			briefingSecurityRules = []string{}
+		}
+		briefing["security_rules"] = briefingSecurityRules
+
+		// (5) Recent decisions: decision-type episodes from the last 30 days.
+		{
+			var decisions []map[string]interface{}
+			if s.store != nil && primaryRepoID != "" {
+				if eps, err := s.store.GetEpisodes(primaryRepoID, "", "decision", nil, 3, 30); err == nil {
+					for _, e := range eps {
+						d := map[string]interface{}{"decision": e.Decision}
+						if e.Outcome != "" {
+							d["outcome"] = e.Outcome
+						}
+						if e.CreatedAt > 0 {
+							age := time.Since(time.Unix(e.CreatedAt, 0))
+							d["when"] = formatSessionDuration(age) + " ago"
+						}
+						decisions = append(decisions, d)
+					}
+				}
+			}
+			if len(decisions) > 0 {
+				briefing["recent_decisions"] = decisions
+			}
+		}
+
+		resp["_briefing"] = briefing
 	}
 
 	// _summary: one-line template-based digest — no LLM, negligible tokens.
