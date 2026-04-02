@@ -209,6 +209,30 @@ type Detection struct {
 	// Examples: ["/admin/*", "/management/*", "/internal/*", "*/admin*"]
 	AdminPathPatterns []string `json:"admin_path_patterns,omitempty"`
 
+	// WebSocketNodeNames are function or method names that identify WebSocket upgrade
+	// handlers or WebSocket connection handlers in the project. Used by
+	// CheckTypeCrossTransportAuth to classify route nodes as WebSocket transport.
+	//
+	// These supplement the built-in path-based heuristics (/ws, /websocket, etc.).
+	// Specify framework-specific WebSocket upgrade function names here.
+	//
+	// Used by: CheckTypeCrossTransportAuth
+	// Examples (Go):  ["Upgrade", "Accept", "HandleWS", "HandleWebSocket", "upgrader.Upgrade"]
+	// Examples (Node.js): ["handleUpgrade", "on('connection')", "io.on"]
+	WebSocketNodeNames []string `json:"websocket_node_names,omitempty"`
+
+	// GRPCNodeNames are function or method names that register gRPC service
+	// implementations. Used by CheckTypeCrossTransportAuth to classify route nodes
+	// as gRPC transport.
+	//
+	// These supplement the built-in path and name heuristics.
+	// Specify framework-specific gRPC registration function names here.
+	//
+	// Used by: CheckTypeCrossTransportAuth
+	// Examples (Go):  ["Register*Server", "RegisterService", "grpc.NewServer"]
+	// Examples (Java): ["addService", "bindService"]
+	GRPCNodeNames []string `json:"grpc_node_names,omitempty"`
+
 	// Scope controls how broadly the engine analyzes the codebase for this pattern.
 	// Defaults to ScopeFile when empty.
 	Scope DetectionScope `json:"scope,omitempty"`

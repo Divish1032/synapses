@@ -1179,6 +1179,350 @@ func TestCheckProject_CrossTransport_BothProtected_NoViolation(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Sprint 26.8: detectTransportType — enhanced heuristics
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestDetectTransportType_DefaultHTTP(t *testing.T) {
+	// A plain HTTP route path with no special keywords → "http".
+	if got := detectTransportType("/api/users", "GET /api/users", nil, nil); got != "http" {
+		t.Errorf("expected http, got %q", got)
+	}
+}
+
+func TestDetectTransportType_PathKeyword_WS(t *testing.T) {
+	// /ws path segment → websocket.
+	if got := detectTransportType("/api/ws", "GET /api/ws", nil, nil); got != "websocket" {
+		t.Errorf("expected websocket for /api/ws, got %q", got)
+	}
+}
+
+func TestDetectTransportType_PathKeyword_Socket(t *testing.T) {
+	// /socket path segment → websocket.
+	if got := detectTransportType("/socket/connect", "GET /socket/connect", nil, nil); got != "websocket" {
+		t.Errorf("expected websocket for /socket, got %q", got)
+	}
+}
+
+func TestDetectTransportType_PathKeyword_Stream(t *testing.T) {
+	// /stream path segment → websocket.
+	if got := detectTransportType("/api/stream", "GET /api/stream", nil, nil); got != "websocket" {
+		t.Errorf("expected websocket for /api/stream, got %q", got)
+	}
+}
+
+func TestDetectTransportType_PathKeyword_Events(t *testing.T) {
+	// /events segment → websocket.
+	if got := detectTransportType("/api/events", "GET /api/events", nil, nil); got != "websocket" {
+		t.Errorf("expected websocket for /api/events, got %q", got)
+	}
+}
+
+func TestDetectTransportType_PathKeyword_Live(t *testing.T) {
+	// /live segment → websocket.
+	if got := detectTransportType("/live/feed", "GET /live/feed", nil, nil); got != "websocket" {
+		t.Errorf("expected websocket for /live, got %q", got)
+	}
+}
+
+func TestDetectTransportType_TrailingSuffix_WS(t *testing.T) {
+	// Route ending with /ws → websocket.
+	if got := detectTransportType("/chat/ws", "chat/ws", nil, nil); got != "websocket" {
+		t.Errorf("expected websocket for /chat/ws, got %q", got)
+	}
+}
+
+func TestDetectTransportType_GRPCHeuristic(t *testing.T) {
+	// Node name contains "grpc" → grpc.
+	if got := detectTransportType("/grpc.users.v1.UserService/GetUser", "RPC GetUser", nil, nil); got != "grpc" {
+		t.Errorf("expected grpc, got %q", got)
+	}
+}
+
+func TestDetectTransportType_GRPCNodeName_RegisterServer(t *testing.T) {
+	// Node name matches "Register*Server" naming convention → grpc.
+	// This is the standard gRPC Go pattern: pb.RegisterUserServiceServer(srv, impl)
+	if got := detectTransportType("/", "RegisterUserServiceServer", nil, nil); got != "grpc" {
+		t.Errorf("expected grpc for RegisterUserServiceServer naming pattern, got %q", got)
+	}
+}
+
+func TestDetectTransportType_CustomWSNodeNames(t *testing.T) {
+	// Pattern-provided WebSocket node name matches → websocket.
+	wsNames := []string{"Upgrade", "HandleWS", "websocket.Accept"}
+	if got := detectTransportType("/chat", "Upgrade", wsNames, nil); got != "websocket" {
+		t.Errorf("expected websocket via custom node name Upgrade, got %q", got)
+	}
+	if got := detectTransportType("/chat", "HandleWS", wsNames, nil); got != "websocket" {
+		t.Errorf("expected websocket via custom node name HandleWS, got %q", got)
+	}
+}
+
+func TestDetectTransportType_CustomGRPCNodeNames(t *testing.T) {
+	// Pattern-provided gRPC node name matches → grpc.
+	grpcNames := []string{"addService", "bindService"}
+	if got := detectTransportType("/", "addService", nil, grpcNames); got != "grpc" {
+		t.Errorf("expected grpc via custom node name addService, got %q", got)
+	}
+}
+
+func TestDetectTransportType_CustomGRPCGlobPattern(t *testing.T) {
+	// Pattern-provided gRPC glob "Register*Server" matches custom registration functions.
+	grpcNames := []string{"Register*Server"}
+	if got := detectTransportType("/", "RegisterPaymentServer", nil, grpcNames); got != "grpc" {
+		t.Errorf("expected grpc via glob pattern Register*Server, got %q", got)
+	}
+	// Ensure a non-matching name does not classify as gRPC.
+	if got := detectTransportType("/api/users", "handleUsers", nil, grpcNames); got != "http" {
+		t.Errorf("expected http for non-matching name, got %q", got)
+	}
+}
+
+func TestDetectTransportType_GRPCTakesPriorityOverWS(t *testing.T) {
+	// When both gRPC and WebSocket names are provided and the node matches gRPC,
+	// gRPC is classified first (checked before WebSocket).
+	wsNames := []string{"Upgrade"}
+	grpcNames := []string{"RegisterUserServer"}
+	if got := detectTransportType("/", "RegisterUserServer", wsNames, grpcNames); got != "grpc" {
+		t.Errorf("expected grpc takes priority over websocket check, got %q", got)
+	}
+}
+
+func TestDetectTransportType_NonWSSuffix(t *testing.T) {
+	// /towson contains "ws" as substring but not as a path segment → must be http.
+	// This validates that containsPathSegment prevents false positives.
+	if got := detectTransportType("/towson", "GET /towson", nil, nil); got != "http" {
+		t.Errorf("expected http for /towson (ws substring, not segment), got %q", got)
+	}
+}
+
+func TestDetectTransportType_WSSuffix_NotSubstring(t *testing.T) {
+	// /news-feed is http, not WebSocket — "news" contains no transport keywords as segments.
+	if got := detectTransportType("/news-feed", "GET /news-feed", nil, nil); got != "http" {
+		t.Errorf("expected http for /news-feed, got %q", got)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Sprint 26.8: CheckProject framework gate (project-scope variant)
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestCheckProject_FrameworkGate_NoMatchingImport(t *testing.T) {
+	// Pattern requires chi import but no file in the project imports chi.
+	// The project-scope framework gate must prevent a false positive.
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.FrameworkIdentifiers = []string{"github.com/go-chi/chi/v5"}
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// HTTP routes with auth (gin project, NOT chi).
+	addFileWithImports(g, "/project/api/routes.go", "github.com/gin-gonic/gin")
+	addRouteNode(g, "/project/api/routes.go", "GET", "/users")
+	addFunctionWithCalls(g, "/project/api/routes.go", "setupRoutes", "AuthMiddleware")
+
+	// WebSocket handler without auth.
+	addFileWithImports(g, "/project/ws/handler.go")
+	addRouteNode(g, "/project/ws/handler.go", "WS", "/ws/events")
+
+	violations := e.CheckProject(g)
+	if violations != nil {
+		t.Errorf("expected no violations: chi framework gate should block on non-chi project, got %v", violations)
+	}
+}
+
+func TestCheckProject_FrameworkGate_WithMatchingImport(t *testing.T) {
+	// Pattern requires chi import; project imports chi → gate passes, violation fires.
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.FrameworkIdentifiers = []string{"github.com/go-chi/chi/v5"}
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// chi HTTP routes with auth.
+	addFileWithImports(g, "/project/api/routes.go", "github.com/go-chi/chi/v5")
+	addRouteNode(g, "/project/api/routes.go", "GET", "/users")
+	addFunctionWithCalls(g, "/project/api/routes.go", "setupRoutes", "AuthMiddleware")
+
+	// WebSocket handler WITHOUT auth — inconsistent.
+	addFileWithImports(g, "/project/ws/handler.go")
+	addRouteNode(g, "/project/ws/handler.go", "WS", "/ws/events")
+
+	violations := e.CheckProject(g)
+	if len(violations) == 0 {
+		t.Fatal("expected cross-transport violation: chi project with unprotected WebSocket handler")
+	}
+}
+
+func TestCheckProject_FrameworkGate_GlobIdentifier(t *testing.T) {
+	// Framework identifier supports glob: "github.com/go-chi/chi/*" should match
+	// both "github.com/go-chi/chi/v5" and "github.com/go-chi/chi".
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.FrameworkIdentifiers = []string{"github.com/go-chi/chi/*"}
+		sp.Detection.RequiredCallPatterns = []string{"Auth*"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/api/routes.go", "github.com/go-chi/chi/v5")
+	addRouteNode(g, "/project/api/routes.go", "GET", "/users")
+	addFunctionWithCalls(g, "/project/api/routes.go", "setupRoutes", "AuthMiddleware")
+
+	addFileWithImports(g, "/project/ws/handler.go")
+	addRouteNode(g, "/project/ws/handler.go", "WS", "/ws/updates")
+
+	violations := e.CheckProject(g)
+	if len(violations) == 0 {
+		t.Fatal("expected violation: chi/* glob should match chi/v5")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Sprint 26.8: custom node name detection in CheckProject
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestCheckProject_WebSocketByCustomNodeName(t *testing.T) {
+	// WebSocket handler detected via pattern-provided WebSocketNodeNames rather
+	// than path heuristics. Route path is a plain HTTP path but node name is "Upgrade".
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+		sp.Detection.WebSocketNodeNames = []string{"Upgrade", "HandleWS"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// HTTP routes with auth.
+	addFileWithImports(g, "/project/api/routes.go")
+	addRouteNode(g, "/project/api/routes.go", "GET", "/users")
+	addRouteNode(g, "/project/api/routes.go", "POST", "/users")
+	addFunctionWithCalls(g, "/project/api/routes.go", "setupRoutes", "AuthMiddleware")
+
+	// WebSocket handler: path is /chat (no ws keyword) but node name is "Upgrade".
+	addFileWithImports(g, "/project/chat/handler.go")
+	routeID := g.MakeNodeID("/project/chat/handler.go", "route:Upgrade /chat")
+	g.UpsertRouteNode(&graph.Node{
+		ID:   routeID,
+		Type: graph.NodeRoute,
+		Name: "Upgrade", // node name triggers WebSocket classification
+		File: "/project/chat/handler.go",
+		Metadata: map[string]string{
+			"path": "/chat", // path alone would classify as http
+		},
+	})
+
+	violations := e.CheckProject(g)
+	if len(violations) == 0 {
+		t.Fatal("expected violation: WebSocket route detected via custom node name 'Upgrade'")
+	}
+	if violations[0].Target != "websocket" {
+		t.Errorf("expected target='websocket', got %q", violations[0].Target)
+	}
+}
+
+func TestCheckProject_GRPCByCustomNodeName(t *testing.T) {
+	// gRPC service detected via pattern-provided GRPCNodeNames.
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+		sp.Detection.GRPCNodeNames = []string{"Register*Server"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// HTTP routes with auth.
+	addFileWithImports(g, "/project/api/http_routes.go")
+	addRouteNode(g, "/project/api/http_routes.go", "GET", "/users")
+	addRouteNode(g, "/project/api/http_routes.go", "POST", "/users")
+	addFunctionWithCalls(g, "/project/api/http_routes.go", "setupRoutes", "AuthMiddleware")
+
+	// gRPC handler: node name matches Register*Server glob.
+	addFileWithImports(g, "/project/grpc/server.go")
+	grpcRouteID := g.MakeNodeID("/project/grpc/server.go", "route:RegisterUserServiceServer")
+	g.UpsertRouteNode(&graph.Node{
+		ID:   grpcRouteID,
+		Type: graph.NodeRoute,
+		Name: "RegisterUserServiceServer", // matches Register*Server
+		File: "/project/grpc/server.go",
+		Metadata: map[string]string{
+			"path": "/", // no grpc keyword in path
+		},
+	})
+
+	violations := e.CheckProject(g)
+	if len(violations) == 0 {
+		t.Fatal("expected violation: gRPC service detected via Register*Server node name glob")
+	}
+	if violations[0].Target != "grpc" {
+		t.Errorf("expected target='grpc', got %q", violations[0].Target)
+	}
+}
+
+func TestCheckProject_CrossTransport_AllProtected_NoViolation(t *testing.T) {
+	// HTTP, WebSocket, and gRPC all have auth → no violation.
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+		sp.Detection.WebSocketNodeNames = []string{"Upgrade"}
+		sp.Detection.GRPCNodeNames = []string{"Register*Server"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// HTTP with auth.
+	addFileWithImports(g, "/project/api/routes.go")
+	addRouteNode(g, "/project/api/routes.go", "GET", "/users")
+	addFunctionWithCalls(g, "/project/api/routes.go", "setup", "AuthMiddleware")
+
+	// WebSocket with auth.
+	addFileWithImports(g, "/project/ws/handler.go")
+	addRouteNode(g, "/project/ws/handler.go", "WS", "/ws/events")
+	addFunctionWithCalls(g, "/project/ws/handler.go", "handleWS", "AuthMiddleware")
+
+	// gRPC with auth.
+	addFileWithImports(g, "/project/grpc/server.go")
+	grpcID := g.MakeNodeID("/project/grpc/server.go", "route:RegisterPaymentServer")
+	g.UpsertRouteNode(&graph.Node{
+		ID:   grpcID,
+		Type: graph.NodeRoute,
+		Name: "RegisterPaymentServer",
+		File: "/project/grpc/server.go",
+		Metadata: map[string]string{"path": "/"},
+	})
+	addFunctionWithCalls(g, "/project/grpc/server.go", "initGRPC", "AuthMiddleware")
+
+	violations := e.CheckProject(g)
+	if violations != nil {
+		t.Errorf("expected no violations: all transports have auth, got %v", violations)
+	}
+}
+
+func TestCheckProject_BuiltinCrossTransportPatterns_Load(t *testing.T) {
+	// The built-in cross-transport.json patterns must load and include at least the
+	// five language patterns (go, typescript, javascript, python, java).
+	e := DefaultEngine()
+	var crossTransportCount int
+	for _, p := range e.patterns.ForCheckType(CheckTypeCrossTransportAuth) {
+		crossTransportCount++
+		// Every cross-transport pattern must have required_call_patterns.
+		if len(p.Detection.RequiredCallPatterns) == 0 {
+			t.Errorf("pattern %q has no required_call_patterns", p.ID)
+		}
+		// WebSocket and gRPC node names should be populated.
+		if len(p.Detection.WebSocketNodeNames) == 0 {
+			t.Errorf("pattern %q has no websocket_node_names", p.ID)
+		}
+	}
+	if crossTransportCount < 4 {
+		t.Errorf("expected at least 4 built-in cross-transport patterns, got %d", crossTransportCount)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // nilIfEmpty helper
 // ──────────────────────────────────────────────────────────────────────────────
 

@@ -618,11 +618,33 @@ func matchAdminComponent(routePath string) bool {
 // types (e.g. HTTP routes) but not others (e.g. WebSocket handlers, gRPC services)
 // in the same project. This is a project-scope check.
 //
-// Heuristic: looks for NodeRoute nodes across all files, groups them by transport
-// type (HTTP vs WebSocket), and checks consistency of auth calls.
-// Sprint 26.8 will add per-framework patterns for this check; here we provide
-// the generic detection logic the patterns will invoke.
+// Framework scoping: if the pattern specifies FrameworkIdentifiers, the pattern
+// only fires in projects where at least one file imports one of those identifiers.
+// This is the same zero-false-positive guarantee as the per-file framework gate.
+// Without this, a Go/chi pattern would fire on a pure Node.js project.
+//
+// Transport detection: uses detectTransportType with path/name heuristics,
+// supplemented by the pattern's WebSocketNodeNames and GRPCNodeNames fields.
 func checkCrossTransportAuth(g *graph.Graph, p SecurityPattern) []Violation {
+	// Framework gate (project-scope variant): if FrameworkIdentifiers are specified,
+	// verify at least one file in the project imports one of them.
+	// This prevents, e.g., a chi-specific pattern from firing on a Gin project.
+	if len(p.Detection.FrameworkIdentifiers) > 0 {
+		found := false
+		g.IterateNodes(func(n *graph.Node) {
+			if found || n.Type != graph.NodeFile {
+				return
+			}
+			fc := buildFileContext(g, n.File)
+			if fc.importsAny(p.Detection.FrameworkIdentifiers) {
+				found = true
+			}
+		})
+		if !found {
+			return nil
+		}
+	}
+
 	// Collect all route nodes across the project.
 	type routeEntry struct {
 		file      string
@@ -640,7 +662,8 @@ func checkCrossTransportAuth(g *graph.Graph, p SecurityPattern) []Violation {
 		if routePath == "" {
 			return
 		}
-		transport := detectTransportType(routePath, n.Name)
+		transport := detectTransportType(routePath, n.Name,
+			p.Detection.WebSocketNodeNames, p.Detection.GRPCNodeNames)
 		entry := routeEntry{
 			file:      n.File,
 			path:      routePath,
@@ -724,21 +747,68 @@ func checkCrossTransportAuth(g *graph.Graph, p SecurityPattern) []Violation {
 }
 
 // detectTransportType classifies a route as "http", "websocket", or "grpc"
-// based on path and node name heuristics.
-func detectTransportType(routePath, nodeName string) string {
+// based on path/name heuristics supplemented by pattern-provided node name lists.
+//
+// Classification order (first match wins):
+//  1. Pattern-provided gRPC node names (most specific — user-declared)
+//  2. Pattern-provided WebSocket node names
+//  3. Path/name heuristics for gRPC (rpc prefix, grpc keyword)
+//  4. Path/name heuristics for WebSocket (ws://, /ws, /socket, /stream, etc.)
+//  5. Default: http
+//
+// wsNodeNames and grpcNodeNames support glob patterns (e.g. "Register*Server").
+func detectTransportType(routePath, nodeName string, wsNodeNames, grpcNodeNames []string) string {
+	lowerNode := strings.ToLower(nodeName)
 	lower := strings.ToLower(routePath + " " + nodeName)
-	switch {
-	case strings.Contains(lower, "ws://") ||
-		strings.Contains(lower, "websocket") ||
-		strings.Contains(lower, "/ws") ||
-		strings.HasPrefix(lower, "ws "):
-		return "websocket"
-	case strings.Contains(lower, "grpc") ||
-		strings.HasPrefix(lower, "rpc "):
-		return "grpc"
-	default:
-		return "http"
+
+	// 1. Pattern-provided gRPC node names — highest specificity.
+	for _, grpcFn := range grpcNodeNames {
+		if matchGlob(strings.ToLower(grpcFn), lowerNode) {
+			return "grpc"
+		}
 	}
+
+	// 2. Pattern-provided WebSocket node names.
+	for _, wsFn := range wsNodeNames {
+		if matchGlob(strings.ToLower(wsFn), lowerNode) {
+			return "websocket"
+		}
+	}
+
+	// 3. gRPC heuristics: explicit gRPC keywords or gRPC service naming conventions.
+	if strings.Contains(lower, "grpc") ||
+		strings.HasPrefix(lower, "rpc ") ||
+		strings.HasPrefix(lowerNode, "register") && strings.HasSuffix(lowerNode, "server") {
+		return "grpc"
+	}
+
+	// 4. WebSocket heuristics: protocol prefix, path segments, common upgrade patterns.
+	if strings.Contains(lower, "ws://") ||
+		strings.Contains(lower, "wss://") ||
+		strings.Contains(lower, "websocket") ||
+		strings.HasPrefix(lower, "ws ") ||
+		containsPathSegment(routePath, "ws") ||
+		containsPathSegment(routePath, "socket") ||
+		containsPathSegment(routePath, "stream") ||
+		containsPathSegment(routePath, "live") ||
+		containsPathSegment(routePath, "events") ||
+		containsPathSegment(routePath, "notify") ||
+		containsPathSegment(routePath, "push") {
+		return "websocket"
+	}
+
+	return "http"
+}
+
+// containsPathSegment reports whether routePath contains segment as a discrete
+// URL path component. E.g. "/api/ws/events" contains "ws" but "/towson" does not.
+func containsPathSegment(routePath, segment string) bool {
+	lower := strings.ToLower(routePath)
+	seg := strings.ToLower(segment)
+	// Check for /segment or /segment/ patterns.
+	return strings.Contains(lower, "/"+seg+"/") ||
+		strings.Contains(lower, "/"+seg+"?") ||
+		strings.HasSuffix(lower, "/"+seg)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

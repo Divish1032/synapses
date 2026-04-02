@@ -1,0 +1,224 @@
+{
+  "patterns": [
+    {
+      "id": "go-cross-transport-auth",
+      "name": "Go service has auth on HTTP but not WebSocket or gRPC",
+      "language": "go",
+      "framework": "*",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "HTTP routes in this Go project apply authentication middleware, but WebSocket upgrade handlers or gRPC service registrations do not. This is the #1 structural auth gap AI agents introduce: auth is added to REST endpoints and skipped on other transports. WebSocket and gRPC connections carry the same risk surface as HTTP.",
+      "detection": {
+        "check_type": "cross_transport_auth",
+        "required_call_patterns": [
+          "Auth*",
+          "JWT*",
+          "authenticate",
+          "Authenticate*",
+          "RequireAuth",
+          "requireAuth",
+          "AuthMiddleware",
+          "JWTMiddleware",
+          "checkToken",
+          "ValidateToken*",
+          "verifyToken*",
+          "BearerAuth*",
+          "TokenAuth*",
+          "sessionAuth*",
+          "BasicAuth*"
+        ],
+        "websocket_node_names": [
+          "Upgrade",
+          "Accept",
+          "HandleWS",
+          "HandleWebSocket",
+          "ServeWS",
+          "ServeWebSocket",
+          "upgrader.Upgrade",
+          "websocket.Accept",
+          "upgradeWebSocket"
+        ],
+        "grpc_node_names": [
+          "Register*Server",
+          "RegisterService",
+          "grpc.NewServer",
+          "NewServer",
+          "pb.Register*"
+        ],
+        "scope": "project"
+      },
+      "message": "The {target} handler at {file} lacks auth that HTTP routes in this project enforce. All transports sharing the same data and business logic must enforce the same authentication requirements.",
+      "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "production-critical"]
+    },
+    {
+      "id": "typescript-cross-transport-auth",
+      "name": "Node.js service has auth on HTTP routes but not WebSocket or gRPC handlers",
+      "language": "typescript",
+      "framework": "*",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "HTTP routes in this TypeScript/Node.js project apply authentication, but WebSocket or gRPC handlers do not. Agents commonly wire Express/Fastify auth middleware to REST routes and forget socket.io, ws, or gRPC handlers that access the same data.",
+      "detection": {
+        "check_type": "cross_transport_auth",
+        "required_call_patterns": [
+          "authenticate",
+          "isAuthenticated",
+          "passport*",
+          "verify*",
+          "checkAuth*",
+          "verifyToken*",
+          "authMiddleware",
+          "requireAuth",
+          "authorize",
+          "jwtVerify*",
+          "bearerAuth*",
+          "sessionAuth*"
+        ],
+        "websocket_node_names": [
+          "handleUpgrade",
+          "on",
+          "io.on",
+          "wss.on",
+          "ws.on",
+          "socket.on",
+          "server.on"
+        ],
+        "grpc_node_names": [
+          "addService",
+          "bindService",
+          "getServer",
+          "createServer"
+        ],
+        "scope": "project"
+      },
+      "message": "The {target} handler at {file} lacks auth that HTTP routes in this project enforce. WebSocket and gRPC connections carry equivalent risk and must apply the same authentication.",
+      "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "production-critical"]
+    },
+    {
+      "id": "javascript-cross-transport-auth",
+      "name": "Node.js service has auth on HTTP routes but not WebSocket or gRPC handlers",
+      "language": "javascript",
+      "framework": "*",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "HTTP routes in this JavaScript/Node.js project apply authentication, but WebSocket or gRPC handlers do not. Agents commonly wire Express/Fastify auth middleware to REST routes and forget socket.io, ws, or gRPC handlers that access the same data.",
+      "detection": {
+        "check_type": "cross_transport_auth",
+        "required_call_patterns": [
+          "authenticate",
+          "isAuthenticated",
+          "passport*",
+          "verify*",
+          "checkAuth*",
+          "verifyToken*",
+          "authMiddleware",
+          "requireAuth",
+          "authorize",
+          "jwtVerify*",
+          "bearerAuth*",
+          "sessionAuth*"
+        ],
+        "websocket_node_names": [
+          "handleUpgrade",
+          "on",
+          "io.on",
+          "wss.on",
+          "ws.on",
+          "socket.on",
+          "server.on"
+        ],
+        "grpc_node_names": [
+          "addService",
+          "bindService",
+          "getServer",
+          "createServer"
+        ],
+        "scope": "project"
+      },
+      "message": "The {target} handler at {file} lacks auth that HTTP routes in this project enforce. WebSocket and gRPC connections carry equivalent risk and must apply the same authentication.",
+      "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "production-critical"]
+    },
+    {
+      "id": "python-cross-transport-auth",
+      "name": "Python service has auth on HTTP endpoints but not WebSocket or gRPC handlers",
+      "language": "python",
+      "framework": "*",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "HTTP endpoints in this Python service apply authentication (FastAPI Depends, Django @login_required, Flask @login_required), but WebSocket endpoints or gRPC service methods do not. WebSocket connections in FastAPI and Django Channels carry the same user-data access risk as REST endpoints.",
+      "detection": {
+        "check_type": "cross_transport_auth",
+        "required_call_patterns": [
+          "login_required",
+          "permission_required",
+          "get_current_user",
+          "get_current_active_user",
+          "Depends",
+          "authenticate",
+          "is_authenticated",
+          "verify_token*",
+          "token_required",
+          "jwt_required",
+          "auth_required"
+        ],
+        "websocket_node_names": [
+          "websocket",
+          "WebSocket",
+          "accept",
+          "connect",
+          "receive",
+          "websocket_connect",
+          "ws_connect"
+        ],
+        "grpc_node_names": [
+          "add_*Servicer_to_server",
+          "add_servicer",
+          "grpc.server"
+        ],
+        "scope": "project"
+      },
+      "message": "The {target} handler at {file} lacks the authentication that HTTP endpoints in this service enforce. WebSocket connections and gRPC calls access the same data and must require authentication.",
+      "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "production-critical"]
+    },
+    {
+      "id": "java-cross-transport-auth",
+      "name": "Java service has auth on HTTP controllers but not WebSocket or gRPC handlers",
+      "language": "java",
+      "framework": "*",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "HTTP controllers in this Java service apply security annotations (@PreAuthorize, @Secured, @RolesAllowed) or Spring Security filters, but WebSocket message handlers or gRPC service implementations do not. Spring WebSocket and gRPC services require explicit security configuration separate from the HTTP security filter chain.",
+      "detection": {
+        "check_type": "cross_transport_auth",
+        "required_call_patterns": [
+          "PreAuthorize",
+          "Secured",
+          "RolesAllowed",
+          "authenticate",
+          "isAuthenticated",
+          "hasRole*",
+          "hasAuthority*",
+          "SecurityContext*",
+          "Authentication*"
+        ],
+        "websocket_node_names": [
+          "MessageMapping",
+          "handleMessage",
+          "onMessage",
+          "addHandler",
+          "registerWebSocketHandlers",
+          "WebSocketHandler"
+        ],
+        "grpc_node_names": [
+          "bindService",
+          "addService",
+          "ServerBuilder*",
+          "newServer*"
+        ],
+        "scope": "project"
+      },
+      "message": "The {target} handler at {file} lacks the security configuration that HTTP controllers in this service enforce. Spring WebSocket and gRPC handlers are outside the standard HTTP security filter chain and require explicit authentication checks.",
+      "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "spring", "production-critical"]
+    }
+  ]
+}
