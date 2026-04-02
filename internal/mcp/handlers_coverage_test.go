@@ -2370,7 +2370,8 @@ func TestHandleSessionInit_Briefing_Conventions_IncludesAllAgentRules(t *testing
 }
 
 func TestHandleSessionInit_Briefing_Conventions_Cap(t *testing.T) {
-	// With more than 8 agent rules, conventions must be capped at 8.
+	// With 10 agent rules (all non-empty) and no prompts, conventions must be
+	// exactly 8 — not more (cap violated) and not fewer (slots not filled).
 	st := openMCPTestStore(t)
 	g := graph.New("test-repo")
 	cfg, err := config.Load(t.TempDir())
@@ -2402,8 +2403,89 @@ func TestHandleSessionInit_Briefing_Conventions_Cap(t *testing.T) {
 	if !ok {
 		t.Fatalf("_briefing.conventions must be a []any, got %T", briefing["conventions"])
 	}
-	if len(convs) > 8 {
-		t.Errorf("_briefing.conventions must be capped at 8, got %d", len(convs))
+	if len(convs) != 8 {
+		t.Errorf("_briefing.conventions: want exactly 8 with 10 rules, got %d", len(convs))
+	}
+}
+
+// TestHandleSessionInit_Briefing_Conventions_EmptyDescSkipped verifies that
+// agent rules with empty descriptions do not appear in conventions.
+func TestHandleSessionInit_Briefing_Conventions_EmptyDescSkipped(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = append(cfg.Rules,
+		config.Rule{ID: "empty-desc", Description: "", Severity: "warning", RuleType: "agent"},
+		config.Rule{ID: "real-rule", Description: "Use table-driven tests", Severity: "warning", RuleType: "agent"},
+	)
+	s := New(g, cfg, st)
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "empty-agent"}))
+	m := mustResult(t, res, err)
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be a []any, got %T", briefing["conventions"])
+	}
+	for _, c := range convs {
+		if s, _ := c.(string); s == "" {
+			t.Error("_briefing.conventions contains an empty string — empty descriptions must be skipped")
+		}
+	}
+	// Exactly 1 convention: the rule with a real description.
+	if len(convs) != 1 {
+		t.Errorf("want 1 convention (empty-desc rule skipped), got %d", len(convs))
+	}
+}
+
+// TestHandleSessionInit_Briefing_Conventions_LongDescTruncated verifies that
+// agent rule descriptions longer than 120 runes are truncated.
+func TestHandleSessionInit_Briefing_Conventions_LongDescTruncated(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	longDesc := strings.Repeat("x", 200) // 200 chars — well above the 120-rune cap
+	cfg.Rules = append(cfg.Rules, config.Rule{
+		ID:          "long-rule",
+		Description: longDesc,
+		Severity:    "warning",
+		RuleType:    "agent",
+	})
+	s := New(g, cfg, st)
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "long-agent"}))
+	m := mustResult(t, res, err)
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be a []any, got %T", briefing["conventions"])
+	}
+	if len(convs) != 1 {
+		t.Fatalf("want 1 convention, got %d", len(convs))
+	}
+	got := convs[0].(string)
+	// Should be truncated to 120 runes + ellipsis — total rune count 121.
+	if []rune(got)[len([]rune(got))-1] != '…' {
+		t.Errorf("long description not truncated: got %q (len=%d runes)", got, len([]rune(got)))
+	}
+	if runeLen := len([]rune(got)); runeLen > 122 { // 120 + "…" (3 bytes, 1 rune)
+		t.Errorf("truncated description too long: %d runes, want ≤121", runeLen)
 	}
 }
 

@@ -1699,9 +1699,16 @@ func (s *Server) handleSessionInit(
 				if len(convs) >= 8 {
 					break
 				}
-				if desc := ac["description"]; desc != "" {
-					convs = append(convs, desc)
+				desc := ac["description"]
+				if desc == "" {
+					continue
 				}
+				// Apply the same rune-safe 120-char cap as prompt bodies so a
+				// long rule description can't bloat the briefing.
+				if rs := []rune(desc); len(rs) > 120 {
+					desc = string(rs[:120]) + "…"
+				}
+				convs = append(convs, desc)
 			}
 			if convs == nil {
 				convs = []string{}
