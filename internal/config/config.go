@@ -828,7 +828,7 @@ var knownTopLevelKeys = map[string]bool{
 	"data_flow_max_hops": true, "federation": true, "federation_acl": true,
 	"constitution": true, "brain": true, "pulse": true, "session": true,
 	"rate_limits": true, "content_safety": true, "recall": true,
-	"security_patterns_dir": true,
+	"use_flat_graph": true, "hibernate": true, "security_patterns_dir": true,
 }
 
 // warnUnknownKeys parses raw JSON to detect top-level keys not recognized
