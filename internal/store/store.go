@@ -999,6 +999,22 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_dec_agent   ON decisions(agent_id, project_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_dec_project ON decisions(project_id, created_at DESC)`,
+		// Sprint 24.6: Rejected approach memory — immutable records of explicitly
+		// abandoned approaches. Unlike failure episodes (append-only unstructured),
+		// rejected approaches have structured fields: approach + failure_reason +
+		// optional blocker + context. Surfaced in session_init and compaction recovery.
+		`CREATE TABLE IF NOT EXISTS rejected_approaches (
+			id             TEXT PRIMARY KEY,
+			agent_id       TEXT NOT NULL,
+			project_id     TEXT NOT NULL DEFAULT '',
+			approach       TEXT NOT NULL,
+			failure_reason TEXT NOT NULL,
+			blocker        TEXT NOT NULL DEFAULT '',
+			context        TEXT NOT NULL DEFAULT '',
+			created_at     INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_rej_agent   ON rejected_approaches(agent_id, project_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_rej_project ON rejected_approaches(project_id, created_at DESC)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

@@ -2105,25 +2105,24 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"memory",
 			mcp.WithDescription(
-				"CALL action='save' immediately after any decision, failed approach, or key finding — "+
-					"before the next tool call. "+
-					"Without this, discoveries are lost at context compaction and you'll re-explore the same ground next session. "+
+				"CALL immediately after any decision, failed approach, or key finding — before the next tool call. "+
+					"Without this, discoveries are lost at context compaction. "+
 					"action='save': record a decision, failure, or pattern episode. "+
-					"action='search': retrieve prior decisions by keyword or concept. "+
+					"action='search': retrieve prior decisions by keyword. "+
 					"action='list': chronological episode browser. "+
-					"action='annotate': attach a note to a graph entity. "+
-					"action='annotate_web': persist web research findings as an entity annotation. "+
-					"action='add_gap' / 'list_gaps': track and query quality gaps. "+
+					"action='annotate' / 'annotate_web': attach notes to graph entities or web resources. "+
+					"action='add_gap' / 'list_gaps': track quality gaps. "+
 					"action='history': entity change timeline. "+
-					"action='hypothesize': record a working theory (ACTIVE state); update with state=confirmed or state=rejected as evidence accumulates. Hypotheses survive compaction. "+
-					"action='list_hypotheses': retrieve current hypotheses, filtered by state. "+
-					"action='decide': record a structured decision — what was chosen, alternatives evaluated, reasoning, and context. "+
-					"Prevents re-deriving the same architectural choices next session. Appears in future session_init as 'This decision was already evaluated.' "+
-					"action='list_decisions': search or browse past decisions by keyword.",
+					"action='hypothesize': record a working theory (active/confirmed/rejected state). Hypotheses survive compaction. "+
+					"action='list_hypotheses': retrieve by state. "+
+					"action='decide': record a structured decision (chosen, alternatives, reasoning, context). Prevents re-deriving choices next session. "+
+					"action='list_decisions': search past decisions. "+
+					"action='abandon': record a rejected approach — what was tried, why it failed, what blocker was hit. Future sessions warned automatically. "+
+					"action='list_rejected': search rejected approaches.",
 			),
 			mcp.WithString("action",
 				mcp.Required(),
-				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history', 'hypothesize', 'list_hypotheses', 'decide', 'list_decisions'."),
+				mcp.Description("'save', 'search', 'list', 'annotate', 'annotate_web', 'add_gap', 'list_gaps', 'history', 'hypothesize', 'list_hypotheses', 'decide', 'list_decisions', 'abandon', 'list_rejected'."),
 			),
 			// action=save params
 			mcp.WithString("agent_id",
@@ -2258,6 +2257,18 @@ func (s *Server) registerTools() {
 				mcp.Description("When/where this decision was made (e.g. 'Adding OAuth to /api/auth'). action=decide."),
 			),
 			// action=list_decisions uses the existing 'query' and 'limit' params.
+			// action=abandon params (Sprint 24.6)
+			mcp.WithString("approach",
+				mcp.Description("What was tried (e.g. 'Implement caching with Redis for session storage'). Required for action=abandon."),
+			),
+			mcp.WithString("failure_reason",
+				mcp.Description("Why this approach was abandoned (e.g. 'Redis not available in deployment environment'). Required for action=abandon."),
+			),
+			mcp.WithString("blocker",
+				mcp.Description("Specific error, exception, or constraint that blocked progress. Optional for action=abandon."),
+			),
+			// action=abandon context uses the existing 'context' param.
+			// action=list_rejected uses the existing 'query' and 'limit' params.
 		),
 		s.handleMemoryDispatch,
 	)
