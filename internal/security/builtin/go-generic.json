@@ -1,0 +1,42 @@
+{
+  "patterns": [
+    {
+      "id": "go-generic-hardcoded-secret",
+      "name": "Hardcoded secret or credential in Go source",
+      "language": "go",
+      "framework": "*",
+      "pattern_type": "hardcoded_secret",
+      "severity": "CRITICAL",
+      "description": "A string literal that looks like a credential (JWT secret, API key, password) is assigned directly in source code rather than loaded from an environment variable or secret store. This exposes credentials in version control and build artifacts.",
+      "detection": {
+        "check_type": "hardcoded_secret",
+        "secret_patterns": [
+          "(?i)^[a-zA-Z0-9+/]{32,}={0,2}$",
+          "^sk-[a-zA-Z0-9]{32,}$",
+          "^ghp_[a-zA-Z0-9]{36}$",
+          "^eyJ[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{10,}$"
+        ],
+        "scope": "file"
+      },
+      "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from environment variables (os.Getenv) or a secret manager instead.",
+      "tags": ["owasp-a07", "secrets", "production-critical"]
+    },
+    {
+      "id": "go-generic-direct-db-import",
+      "name": "Handler or controller directly imports database package",
+      "language": "go",
+      "framework": "*",
+      "pattern_type": "layer_violation",
+      "severity": "MEDIUM",
+      "description": "A file in the handler or controller layer directly imports a database package (database/sql, gorm, sqlx, etc.) instead of going through a repository or service layer. This creates tight coupling between the HTTP layer and data storage, making it hard to test and change.",
+      "detection": {
+        "check_type": "direct_import",
+        "handler_file_patterns": ["*handler*.go", "*/handler/*.go", "*/handlers/*.go", "*/api/*.go", "*/route/*.go", "*/routes/*.go", "*controller*.go", "*/controller/*.go", "*/controllers/*.go"],
+        "forbidden_import_patterns": ["database/sql", "gorm.io/*", "github.com/jmoiron/sqlx", "github.com/go-gorm/*", "github.com/uptrace/bun"],
+        "scope": "file"
+      },
+      "message": "File {file} appears to be a handler/controller but directly imports a database package. Access data through a repository or service layer instead.",
+      "tags": ["architecture", "layer-violation", "testability"]
+    }
+  ]
+}

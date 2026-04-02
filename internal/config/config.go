@@ -175,6 +175,16 @@ type Config struct {
 	// Set any limit to -1 to disable that category. Defaults apply when omitted.
 	RateLimits RateLimitConfig `json:"rate_limits,omitempty"`
 
+	// SecurityPatternsDir is an optional path to a directory containing additional
+	// security pattern JSON files (Sprint 26 format). These are merged with the
+	// built-in patterns loaded from the binary. User patterns can override built-in
+	// patterns by using the same pattern ID. Path may be absolute or relative to
+	// the directory containing synapses.json.
+	//
+	// Example: "security_patterns" resolves to <project>/.synapses/security_patterns/
+	// File format: JSON files matching the SecurityPattern schema (one object or array).
+	SecurityPatternsDir string `json:"security_patterns_dir,omitempty"`
+
 	// ContentSafety configures the prompt injection scanner that runs on all
 	// externally-sourced content before storage. Covers remember(), send_message(),
 	// annotate_node(), and web_annotate() inputs.

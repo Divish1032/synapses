@@ -1,0 +1,22 @@
+{
+  "patterns": [
+    {
+      "id": "generic-admin-elevation",
+      "name": "Admin route or handler missing elevated authorization",
+      "language": "*",
+      "framework": "*",
+      "pattern_type": "admin_elevation",
+      "severity": "CRITICAL",
+      "description": "A route or handler identified as admin-level (path contains /admin, /management, or similar) does not apply elevated authorization beyond basic authentication. Admin endpoints must require role-based access control or a distinct elevated privilege check.",
+      "detection": {
+        "check_type": "admin_elevation",
+        "admin_path_patterns": ["/admin", "/admin/*", "*/admin/*", "/management", "/management/*", "/internal/admin", "*/internal/admin/*"],
+        "required_call_patterns": ["Auth*", "authenticate", "JWT*", "RequireAuth", "checkToken"],
+        "elevated_auth_patterns": ["RequireAdmin*", "RequireRole*", "hasRole*", "IsAdmin*", "checkAdmin*", "adminOnly*", "requireAdmin*"],
+        "scope": "file"
+      },
+      "message": "Route '{target}' in {file} is an admin endpoint but uses only standard auth. Apply elevated authorization (role check, admin permission) in addition to authentication.",
+      "tags": ["owasp-a01", "admin", "privilege-escalation", "production-critical"]
+    }
+  ]
+}
