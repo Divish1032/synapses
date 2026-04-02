@@ -1,6 +1,7 @@
 package security
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -1502,23 +1503,36 @@ func TestCheckProject_CrossTransport_AllProtected_NoViolation(t *testing.T) {
 }
 
 func TestCheckProject_BuiltinCrossTransportPatterns_Load(t *testing.T) {
-	// The built-in cross-transport.json patterns must load and include at least the
-	// five language patterns (go, typescript, javascript, python, java).
+	// The built-in cross-transport.json patterns must load and include patterns for
+	// the 5 target languages: go, typescript, javascript, python, java + rust.
 	e := DefaultEngine()
 	var crossTransportCount int
+	languages := make(map[string]bool)
 	for _, p := range e.patterns.ForCheckType(CheckTypeCrossTransportAuth) {
 		crossTransportCount++
+		languages[p.Language] = true
 		// Every cross-transport pattern must have required_call_patterns.
 		if len(p.Detection.RequiredCallPatterns) == 0 {
 			t.Errorf("pattern %q has no required_call_patterns", p.ID)
 		}
-		// WebSocket and gRPC node names should be populated.
+		// WebSocket node names should be populated.
 		if len(p.Detection.WebSocketNodeNames) == 0 {
 			t.Errorf("pattern %q has no websocket_node_names", p.ID)
 		}
+		// gRPC node names must not contain bare "NewServer" — too generic.
+		for _, grpcName := range p.Detection.GRPCNodeNames {
+			if strings.EqualFold(grpcName, "newserver") {
+				t.Errorf("pattern %q has over-broad gRPC node name %q — matches any NewServer(), not just gRPC", p.ID, grpcName)
+			}
+		}
 	}
-	if crossTransportCount < 4 {
-		t.Errorf("expected at least 4 built-in cross-transport patterns, got %d", crossTransportCount)
+	if crossTransportCount < 5 {
+		t.Errorf("expected at least 5 built-in cross-transport patterns (one per target language), got %d", crossTransportCount)
+	}
+	for _, lang := range []string{"go", "rust"} {
+		if !languages[lang] {
+			t.Errorf("missing cross-transport pattern for language %q", lang)
+		}
 	}
 }
 

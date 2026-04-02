@@ -40,10 +40,7 @@
         ],
         "grpc_node_names": [
           "Register*Server",
-          "RegisterService",
-          "grpc.NewServer",
-          "NewServer",
-          "pb.Register*"
+          "RegisterService"
         ],
         "scope": "project"
       },
@@ -172,8 +169,7 @@
         ],
         "grpc_node_names": [
           "add_*Servicer_to_server",
-          "add_servicer",
-          "grpc.server"
+          "add_servicer"
         ],
         "scope": "project"
       },
@@ -219,6 +215,47 @@
       },
       "message": "The {target} handler at {file} lacks the security configuration that HTTP controllers in this service enforce. Spring WebSocket and gRPC handlers are outside the standard HTTP security filter chain and require explicit authentication checks.",
       "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "spring", "production-critical"]
+    },
+    {
+      "id": "rust-cross-transport-auth",
+      "name": "Rust service has auth on HTTP routes but not WebSocket or gRPC handlers",
+      "language": "rust",
+      "framework": "*",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "HTTP routes in this Rust service apply authentication middleware (.wrap(auth) for actix-web, .layer(auth) for Axum), but WebSocket upgrade handlers or tonic gRPC service registrations do not. Axum WebSocket handlers and tonic gRPC services have independent middleware stacks that must be configured separately from HTTP routes.",
+      "detection": {
+        "check_type": "cross_transport_auth",
+        "required_call_patterns": [
+          "authenticate*",
+          "require_auth*",
+          "check_auth*",
+          "verify_token*",
+          "validate_token*",
+          "from_request*",
+          "jwt_auth*",
+          "bearer_auth*",
+          "session_auth*",
+          "AuthLayer*",
+          "RequireAuth*"
+        ],
+        "websocket_node_names": [
+          "on_upgrade",
+          "handle_socket",
+          "ws_handler",
+          "websocket_handler",
+          "handle_ws",
+          "upgrade"
+        ],
+        "grpc_node_names": [
+          "add_service",
+          "Router::new",
+          "serve*"
+        ],
+        "scope": "project"
+      },
+      "message": "The {target} handler at {file} lacks the auth middleware that HTTP routes in this Rust service enforce. Axum and actix-web WebSocket and gRPC handlers use independent middleware stacks — auth must be applied explicitly to each.",
+      "tags": ["owasp-a01", "auth", "websocket", "grpc", "cross-transport", "actix-web", "axum", "tonic", "production-critical"]
     }
   ]
 }
