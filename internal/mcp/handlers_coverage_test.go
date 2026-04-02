@@ -3,6 +3,7 @@ package mcp
 // Coverage tests for MCP handlers — targeting uncovered code paths.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2307,6 +2308,103 @@ func TestHandleSessionInit_WithAgentConstraints(t *testing.T) {
 	}))
 	m := mustResult(t, res, err)
 	hasKey(t, m, "agent_constraints")
+}
+
+// TestHandleSessionInit_Briefing_Conventions_IncludesAllAgentRules verifies
+// that _briefing.conventions includes agent rules of ALL severity levels, not
+// just error-severity. Sprint 23.5 delivery slot: conventions populated from
+// manually-configured rules regardless of severity.
+func TestHandleSessionInit_Briefing_Conventions_IncludesAllAgentRules(t *testing.T) {
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = append(cfg.Rules,
+		config.Rule{
+			ID:          "table-driven-tests",
+			Description: "This project uses table-driven tests",
+			Severity:    "warning", // warning — previously excluded from conventions
+			RuleType:    "agent",
+		},
+		config.Rule{
+			ID:          "no-direct-db",
+			Description: "DB access must go through the repository layer",
+			Severity:    "error", // error — always included even before this fix
+			RuleType:    "agent",
+		},
+	)
+	s := New(g, cfg, st)
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "conv-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be a []any, got %T", briefing["conventions"])
+	}
+
+	want := map[string]bool{
+		"This project uses table-driven tests":       false,
+		"DB access must go through the repository layer": false,
+	}
+	for _, c := range convs {
+		if s, ok := c.(string); ok {
+			want[s] = true
+		}
+	}
+	for desc, found := range want {
+		if !found {
+			t.Errorf("_briefing.conventions missing agent rule %q (all severities must be included)", desc)
+		}
+	}
+}
+
+func TestHandleSessionInit_Briefing_Conventions_Cap(t *testing.T) {
+	// With more than 8 agent rules, conventions must be capped at 8.
+	st := openMCPTestStore(t)
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		cfg.Rules = append(cfg.Rules, config.Rule{
+			ID:          fmt.Sprintf("rule-%d", i),
+			Description: fmt.Sprintf("Convention number %d", i),
+			Severity:    "warning",
+			RuleType:    "agent",
+		})
+	}
+	s := New(g, cfg, st)
+	s.StartBackground()
+	t.Cleanup(func() { s.Close() })
+
+	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "cap-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be a []any, got %T", briefing["conventions"])
+	}
+	if len(convs) > 8 {
+		t.Errorf("_briefing.conventions must be capped at 8, got %d", len(convs))
+	}
 }
 
 func TestHandleSessionInit_WithPendingTasks(t *testing.T) {

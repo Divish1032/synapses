@@ -1660,7 +1660,12 @@ func (s *Server) handleSessionInit(
 			briefing["unfinished_work"] = w
 		}
 
-		// (2) Conventions: auto-load project prompts + error-severity agent constraints.
+		// (2) Conventions: auto-load project prompts + all agent-type rules.
+		// Agent rules are manually configured behavioral conventions (e.g. "All
+		// handlers use AuthMiddleware", "DB access goes through repository layer").
+		// Sprint 29 will add cross-session learned conventions here; Sprint 23
+		// establishes the delivery slot and populates it from configured rules.
+		// Cap: 5 from prompts, up to 8 total so rule-heavy projects stay terse.
 		{
 			var convs []string
 			if ap, ok := resp["active_prompts"].(map[string]interface{}); ok {
@@ -1671,8 +1676,9 @@ func (s *Server) handleSessionInit(
 							continue
 						}
 						// Surface only the first line to keep conventions terse.
+						// TrimRight strips a trailing \r left by Windows-style \r\n endings.
 						if nl := strings.IndexByte(body, '\n'); nl > 0 {
-							body = body[:nl]
+							body = strings.TrimRight(body[:nl], "\r")
 						}
 						// Rune-safe truncation: avoid splitting multi-byte UTF-8 sequences.
 						if rs := []rune(body); len(rs) > 120 {
@@ -1685,10 +1691,16 @@ func (s *Server) handleSessionInit(
 					}
 				}
 			}
-			// Include error-severity agent constraints that weren't already surfaced.
+			// Include all agent-type constraints (not just error severity) as
+			// conventions. Every agent rule is a behavioral norm the agent must
+			// follow regardless of severity — warning rules are equally important
+			// for project conventions like testing style and layer boundaries.
 			for _, ac := range agentConstraints {
-				if ac["severity"] == "error" && len(convs) < 5 {
-					convs = append(convs, ac["description"])
+				if len(convs) >= 8 {
+					break
+				}
+				if desc := ac["description"]; desc != "" {
+					convs = append(convs, desc)
 				}
 			}
 			if convs == nil {
