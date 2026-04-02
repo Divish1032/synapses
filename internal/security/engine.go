@@ -446,28 +446,95 @@ func checkMissingAnnotation(fc *fileContext, p SecurityPattern) []Violation {
 }
 
 // credentialVarRE matches variable names that commonly hold credentials.
-// Uses substring matching (no \b word boundaries) so it catches camelCase names
-// like "jwtSecret", "apiKey", "bearerToken" where the keyword is embedded.
+// Uses substring matching (no word boundaries) so it catches both snake_case and camelCase:
+// "jwtSecret", "apiKey", "access_key", "accessKey", "connectionString", etc.
+// Multi-word terms use [_]? to match with or without underscore separator.
 var credentialVarRE = regexp.MustCompile(
-	`(?i)(secret|password|passwd|apikey|api_key|token|jwt|auth_key|private_key|` +
-		`bearer|credential|passphrase|access_key|client_secret)`,
+	`(?i)(secret|password|passwd|passphrase|bearer|credential|token|jwt|dsn|` +
+		`api[_]?key|api[_]?secret|auth[_]?key|` +
+		`access[_]?key|client[_]?secret|private[_]?key|` +
+		`signing[_]?key|encryption[_]?key|webhook[_]?secret|` +
+		`database[_]?url|db[_]?url|db[_]?pass(?:word|wd)?|db[_]?pwd|db[_]?password|` +
+		`conn(?:ection)?[_]?str(?:ing)?)`,
 )
 
 // stringLiteralRE captures the value of a string literal assignment.
-// Matches: varname = "value"  or  varname := "value"  (double-quote or backtick).
+// Matches: varname = "value", varname := "value", varname = 'value' (single-quote for
+// Python/TypeScript/JS), or varname = `value` (backtick for Go).
 // The variable name is in group 1, the string value in group 2.
 var stringLiteralRE = regexp.MustCompile(
-	`\b(\w+)\s*:?=\s*["` + "`" + `]([^"` + "`" + `\r\n]{6,})["` + "`" + `]`,
+	`\b(\w+)\s*:?=\s*["'` + "`" + `]([^"'` + "`" + `\r\n]{6,})["'` + "`" + `]`,
+)
+
+// ── Fallback-secret detection regexes ────────────────────────────────────────
+
+// goEmptyCheckRE detects: if varName == "" {
+// Used in the multi-line Go fallback scan.
+var goEmptyCheckRE = regexp.MustCompile(`if\s+(\w+)\s*==\s*""`)
+
+// fallbackAssignRE detects a bare assignment of a string literal: varName = "value".
+// Used to find the hardcoded assignment inside an empty-check block.
+var fallbackAssignRE = regexp.MustCompile(
+	`\b(\w+)\s*=\s*["'` + "`" + `]([^"'` + "`" + `\r\n]{1,})["'` + "`" + `]`,
+)
+
+// jsFallbackRE detects: process.env.VAR || "fallback"  and  process.env.VAR ?? "fallback"
+var jsFallbackRE = regexp.MustCompile(
+	`\bprocess\.env\.(\w+)\s*(?:\|\||\?\?)\s*["']([^"'\r\n]{1,})["']`,
+)
+
+// pyGetenvFallbackRE detects: os.environ.get("VAR", "fallback") or os.getenv("VAR", "fallback")
+// Group 1: env var name (from the quoted first arg).  Group 2: fallback value.
+var pyGetenvFallbackRE = regexp.MustCompile(
+	`os\.(?:environ\.get|getenv)\s*\(\s*["']([^"'\r\n]+)["']\s*,\s*["']([^"'\r\n]{1,})["']\s*\)`,
+)
+
+// pyOrFallbackRE detects: os.environ.get("VAR") or "fallback"  /  os.getenv("VAR") or "fallback"
+// Group 1: env var name (from the quoted first arg).  Group 2: fallback value.
+var pyOrFallbackRE = regexp.MustCompile(
+	`os\.(?:environ\.get|getenv)\s*\(\s*["']([^"'\r\n]+)["'][^)]*\)\s*or\s*["']([^"'\r\n]{1,})["']`,
+)
+
+// javaEnvFallbackRE detects: System.getenv("VAR") != null ? ... : "fallback"
+// and  Optional.ofNullable(System.getenv("VAR")).orElse("fallback")
+// Note: Optional.ofNullable(System.getenv("X")) has two closing parens before .orElse —
+// the inner ) closes getenv("X") and the outer ) closes ofNullable(...).
+var javaEnvFallbackRE = regexp.MustCompile(
+	`(?:System\.getenv\s*\([^)]+\)\s*!=\s*null[^:]*:[^"']*|` +
+		`Optional\.ofNullable\s*\(\s*System\.getenv[^)]*\)\s*\)\.orElse\s*\(\s*)` +
+		`["']([^"'\r\n]{1,})["']`,
+)
+
+// rustEnvFallbackRE detects: env::var("VAR").unwrap_or("fallback")
+//
+//	or std::env::var("VAR").unwrap_or_else(|_| "fallback".to_string())
+var rustEnvFallbackRE = regexp.MustCompile(
+	`env::var\s*\([^)]+\)\.unwrap_or(?:_else\s*\(\s*[^)]+\s*\))?\s*\(\s*["']([^"'\r\n]{1,})["']`,
+)
+
+// placeholderRE matches string values that are obviously placeholder / demo credentials,
+// not real secrets. Used by isPlaceholderValue to reduce false positives.
+var placeholderRE = regexp.MustCompile(
+	`(?i)^(test|example|placeholder|dummy|fake|changeme|change.me|` +
+		`your[._-]|enter[._-]your|replace[._-]with|insert[._-]your|add[._-]your|` +
+		`sample|default|none|null|todo|fixme|redacted|` +
+		`dev[._-]secret|development[._-]|local[._-]|` +
+		`password123|admin123|qwerty|letmein|` +
+		`x{4,}|0{8,}|1{8,}|a{4,})`,
 )
 
 // checkHardcodedSecret scans file content for hardcoded credentials.
 // A violation fires when a variable with a credential-suggesting name is assigned
-// a string literal that matches a secret value pattern.
+// a string literal that matches a secret value pattern AND the value is not an
+// obvious placeholder (see isPlaceholderValue).
 //
-// Test files (_test.go) have their severity downgraded to MEDIUM since
-// test fixtures commonly use dummy credentials.
+// Test files (_test.go, testdata/, fixtures/, etc.) have their severity downgraded
+// to MEDIUM since test fixtures commonly use dummy credentials.
+//
+// When Detection.DetectFallback is true, also scans for the "load from env with
+// hardcoded fallback" anti-pattern using language-appropriate heuristics.
 func checkHardcodedSecret(fc *fileContext, p SecurityPattern, content []byte) []Violation {
-	if len(p.Detection.SecretPatterns) == 0 {
+	if len(p.Detection.SecretPatterns) == 0 && !p.Detection.DetectFallback {
 		return nil
 	}
 
@@ -478,9 +545,6 @@ func checkHardcodedSecret(fc *fileContext, p SecurityPattern, content []byte) []
 			valueREs = append(valueREs, re)
 		}
 	}
-	if len(valueREs) == 0 {
-		return nil
-	}
 
 	// Downgrade severity for test files — test fixtures use dummy credentials.
 	severity := p.Severity
@@ -490,56 +554,302 @@ func checkHardcodedSecret(fc *fileContext, p SecurityPattern, content []byte) []
 
 	var violations []Violation
 	lines := strings.Split(string(content), "\n")
-	for lineNum, line := range lines {
-		// Quick pre-filter: skip lines that don't have a string assignment.
-		if !strings.ContainsAny(line, `"` + "`") {
-			continue
-		}
-		// Skip obvious false positives: blank/comment lines, imports.
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		// Skip import blocks.
-		if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, `"`) {
-			continue
-		}
 
-		// Find string literal assignments on this line.
-		matches := stringLiteralRE.FindAllStringSubmatch(line, -1)
-		for _, m := range matches {
-			if len(m) < 3 {
+	// Pass 1: string literal assignment check (requires SecretPatterns).
+	if len(valueREs) > 0 {
+		for lineNum, line := range lines {
+			// Quick pre-filter: skip lines that don't have a string delimiter.
+			if !strings.ContainsAny(line, `"'`+"`") {
 				continue
 			}
-			varName := m[1]
-			value := m[2]
-
-			// Both conditions must hold: variable name AND value pattern.
-			if !credentialVarRE.MatchString(varName) {
+			// Skip blank/comment lines and import blocks.
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "//") ||
+				strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") {
 				continue
 			}
-			for _, valueRE := range valueREs {
-				if valueRE.MatchString(value) {
-					msg := fillTemplate(p.Message, map[string]string{
-						"file":   fc.filePath,
-						"target": varName,
-					})
-					violations = append(violations, Violation{
-						PatternID:   p.ID,
-						PatternName: p.Name,
-						Severity:    severity,
-						File:        fc.filePath,
-						Target:      varName,
-						Message:     msg,
-						Evidence:    fmt.Sprintf("Line %d: variable %q is assigned a string literal matching a credential pattern", lineNum+1, varName),
-						Tags:        p.Tags,
-					})
-					break // one violation per variable, not per pattern
+			if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, `"`) {
+				continue
+			}
+
+			// Find string literal assignments on this line.
+			matches := stringLiteralRE.FindAllStringSubmatch(line, -1)
+			for _, m := range matches {
+				if len(m) < 3 {
+					continue
+				}
+				varName := m[1]
+				value := m[2]
+
+				// Both conditions must hold: credential variable name AND value pattern.
+				if !credentialVarRE.MatchString(varName) {
+					continue
+				}
+				if isPlaceholderValue(value) {
+					continue
+				}
+				for _, valueRE := range valueREs {
+					if valueRE.MatchString(value) {
+						msg := fillTemplate(p.Message, map[string]string{
+							"file":   fc.filePath,
+							"target": varName,
+						})
+						violations = append(violations, Violation{
+							PatternID:   p.ID,
+							PatternName: p.Name,
+							Severity:    severity,
+							File:        fc.filePath,
+							Target:      varName,
+							Message:     msg,
+							Evidence:    fmt.Sprintf("Line %d: variable %q is assigned a string literal matching a credential pattern", lineNum+1, varName),
+							Tags:        p.Tags,
+						})
+						break // one violation per variable, not per pattern
+					}
 				}
 			}
 		}
 	}
+
+	// Pass 2: fallback-secret pattern check.
+	if p.Detection.DetectFallback {
+		fallbackViolations := checkFallbackEnvPattern(fc, p, lines, severity)
+		violations = append(violations, fallbackViolations...)
+	}
+
 	return nilIfEmpty(violations)
+}
+
+// checkFallbackEnvPattern detects the "load from environment with hardcoded fallback"
+// anti-pattern. A real credential is never in source — but a hardcoded fallback value
+// IS in source, and is used whenever the environment variable is missing.
+//
+// Detection is language-aware:
+//   - Go:     multi-line: `if varName == "" { varName = "fallback" }` near a credential var
+//   - TS/JS:  single-line: `process.env.VAR || "fallback"`  or  `process.env.VAR ?? "fallback"`
+//   - Python: single-line: `os.environ.get("VAR", "fallback")`  or  `os.getenv("VAR") or "fallback"`
+//   - Java:   single-line: `System.getenv("VAR") != null ? ... : "fallback"`
+//   - Rust:   single-line: `env::var("VAR").unwrap_or("fallback")`
+func checkFallbackEnvPattern(fc *fileContext, p SecurityPattern, lines []string, severity Severity) []Violation {
+	lang := languageFromPath(fc.filePath)
+	var violations []Violation
+
+	switch lang {
+	case "go":
+		// Multi-line scan: look for `if credVar == "" {` followed within 4 lines by `credVar = "literal"`.
+		for i, line := range lines {
+			emptyM := goEmptyCheckRE.FindStringSubmatch(line)
+			if emptyM == nil {
+				continue
+			}
+			varName := emptyM[1]
+			if !credentialVarRE.MatchString(varName) {
+				continue
+			}
+			// Look in the next 4 lines for: varName = "literal"
+			end := i + 5
+			if end > len(lines) {
+				end = len(lines)
+			}
+			for _, inner := range lines[i+1 : end] {
+				assignM := fallbackAssignRE.FindStringSubmatch(inner)
+				if assignM == nil || len(assignM) < 3 {
+					continue
+				}
+				if assignM[1] != varName {
+					continue
+				}
+				fallbackVal := assignM[2]
+				if isPlaceholderValue(fallbackVal) {
+					continue
+				}
+				msg := fillTemplate(p.Message, map[string]string{
+					"file":   fc.filePath,
+					"target": varName,
+				})
+				violations = append(violations, Violation{
+					PatternID:   p.ID,
+					PatternName: p.Name,
+					Severity:    severity,
+					File:        fc.filePath,
+					Target:      varName,
+					Message:     msg,
+					Evidence: fmt.Sprintf(
+						"Variable %q falls back to a hardcoded value when the environment variable is not set — "+
+							"the fallback credential is embedded in source code",
+						varName,
+					),
+					Tags: p.Tags,
+				})
+				break // one violation per varName
+			}
+		}
+
+	case "typescript", "javascript":
+		// Single-line: process.env.VAR || "fallback" or process.env.VAR ?? "fallback"
+		// Guard: only fire when the env var name suggests a credential (credentialVarRE).
+		// This prevents false positives on non-credential vars like process.env.NODE_ENV.
+		for lineNum, line := range lines {
+			m := jsFallbackRE.FindStringSubmatch(line)
+			if m == nil || len(m) < 3 {
+				continue
+			}
+			envVarName := m[1] // e.g. "JWT_SECRET"
+			if !credentialVarRE.MatchString(envVarName) {
+				continue
+			}
+			fallbackVal := m[2]
+			if isPlaceholderValue(fallbackVal) {
+				continue
+			}
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   fc.filePath,
+				"target": "process.env." + envVarName,
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    severity,
+				File:        fc.filePath,
+				Target:      "process.env." + m[1],
+				Message:     msg,
+				Evidence: fmt.Sprintf(
+					"Line %d: environment variable %q has a hardcoded fallback value in source code",
+					lineNum+1, "process.env."+m[1],
+				),
+				Tags: p.Tags,
+			})
+		}
+
+	case "python":
+		// os.environ.get("VAR", "fallback") or os.getenv("VAR") or "fallback"
+		// Guard: only fire when the env var name suggests a credential (credentialVarRE).
+		for lineNum, line := range lines {
+			var envVarName, fallbackVal string
+			if m := pyGetenvFallbackRE.FindStringSubmatch(line); m != nil && len(m) >= 3 {
+				envVarName, fallbackVal = m[1], m[2]
+			} else if m := pyOrFallbackRE.FindStringSubmatch(line); m != nil && len(m) >= 3 {
+				envVarName, fallbackVal = m[1], m[2]
+			}
+			if envVarName == "" || !credentialVarRE.MatchString(envVarName) {
+				continue
+			}
+			if isPlaceholderValue(fallbackVal) {
+				continue
+			}
+			target := "os.environ[" + envVarName + "]"
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   fc.filePath,
+				"target": target,
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    severity,
+				File:        fc.filePath,
+				Target:      target,
+				Message:     msg,
+				Evidence: fmt.Sprintf(
+					"Line %d: os.getenv/os.environ.get call for credential %q includes a hardcoded fallback value in source code",
+					lineNum+1, envVarName,
+				),
+				Tags: p.Tags,
+			})
+		}
+
+	case "java":
+		// System.getenv("VAR") != null ? ... : "fallback"  or  Optional.ofNullable(...).orElse("fallback")
+		for lineNum, line := range lines {
+			m := javaEnvFallbackRE.FindStringSubmatch(line)
+			if m == nil || len(m) < 2 {
+				continue
+			}
+			fallbackVal := m[1]
+			if isPlaceholderValue(fallbackVal) {
+				continue
+			}
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   fc.filePath,
+				"target": "System.getenv",
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    severity,
+				File:        fc.filePath,
+				Target:      "System.getenv",
+				Message:     msg,
+				Evidence: fmt.Sprintf(
+					"Line %d: System.getenv call includes a hardcoded fallback value in source code",
+					lineNum+1,
+				),
+				Tags: p.Tags,
+			})
+		}
+
+	case "rust":
+		// env::var("VAR").unwrap_or("fallback")
+		for lineNum, line := range lines {
+			m := rustEnvFallbackRE.FindStringSubmatch(line)
+			if m == nil || len(m) < 2 {
+				continue
+			}
+			fallbackVal := m[1]
+			if isPlaceholderValue(fallbackVal) {
+				continue
+			}
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   fc.filePath,
+				"target": "env::var",
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    severity,
+				File:        fc.filePath,
+				Target:      "env::var",
+				Message:     msg,
+				Evidence: fmt.Sprintf(
+					"Line %d: env::var call uses unwrap_or with a hardcoded fallback value in source code",
+					lineNum+1,
+				),
+				Tags: p.Tags,
+			})
+		}
+	}
+
+	return violations
+}
+
+// isPlaceholderValue reports whether val is an obvious placeholder / demo credential
+// rather than a real secret. Used to suppress false positives in checkHardcodedSecret.
+//
+// A placeholder is: a very short value, a common dummy word, a repeated-character
+// string, or a value with a well-known "example" prefix.
+func isPlaceholderValue(val string) bool {
+	if len(val) < 6 {
+		return true // too short to be a real credential
+	}
+	lower := strings.ToLower(val)
+	if placeholderRE.MatchString(lower) {
+		return true
+	}
+	// Repeated-character strings: "aaaaaaa", "xxxxxxx", "1111111"
+	if len(val) >= 6 {
+		first := val[0]
+		allSame := true
+		for i := 1; i < len(val); i++ {
+			if val[i] != first {
+				allSame = false
+				break
+			}
+		}
+		if allSame {
+			return true
+		}
+	}
+	return false
 }
 
 // checkAdminElevation fires when a route node in the file has an admin-level

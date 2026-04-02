@@ -202,6 +202,17 @@ type Detection struct {
 	// Examples: ["(?i)^[a-zA-Z0-9+/]{32,}={0,2}$", "^sk-[a-zA-Z0-9]{32,}$"]
 	SecretPatterns []string `json:"secret_patterns,omitempty"`
 
+	// DetectFallback enables detection of the "load from env with hardcoded fallback"
+	// anti-pattern. When true, the engine also scans for:
+	//   Go:     secret := os.Getenv("X"); if secret == "" { secret = "hardcoded" }
+	//   TS/JS:  process.env.X || "fallback"  or  process.env.X ?? "fallback"
+	//   Python: os.environ.get("X", "fallback")  or  os.getenv("X") or "fallback"
+	//   Java:   System.getenv("X") != null ? System.getenv("X") : "fallback"
+	//   Rust:   env::var("X").unwrap_or("fallback")
+	//
+	// Used by: CheckTypeHardcodedSecret
+	DetectFallback bool `json:"detect_fallback,omitempty"`
+
 	// AdminPathPatterns are URL path patterns identifying admin routes.
 	// Routes matching these patterns require elevated authorization.
 	//

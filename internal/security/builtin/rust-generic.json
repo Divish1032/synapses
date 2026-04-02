@@ -1,0 +1,47 @@
+{
+  "patterns": [
+    {
+      "id": "rust-generic-hardcoded-secret",
+      "name": "Hardcoded secret or credential in Rust source",
+      "language": "rust",
+      "framework": "*",
+      "pattern_type": "hardcoded_secret",
+      "severity": "CRITICAL",
+      "description": "A string literal that looks like a credential (JWT secret, API key, password) is assigned directly in source rather than loaded from environment variables or a secret store. This exposes credentials in version control and compiled binaries.",
+      "detection": {
+        "check_type": "hardcoded_secret",
+        "secret_patterns": [
+          "(?i)^[a-zA-Z0-9+/]{32,}={0,2}$",
+          "^sk-[a-zA-Z0-9]{32,}$",
+          "^ghp_[a-zA-Z0-9]{36}$",
+          "^eyJ[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{10,}$",
+          "^AKIA[0-9A-Z]{16}$",
+          "^sk_live_[a-zA-Z0-9]{24,}$",
+          "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
+          "(?i)^mysql://[^:/]+:[^@/]{4,}@",
+          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@"
+        ],
+        "scope": "file"
+      },
+      "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from std::env::var() or a secret manager instead.",
+      "tags": ["owasp-a07", "secrets", "production-critical"]
+    },
+    {
+      "id": "rust-generic-fallback-secret",
+      "name": "Hardcoded fallback when environment variable is missing in Rust",
+      "language": "rust",
+      "framework": "*",
+      "pattern_type": "hardcoded_secret",
+      "severity": "HIGH",
+      "description": "env::var() is called with unwrap_or() or unwrap_or_else() that provides a hardcoded credential when the environment variable is absent. The fallback credential is embedded in the compiled binary.",
+      "detection": {
+        "check_type": "hardcoded_secret",
+        "secret_patterns": [],
+        "detect_fallback": true,
+        "scope": "file"
+      },
+      "message": "'{target}' in {file} falls back to a hardcoded value when the environment variable is absent. Remove the fallback — panic or return an Err at startup if the required secret is not configured.",
+      "tags": ["owasp-a07", "secrets", "fallback-credential"]
+    }
+  ]
+}

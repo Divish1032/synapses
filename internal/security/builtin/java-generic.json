@@ -1,0 +1,48 @@
+{
+  "patterns": [
+    {
+      "id": "java-generic-hardcoded-secret",
+      "name": "Hardcoded secret or credential in Java source",
+      "language": "java",
+      "framework": "*",
+      "pattern_type": "hardcoded_secret",
+      "severity": "CRITICAL",
+      "description": "A string literal that looks like a credential (JWT secret, API key, password, database URL) is assigned directly in source rather than loaded from environment variables, properties files, or a vault. This exposes credentials in version control and compiled artifacts.",
+      "detection": {
+        "check_type": "hardcoded_secret",
+        "secret_patterns": [
+          "(?i)^[a-zA-Z0-9+/]{32,}={0,2}$",
+          "^sk-[a-zA-Z0-9]{32,}$",
+          "^ghp_[a-zA-Z0-9]{36}$",
+          "^eyJ[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{10,}\\.[a-zA-Z0-9_-]{10,}$",
+          "^AKIA[0-9A-Z]{16}$",
+          "^sk_live_[a-zA-Z0-9]{24,}$",
+          "(?i)^jdbc:[a-z]+://[^:/]+:[^@/]{4,}@",
+          "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
+          "(?i)^mysql://[^:/]+:[^@/]{4,}@",
+          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@"
+        ],
+        "scope": "file"
+      },
+      "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from System.getenv(), Spring @Value, or a vault instead.",
+      "tags": ["owasp-a07", "secrets", "production-critical"]
+    },
+    {
+      "id": "java-generic-fallback-secret",
+      "name": "Hardcoded fallback when environment variable is missing in Java",
+      "language": "java",
+      "framework": "*",
+      "pattern_type": "hardcoded_secret",
+      "severity": "HIGH",
+      "description": "System.getenv() is called with a ternary or Optional fallback that provides a hardcoded credential when the environment variable is absent. This is a common configuration pattern that embeds credentials in source code.",
+      "detection": {
+        "check_type": "hardcoded_secret",
+        "secret_patterns": [],
+        "detect_fallback": true,
+        "scope": "file"
+      },
+      "message": "'{target}' in {file} falls back to a hardcoded value when the environment variable is absent. Remove the fallback — throw an exception at startup if the required secret is not configured.",
+      "tags": ["owasp-a07", "secrets", "fallback-credential"]
+    }
+  ]
+}
