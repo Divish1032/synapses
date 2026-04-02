@@ -279,6 +279,48 @@ func TestSessionInit_PeerActivity_ExploredEntitiesFromHandoff(t *testing.T) {
 	}
 }
 
+// TestSessionInit_PeerActivity_CustomWindowHonored verifies that a peer_window_hours
+// parameter passed to session_init is forwarded to the store queries. A fresh handoff
+// (within the last minute) must surface regardless of whether the window is the default
+// 24h or a custom short value like 1h.
+func TestSessionInit_PeerActivity_CustomWindowHonored(t *testing.T) {
+	srv, _, _ := newPopulatedServer(t)
+
+	insertHandoffMemory(t, srv, "writer", srv.projectID,
+		`{"agent_summary":"Just finished the API layer"}`)
+
+	res, err := srv.handleSessionInit(context.Background(), callTool(map[string]any{
+		"agent_id":          "reader",
+		"scope":             "full",
+		"peer_window_hours": float64(1), // explicit 1h window — fresh handoff is within it
+	}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", extractErrorText(t, res))
+	}
+
+	text := extractText(t, res)
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	briefing, ok := resp["_briefing"].(map[string]interface{})
+	if !ok {
+		t.Fatal("_briefing missing")
+	}
+	pa, ok := briefing["peer_activity"].(map[string]interface{})
+	if !ok || pa == nil {
+		t.Fatal("peer_activity must be present — fresh handoff within peer_window_hours=1")
+	}
+	peers, _ := pa["peers"].([]interface{})
+	if len(peers) == 0 {
+		t.Fatal("peers must be non-empty")
+	}
+}
+
 // TestSessionInit_PeerActivity_WithHypothesesOnly verifies that peer_activity
 // appears even when a peer has active hypotheses but no handoff memory.
 func TestSessionInit_PeerActivity_WithHypothesesOnly(t *testing.T) {

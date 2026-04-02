@@ -2004,7 +2004,10 @@ func (s *Server) handleSessionInit(
 		// lean.
 		// Sprint 25.7: cross-agent exploration sharing.
 		if s.store != nil && agentID != "" && !quickMode {
-			const peerWindowHours = 24
+			peerWindowHours := 24
+			if v, ok := req.GetArguments()["peer_window_hours"].(float64); ok && v > 0 {
+				peerWindowHours = int(v)
+			}
 			peerHandoffs, _ := s.store.GetPeerHandoffs(s.projectID, agentID, peerWindowHours, 3)
 			peerHyps, _ := s.store.GetPeerActiveHypotheses(s.projectID, agentID, peerWindowHours, 5)
 

@@ -1692,6 +1692,9 @@ func (s *Server) registerTools() {
 					"session decisions/failures, applicable rules/violations, entity memories, and context snapshot. "+
 					"Safety-critical alerts (cross_project_alerts, agent_awareness, tool_integrity_alert) are always included in all scopes."),
 			),
+			mcp.WithNumber("peer_window_hours",
+				mcp.Description("Optional. How many hours back to look for peer agent activity (handoffs and active hypotheses) in the peer_activity briefing section. Default: 24. Set higher (e.g. 72) to surface work from agents active in the last few days; set lower (e.g. 4) to see only very recent activity."),
+			),
 		),
 		s.handleSessionInit,
 	)
