@@ -477,6 +477,55 @@ func (s *Store) GetLatestHandoff(agentID, projectID string) (*Memory, error) {
 	return &m, nil
 }
 
+// GetPeerHandoffs returns recent handoff memories for agents OTHER than
+// excludeAgentID who worked on projectID within the past windowHours hours.
+// Returns up to limit entries ordered newest first.
+//
+// Used by session_init to surface what peer agents accomplished before the
+// current agent arrived on the project. An empty excludeAgentID returns
+// handoffs for all agents (useful in tests and diagnostics).
+// Sprint 25.7: cross-agent exploration sharing.
+func (s *Store) GetPeerHandoffs(projectID, excludeAgentID string, windowHours, limit int) ([]Memory, error) {
+	if s.knowledgeDB == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+	if windowHours <= 0 {
+		windowHours = 24
+	}
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339)
+	cutoff := now.Add(-time.Duration(windowHours) * time.Hour).Format(time.RFC3339)
+
+	// The (? = '' OR agent_id != ?) pattern handles the optional exclusion cleanly:
+	//   - excludeAgentID == "" → no agent filter (return all agents)
+	//   - excludeAgentID != "" → filter out that specific agent
+	rows, err := s.knowledgeDB.Query(`
+		SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+		       created_at, expires_at, last_accessed_at, source, importance, access_count, source_project
+		FROM memories
+		WHERE tier = 'session_log'
+		  AND source_project = ?
+		  AND tags LIKE ? ESCAPE '\'
+		  AND stale = 0
+		  AND expires_at > ?
+		  AND created_at >= ?
+		  AND (? = '' OR agent_id != ?)
+		ORDER BY created_at DESC
+		LIMIT ?`,
+		projectID, "%\""+escapeLike("handoff")+"\"%", nowStr, cutoff,
+		excludeAgentID, excludeAgentID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get peer handoffs: %w", err)
+	}
+	defer rows.Close()
+
+	return scanMemories(rows)
+}
+
 // GetMemoryContent returns the content of a memory by ID. Returns ("", false) if not found.
 func (s *Store) GetMemoryContent(id string) (string, bool) {
 	var content string

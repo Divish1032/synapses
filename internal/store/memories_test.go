@@ -2430,3 +2430,92 @@ func TestGetLatestHandoff_NonHandoffTagNotReturned(t *testing.T) {
 		t.Error("work_summary memory must not be returned by GetLatestHandoff")
 	}
 }
+
+// ── Sprint 25.7: GetPeerHandoffs store-level tests ────────────────────────────
+
+// TestGetPeerHandoffs_ReturnsOtherAgentHandoffs verifies that only handoffs from
+// agents OTHER than excludeAgentID are returned.
+func TestGetPeerHandoffs_ReturnsOtherAgentHandoffs(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Agent A's handoff (excluded).
+	_, _ = st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"agent_summary":"agent-A did X","accomplished":["completed auth"]}`,
+		AgentID:       "agent-a",
+		Source:        SourceAuto,
+		Tags:          `["handoff","session_end","auto"]`,
+		SourceProject: "proj-peer",
+	})
+
+	// Agent B's handoff (should be returned).
+	_, _ = st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"agent_summary":"agent-B did Y","remaining":["write tests"]}`,
+		AgentID:       "agent-b",
+		Source:        SourceAuto,
+		Tags:          `["handoff","session_end","auto"]`,
+		SourceProject: "proj-peer",
+	})
+
+	// GetPeerHandoffs for agent-a: should only return agent-b's handoff.
+	mems, err := st.GetPeerHandoffs("proj-peer", "agent-a", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerHandoffs: %v", err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("expected 1 peer handoff (agent-b), got %d", len(mems))
+	}
+	if mems[0].AgentID != "agent-b" {
+		t.Errorf("expected agent-b handoff, got %s", mems[0].AgentID)
+	}
+}
+
+// TestGetPeerHandoffs_ProjectIsolation verifies that handoffs from a different
+// project are not included.
+func TestGetPeerHandoffs_ProjectIsolation(t *testing.T) {
+	st := openMemTestStore(t)
+
+	// Agent B's handoff for proj-other (must not leak).
+	_, _ = st.InsertMemory(Memory{
+		Tier:          TierSessionLog,
+		Content:       `{"agent_summary":"other project work"}`,
+		AgentID:       "agent-b",
+		Source:        SourceAuto,
+		Tags:          `["handoff","session_end","auto"]`,
+		SourceProject: "proj-other",
+	})
+
+	mems, err := st.GetPeerHandoffs("proj-target", "agent-a", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerHandoffs: %v", err)
+	}
+	if len(mems) != 0 {
+		t.Errorf("expected no handoffs for proj-target, got %d", len(mems))
+	}
+}
+
+// TestGetPeerHandoffs_EmptyExcludeReturnsAll verifies that an empty excludeAgentID
+// returns handoffs for all agents.
+func TestGetPeerHandoffs_EmptyExcludeReturnsAll(t *testing.T) {
+	st := openMemTestStore(t)
+
+	for _, aid := range []string{"agent-x", "agent-y"} {
+		_, _ = st.InsertMemory(Memory{
+			Tier:          TierSessionLog,
+			Content:       `{"agent_summary":"summary"}`,
+			AgentID:       aid,
+			Source:        SourceAuto,
+			Tags:          `["handoff","session_end","auto"]`,
+			SourceProject: "proj-all",
+		})
+	}
+
+	mems, err := st.GetPeerHandoffs("proj-all", "", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerHandoffs: %v", err)
+	}
+	if len(mems) != 2 {
+		t.Errorf("expected 2 handoffs with empty exclude, got %d", len(mems))
+	}
+}

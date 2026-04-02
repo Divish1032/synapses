@@ -281,6 +281,96 @@ func TestHypothesis_TimestampsSetOnInsert(t *testing.T) {
 	}
 }
 
+// ── Sprint 25.7: GetPeerActiveHypotheses store-level tests ───────────────────
+
+// TestGetPeerActiveHypotheses_ExcludesCurrentAgent verifies that hypotheses
+// from the excluded agent are not returned.
+func TestGetPeerActiveHypotheses_ExcludesCurrentAgent(t *testing.T) {
+	s := openTestStoreHyp(t)
+
+	// Agent A's hypothesis (current agent — should be excluded).
+	_, _ = s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "agent-a",
+		ProjectID: "proj-hyp",
+		Content:   "I think the bug is in auth middleware",
+	})
+	// Agent B's hypothesis (peer — should be returned).
+	_, _ = s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "agent-b",
+		ProjectID: "proj-hyp",
+		Content:   "The race condition is in the session store",
+	})
+
+	hyps, err := s.GetPeerActiveHypotheses("proj-hyp", "agent-a", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerActiveHypotheses: %v", err)
+	}
+	if len(hyps) != 1 {
+		t.Fatalf("expected 1 peer hypothesis (agent-b), got %d", len(hyps))
+	}
+	if hyps[0].AgentID != "agent-b" {
+		t.Errorf("expected agent-b hypothesis, got agent %s", hyps[0].AgentID)
+	}
+}
+
+// TestGetPeerActiveHypotheses_OnlyReturnsActive verifies that confirmed and
+// rejected hypotheses are not included.
+func TestGetPeerActiveHypotheses_OnlyReturnsActive(t *testing.T) {
+	s := openTestStoreHyp(t)
+
+	// Peer agent with hypotheses in all three states.
+	activeID, _ := s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "peer",
+		ProjectID: "proj-states",
+		Content:   "active theory",
+		State:     store.HypothesisStateActive,
+	})
+	confirmedID, _ := s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "peer",
+		ProjectID: "proj-states",
+		Content:   "confirmed theory",
+		State:     store.HypothesisStateActive, // insert as active, then update
+	})
+	_, _ = s.UpdateHypothesisState(confirmedID, store.HypothesisStateConfirmed, "verified")
+	rejectedID, _ := s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "peer",
+		ProjectID: "proj-states",
+		Content:   "rejected theory",
+		State:     store.HypothesisStateActive,
+	})
+	_, _ = s.UpdateHypothesisState(rejectedID, store.HypothesisStateRejected, "wrong")
+
+	hyps, err := s.GetPeerActiveHypotheses("proj-states", "current-agent", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerActiveHypotheses: %v", err)
+	}
+	if len(hyps) != 1 {
+		t.Fatalf("expected only 1 active hypothesis, got %d", len(hyps))
+	}
+	if hyps[0].ID != activeID {
+		t.Errorf("expected active hypothesis ID %s, got %s", activeID, hyps[0].ID)
+	}
+}
+
+// TestGetPeerActiveHypotheses_ProjectIsolation verifies no cross-project leakage.
+func TestGetPeerActiveHypotheses_ProjectIsolation(t *testing.T) {
+	s := openTestStoreHyp(t)
+
+	_, _ = s.InsertHypothesis(store.Hypothesis{
+		AgentID:   "peer",
+		ProjectID: "proj-other",
+		Content:   "theory for other project",
+	})
+
+	hyps, err := s.GetPeerActiveHypotheses("proj-target", "current-agent", 24, 10)
+	if err != nil {
+		t.Fatalf("GetPeerActiveHypotheses: %v", err)
+	}
+	if len(hyps) != 0 {
+		t.Errorf("expected no hypotheses for proj-target, got %d", len(hyps))
+	}
+}
+
 // TestHypothesis_EvidencePreservedOnStateUpdateWithoutEvidence verifies that
 // existing evidence is kept when a state update provides no new evidence.
 func TestHypothesis_EvidencePreservedOnStateUpdateWithoutEvidence(t *testing.T) {

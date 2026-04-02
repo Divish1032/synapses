@@ -171,6 +171,47 @@ func (s *Store) GetHypotheses(agentID, projectID, stateFilter string, limit int)
 	return scanHypotheses(rows)
 }
 
+// GetPeerActiveHypotheses returns ACTIVE hypotheses for agents OTHER than
+// excludeAgentID in the given project, created within the past windowHours hours.
+// Returns up to limit entries ordered newest first.
+//
+// Used by session_init to surface active working theories held by peer agents so
+// the incoming agent does not unknowingly invalidate or duplicate their reasoning.
+// An empty excludeAgentID returns hypotheses for all agents.
+// Sprint 25.7: cross-agent exploration sharing.
+func (s *Store) GetPeerActiveHypotheses(projectID, excludeAgentID string, windowHours, limit int) ([]Hypothesis, error) {
+	if s.knowledgeDB == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if windowHours <= 0 {
+		windowHours = 24
+	}
+	cutoff := time.Now().Add(-time.Duration(windowHours) * time.Hour).Unix()
+
+	// The (? = '' OR agent_id != ?) pattern handles the optional exclusion cleanly:
+	//   - excludeAgentID == "" → no agent filter
+	//   - excludeAgentID != "" → filter out that specific agent
+	rows, err := s.knowledgeDB.Query(`
+		SELECT id, agent_id, project_id, content, state, evidence, created_at, updated_at
+		FROM hypotheses
+		WHERE project_id = ?
+		  AND state = 'active'
+		  AND created_at >= ?
+		  AND (? = '' OR agent_id != ?)
+		ORDER BY created_at DESC
+		LIMIT ?`,
+		projectID, cutoff, excludeAgentID, excludeAgentID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get peer active hypotheses: %w", err)
+	}
+	defer rows.Close()
+	return scanHypotheses(rows)
+}
+
 // SearchHypotheses performs a case-insensitive keyword search across content
 // and evidence fields for the given project. When agentID is non-empty, results
 // are scoped to that agent; otherwise all agents in the project are searched.

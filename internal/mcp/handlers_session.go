@@ -1706,6 +1706,7 @@ func (s *Server) handleSessionInit(
 	//   (5) recent_decisions     — decision episodes from last 30 days (capped at 3)
 	//   (6) previously_explored  — entities explored 2+ times in prior sessions (Sprint 25.4)
 	//   (7) session_handoff      — structured reasoning state from prior session (Sprint 25.5)
+	//   (8) peer_activity        — peer agent handoffs + active hypotheses from last 24h (Sprint 25.7)
 	{
 		briefing := make(map[string]interface{})
 
@@ -1992,6 +1993,89 @@ func (s *Server) handleSessionInit(
 				// Touch in background to renew TTL (same as relevant_memories pattern).
 				hid := handoffMem.ID
 				s.goBackground(func() { s.store.TouchMemory(hid) })
+			}
+		}
+
+		// (8) Peer agent activity: handoff summaries and active hypotheses from
+		// agents OTHER than the current one, who worked on this project within
+		// the last 24 hours. Lets Agent B know what Agent A accomplished, what
+		// remains, and what theories Agent A is still holding — without Agent B
+		// needing to re-explore. Skipped in quickMode to keep lightweight sessions
+		// lean.
+		// Sprint 25.7: cross-agent exploration sharing.
+		if s.store != nil && agentID != "" && !quickMode {
+			const peerWindowHours = 24
+			peerHandoffs, _ := s.store.GetPeerHandoffs(s.projectID, agentID, peerWindowHours, 3)
+			peerHyps, _ := s.store.GetPeerActiveHypotheses(s.projectID, agentID, peerWindowHours, 5)
+
+			if len(peerHandoffs) > 0 || len(peerHyps) > 0 {
+				// Group hypotheses by agent_id for merging with handoffs.
+				hypsByAgent := make(map[string][]string)
+				for _, h := range peerHyps {
+					if rs := []rune(h.Content); len(rs) > 150 {
+						h.Content = string(rs[:150]) + "…"
+					}
+					hypsByAgent[h.AgentID] = append(hypsByAgent[h.AgentID], h.Content)
+				}
+
+				// Build per-agent peer entries.
+				// Use an ordered list so the most-recent peer comes first (handoffs
+				// are already ordered newest-first by GetPeerHandoffs).
+				seenAgents := make(map[string]bool)
+				var peers []map[string]interface{}
+
+				for _, mem := range peerHandoffs {
+					if seenAgents[mem.AgentID] {
+						continue
+					}
+					seenAgents[mem.AgentID] = true
+
+					entry := map[string]interface{}{
+						"agent_id": mem.AgentID,
+					}
+					// Deserialise the handoff JSON to extract NL summaries.
+					var payload handoffPayload
+					if err := json.Unmarshal([]byte(mem.Content), &payload); err == nil {
+						if payload.AgentSummary != "" {
+							entry["summary"] = payload.AgentSummary
+						}
+						if len(payload.Accomplished) > 0 {
+							entry["accomplished"] = payload.Accomplished
+						}
+						if len(payload.Remaining) > 0 {
+							entry["remaining"] = payload.Remaining
+						}
+					}
+					if hyps := hypsByAgent[mem.AgentID]; len(hyps) > 0 {
+						entry["open_hypotheses"] = hyps
+					}
+					peers = append(peers, entry)
+				}
+
+				// Include agents that only have hypotheses (no handoff within window).
+				for aid, hyps := range hypsByAgent {
+					if seenAgents[aid] {
+						continue
+					}
+					peers = append(peers, map[string]interface{}{
+						"agent_id":        aid,
+						"open_hypotheses": hyps,
+					})
+				}
+
+				if len(peers) > 0 {
+					peerCount := len(peers)
+					var noteMsg string
+					if peerCount == 1 {
+						noteMsg = fmt.Sprintf("1 peer agent was active on this project in the last %dh. Their work is summarised below — review before re-exploring.", peerWindowHours)
+					} else {
+						noteMsg = fmt.Sprintf("%d peer agents were active on this project in the last %dh. Their work is summarised below — review before re-exploring.", peerCount, peerWindowHours)
+					}
+					briefing["peer_activity"] = map[string]interface{}{
+						"note":  noteMsg,
+						"peers": peers,
+					}
+				}
 			}
 		}
 
