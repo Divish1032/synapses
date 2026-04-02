@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -166,6 +167,30 @@ func TestToolIntegrity_QuickScopeAlertsOnTampering(t *testing.T) {
 	}
 	if _, found := m["tool_integrity_alert"]; !found {
 		t.Error("scope=quick suppressed tool_integrity_alert — security alerts must never be suppressed by scope")
+	}
+}
+
+// TestToolDescriptions_WordLimit verifies that every registered tool description
+// is at or below the 150-word limit specified by Sprint 23.10. This prevents
+// future description changes from silently exceeding the budget.
+//
+// toolDescs stores "description\x00schemaJSON" — only the description portion
+// (before the null separator) is counted toward the word limit.
+func TestToolDescriptions_WordLimit(t *testing.T) {
+	s := newTestServer(t)
+
+	const maxWords = 150
+	for tool, entry := range s.toolDescs {
+		// entry format: "<description>\x00<jsonSchema>"
+		desc := entry
+		if idx := strings.IndexByte(entry, 0); idx >= 0 {
+			desc = entry[:idx]
+		}
+		words := len(strings.Fields(desc))
+		if words > maxWords {
+			t.Errorf("tool %q description exceeds %d-word limit: %d words\n  desc: %s",
+				tool, maxWords, words, desc)
+		}
 	}
 }
 

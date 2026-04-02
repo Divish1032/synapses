@@ -1602,7 +1602,7 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"get_context",
 			mcp.WithDescription(
-				"CALL before writing code that touches a known entity. "+
+				"CALL before writing, debugging, or reviewing code that touches a known entity. "+
 					"Returns relationships, callers, callees, entity signatures, and attached memories — "+
 					"what reading files alone cannot tell you. "+
 					"Without this, you'll miss hidden callers and make breaking changes you didn't see coming. "+
