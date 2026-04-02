@@ -1699,11 +1699,12 @@ func (s *Server) handleSessionInit(
 	// needs at session start. Natural language only; no code snippets. Present
 	// in ALL scopes (including quickMode) so every agent gets oriented first.
 	//
-	//   (1) unfinished_work  — in-progress/pending tasks + prior session summary
-	//   (2) conventions      — auto-load project prompts + key agent constraints
-	//   (3) drift_alerts     — federation drift + active architectural violations
-	//   (4) security_rules   — structural rule descriptions (NL, capped at 5)
-	//   (5) recent_decisions — decision episodes from last 30 days (capped at 3)
+	//   (1) unfinished_work    — in-progress/pending tasks + prior session summary
+	//   (2) conventions        — auto-load project prompts + key agent constraints
+	//   (3) drift_alerts       — federation drift + active architectural violations
+	//   (4) security_rules     — structural rule descriptions (NL, capped at 5)
+	//   (5) recent_decisions   — decision episodes from last 30 days (capped at 3)
+	//   (6) previously_explored — entities explored 2+ times in prior sessions (Sprint 25.4)
 	{
 		briefing := make(map[string]interface{})
 
@@ -1921,6 +1922,34 @@ func (s *Server) handleSessionInit(
 			}
 			if len(decisions) > 0 {
 				briefing["recent_decisions"] = decisions
+			}
+		}
+
+		// (6) Previously explored entities: cross-session dedup — surface entities
+		// that were heavily explored in prior sessions so the agent can skip
+		// re-querying them and use the saved findings instead.
+		// minHits=2 filters out trivial one-time lookups; only entities explored
+		// 2+ times across prior sessions are worth surfacing here.
+		// Sprint 25.4: cross-session exploration dedup.
+		if s.store != nil && synapseSessionID != "" {
+			if topEntities, err := s.store.GetTopExploredEntities(s.projectID, synapseSessionID, 2, 8); err == nil && len(topEntities) > 0 {
+				type exploredHint struct {
+					Entity     string `json:"entity"`
+					HitCount   int    `json:"hit_count"`
+					TopFinding string `json:"top_finding,omitempty"`
+				}
+				hints := make([]exploredHint, 0, len(topEntities))
+				for _, e := range topEntities {
+					hints = append(hints, exploredHint{
+						Entity:     e.Entity,
+						HitCount:   e.HitCount,
+						TopFinding: e.TopFinding,
+					})
+				}
+				briefing["previously_explored"] = map[string]interface{}{
+					"entities": hints,
+					"note":     "These entities were explored in prior sessions. Consult top_finding before calling get_context again — saves context budget.",
+				}
 			}
 		}
 

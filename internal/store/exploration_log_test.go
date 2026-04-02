@@ -185,6 +185,275 @@ func TestExplorationLog_SessionIsolation(t *testing.T) {
 	}
 }
 
+// ── Sprint 25.4: cross-session exploration dedup tests ───────────────────────
+
+func TestGetCrossSessionExplorations_BasicDedup(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	// Prior session explored AuthService twice with findings.
+	for i := 0; i < 2; i++ {
+		_ = s.AppendExplorationEntry(store.ExplorationEntry{
+			SessionID:      "prior-sess",
+			ProjectID:      "proj-dedup",
+			ToolName:       "get_context",
+			EntityQueried:  "AuthService",
+			FindingSummary: "AuthService: 5 caller(s), 1 security constraint(s)",
+		})
+	}
+	// Different entity in same prior session — should NOT appear.
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      "prior-sess",
+		ProjectID:      "proj-dedup",
+		ToolName:       "search",
+		EntityQueried:  "OtherEntity",
+		FindingSummary: "OtherEntity: 2 results",
+	})
+	// Current session querying the same entity — should be EXCLUDED.
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      "current-sess",
+		ProjectID:      "proj-dedup",
+		ToolName:       "get_context",
+		EntityQueried:  "AuthService",
+		FindingSummary: "current session finding",
+	})
+
+	got, err := s.GetCrossSessionExplorations("proj-dedup", "current-sess", "AuthService", 5)
+	if err != nil {
+		t.Fatalf("GetCrossSessionExplorations: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 prior-session entries for AuthService, got %d", len(got))
+	}
+	for _, e := range got {
+		if e.EntityQueried != "AuthService" {
+			t.Errorf("expected only AuthService entries, got %q", e.EntityQueried)
+		}
+		// current-sess must not appear
+		if e.SessionID == "current-sess" {
+			t.Error("current session must be excluded from cross-session results")
+		}
+	}
+}
+
+func TestGetCrossSessionExplorations_NonEmptyFindingFirst(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	// Insert two prior-session entries: one with finding, one without.
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      "prior-a",
+		ProjectID:      "proj-order",
+		ToolName:       "search",
+		EntityQueried:  "TokenValidator",
+		FindingSummary: "", // no finding
+	})
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      "prior-b",
+		ProjectID:      "proj-order",
+		ToolName:       "get_context",
+		EntityQueried:  "TokenValidator",
+		FindingSummary: "TokenValidator: 3 caller(s), validates JWT expiry",
+	})
+
+	got, err := s.GetCrossSessionExplorations("proj-order", "current", "TokenValidator", 5)
+	if err != nil {
+		t.Fatalf("GetCrossSessionExplorations: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(got))
+	}
+	// Entry with finding_summary should come first.
+	if got[0].FindingSummary == "" {
+		t.Errorf("expected entry with finding_summary first, got empty first: %q", got[0].FindingSummary)
+	}
+}
+
+func TestGetCrossSessionExplorations_EmptyExcludeSession(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      "any-sess",
+		ProjectID:      "proj-noexcl",
+		ToolName:       "get_context",
+		EntityQueried:  "PaymentProcessor",
+		FindingSummary: "PaymentProcessor: 8 callers",
+	})
+
+	// Empty excludeSessionID → all sessions included.
+	got, err := s.GetCrossSessionExplorations("proj-noexcl", "", "PaymentProcessor", 5)
+	if err != nil {
+		t.Fatalf("GetCrossSessionExplorations empty exclude: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("expected 1 entry with empty exclude, got %d", len(got))
+	}
+}
+
+func TestGetCrossSessionExplorations_EmptyResult(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	got, err := s.GetCrossSessionExplorations("proj-empty", "sess-x", "NonExistentEntity", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty result, got %d entries", len(got))
+	}
+}
+
+func TestGetTopExploredEntities_AggregatesCorrectly(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	// AuthService: explored 4 times across 2 sessions.
+	for i := 0; i < 2; i++ {
+		_ = s.AppendExplorationEntry(store.ExplorationEntry{
+			SessionID:      "sess-old-1",
+			ProjectID:      "proj-top",
+			ToolName:       "get_context",
+			EntityQueried:  "AuthService",
+			FindingSummary: "AuthService: 5 callers (old finding)",
+		})
+	}
+	for i := 0; i < 2; i++ {
+		_ = s.AppendExplorationEntry(store.ExplorationEntry{
+			SessionID:      "sess-old-2",
+			ProjectID:      "proj-top",
+			ToolName:       "get_context",
+			EntityQueried:  "AuthService",
+			FindingSummary: "AuthService: 5 callers, 1 security constraint",
+		})
+	}
+	// UserRepo: explored 2 times in one session.
+	for i := 0; i < 2; i++ {
+		_ = s.AppendExplorationEntry(store.ExplorationEntry{
+			SessionID:      "sess-old-1",
+			ProjectID:      "proj-top",
+			ToolName:       "get_context",
+			EntityQueried:  "UserRepo",
+			FindingSummary: "UserRepo affects 8 entities",
+		})
+	}
+	// TrivialEntity: explored only once — should be excluded with minHits=2.
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:     "sess-old-1",
+		ProjectID:     "proj-top",
+		ToolName:      "search",
+		EntityQueried: "TrivialEntity",
+	})
+	// Current session — must be excluded.
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      "current-sess",
+		ProjectID:      "proj-top",
+		ToolName:       "get_context",
+		EntityQueried:  "AuthService",
+		FindingSummary: "current session should not appear",
+	})
+
+	got, err := s.GetTopExploredEntities("proj-top", "current-sess", 2, 10)
+	if err != nil {
+		t.Fatalf("GetTopExploredEntities: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entities (AuthService + UserRepo), got %d: %v", len(got), got)
+	}
+	// AuthService has 4 hits — should be first.
+	if got[0].Entity != "AuthService" {
+		t.Errorf("expected AuthService first (highest hit count), got %q", got[0].Entity)
+	}
+	if got[0].HitCount != 4 {
+		t.Errorf("AuthService hit_count: got %d, want 4", got[0].HitCount)
+	}
+	if got[0].SessionCount != 2 {
+		t.Errorf("AuthService session_count: got %d, want 2", got[0].SessionCount)
+	}
+	if got[0].TopFinding == "" {
+		t.Error("AuthService top_finding should not be empty")
+	}
+	// Top finding must not be from the current session.
+	if got[0].TopFinding == "current session should not appear" {
+		t.Error("current session finding must not appear in top_finding")
+	}
+	// TrivialEntity must not appear (minHits=2, it has 1 hit).
+	for _, e := range got {
+		if e.Entity == "TrivialEntity" {
+			t.Error("TrivialEntity should be filtered by minHits=2")
+		}
+	}
+}
+
+func TestGetTopExploredEntities_RespectsLimit(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	// Insert 5 entities each explored 2 times.
+	entities := []string{"A", "B", "C", "D", "E"}
+	for _, name := range entities {
+		for i := 0; i < 2; i++ {
+			_ = s.AppendExplorationEntry(store.ExplorationEntry{
+				SessionID:     "prior",
+				ProjectID:     "proj-limit",
+				ToolName:      "get_context",
+				EntityQueried: name,
+			})
+		}
+	}
+
+	got, err := s.GetTopExploredEntities("proj-limit", "current", 1, 3)
+	if err != nil {
+		t.Fatalf("GetTopExploredEntities: %v", err)
+	}
+	if len(got) > 3 {
+		t.Errorf("expected at most 3 results (limit=3), got %d", len(got))
+	}
+}
+
+func TestGetTopExploredEntities_EmptyResult(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	got, err := s.GetTopExploredEntities("proj-empty", "sess-x", 1, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty result, got %d entries", len(got))
+	}
+}
+
+func TestGetTopExploredEntities_ProjectIsolation(t *testing.T) {
+	s := openTestStoreElog(t)
+
+	// Entries for proj-A.
+	for i := 0; i < 3; i++ {
+		_ = s.AppendExplorationEntry(store.ExplorationEntry{
+			SessionID:     "sess-a",
+			ProjectID:     "proj-A",
+			ToolName:      "get_context",
+			EntityQueried: "SharedEntity",
+		})
+	}
+	// Entries for proj-B.
+	_ = s.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:     "sess-b",
+		ProjectID:     "proj-B",
+		ToolName:      "get_context",
+		EntityQueried: "SharedEntity",
+	})
+
+	gotA, err := s.GetTopExploredEntities("proj-A", "", 1, 10)
+	if err != nil {
+		t.Fatalf("proj-A: %v", err)
+	}
+	if len(gotA) != 1 || gotA[0].HitCount != 3 {
+		t.Errorf("proj-A: expected 1 entity with 3 hits, got %v", gotA)
+	}
+
+	gotB, err := s.GetTopExploredEntities("proj-B", "", 1, 10)
+	if err != nil {
+		t.Fatalf("proj-B: %v", err)
+	}
+	if len(gotB) != 1 || gotB[0].HitCount != 1 {
+		t.Errorf("proj-B: expected 1 entity with 1 hit, got %v", gotB)
+	}
+}
+
 func TestExplorationLog_Prune(t *testing.T) {
 	s := openTestStoreElog(t)
 

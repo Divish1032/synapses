@@ -970,6 +970,8 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_elog_session ON exploration_log(session_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_elog_entity  ON exploration_log(session_id, entity_queried) WHERE entity_queried != ''`,
+		// Sprint 25.4: cross-session dedup queries filter by (project_id, entity_queried).
+		`CREATE INDEX IF NOT EXISTS idx_elog_project ON exploration_log(project_id, entity_queried) WHERE entity_queried != ''`,
 		// Sprint 24.4: Hypothesis tracking — mutable working theories with state machine.
 		// Distinct from episodes (append-only) because hypotheses change state over time.
 		`CREATE TABLE IF NOT EXISTS hypotheses (
