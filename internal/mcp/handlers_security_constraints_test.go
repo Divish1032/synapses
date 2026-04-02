@@ -1,0 +1,520 @@
+package mcp
+
+// Tests for Sprint 23.6: security_constraints section in get_context.
+//
+// Covers:
+//   - matchesSecurityPattern: auth/middleware/validate/sanitize name matching
+//   - observeFileNorms: graph-based observed norm detection
+//   - serializeCompact rendering: 🔒 section present/absent
+//   - contextEnrichment.SecurityConstraints: populated for add/modify intent, absent otherwise
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/SynapsesOS/synapses/internal/config"
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+// ── matchesSecurityPattern ────────────────────────────────────────────────────
+
+func TestMatchesSecurityPattern_AuthVariants(t *testing.T) {
+	matches := []string{
+		"AuthMiddleware", "authenticate", "Authorization",
+		"checkAuth", "authHandler", "AUTH",
+	}
+	for _, name := range matches {
+		if !matchesSecurityPattern(name) {
+			t.Errorf("matchesSecurityPattern(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestMatchesSecurityPattern_MiddlewareVariants(t *testing.T) {
+	matches := []string{
+		"Middleware", "middleware", "AuthMiddleware", "RateMiddleware",
+	}
+	for _, name := range matches {
+		if !matchesSecurityPattern(name) {
+			t.Errorf("matchesSecurityPattern(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestMatchesSecurityPattern_ValidateVariants(t *testing.T) {
+	matches := []string{
+		"ValidateInput", "validateRequest", "Validate", "validate",
+	}
+	for _, name := range matches {
+		if !matchesSecurityPattern(name) {
+			t.Errorf("matchesSecurityPattern(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestMatchesSecurityPattern_SanitizeVariants(t *testing.T) {
+	matches := []string{
+		"SanitizeInput", "sanitize", "SANITIZE",
+	}
+	for _, name := range matches {
+		if !matchesSecurityPattern(name) {
+			t.Errorf("matchesSecurityPattern(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestMatchesSecurityPattern_NonSecurityNames(t *testing.T) {
+	nonMatches := []string{
+		"HandleRequest", "GetUser", "processOrder", "Database",
+		"Repository", "Logger", "Config", "Parse", "Format",
+		"Render", "buildQuery", "fetchData", "updateRecord",
+	}
+	for _, name := range nonMatches {
+		if matchesSecurityPattern(name) {
+			t.Errorf("matchesSecurityPattern(%q) = true, want false", name)
+		}
+	}
+}
+
+// ── observeFileNorms ─────────────────────────────────────────────────────────
+
+func TestObserveFileNorms_NoneFound_NoSecurityCalls(t *testing.T) {
+	g := graph.New("test-repo")
+	file := "pkg/api/handler.go"
+	// Two functions that call non-security targets
+	fn1 := makeTestFuncNode(g, file, "HandleGet", 1)
+	fn2 := makeTestFuncNode(g, file, "HandlePost", 2)
+	db := makeTestFuncNode(g, "pkg/db/db.go", "QueryDB", 10)
+	g.AddEdge(&graph.Edge{From: fn1, To: db, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: fn2, To: db, Type: graph.EdgeCalls})
+
+	norms := observeFileNorms(g, file)
+	if len(norms) != 0 {
+		t.Errorf("expected no norms when no security calls, got %v", norms)
+	}
+}
+
+func TestObserveFileNorms_SecurityCallsDetected(t *testing.T) {
+	g := graph.New("test-repo")
+	file := "pkg/api/handler.go"
+	// Three functions — two call AuthMiddleware, one doesn't
+	fn1 := makeTestFuncNode(g, file, "HandleGet", 1)
+	fn2 := makeTestFuncNode(g, file, "HandlePost", 2)
+	fn3 := makeTestFuncNode(g, file, "HandleDelete", 3)
+	authFn := makeTestFuncNode(g, "pkg/middleware/auth.go", "AuthMiddleware", 5)
+	dbFn := makeTestFuncNode(g, "pkg/db/db.go", "QueryDB", 10)
+	g.AddEdge(&graph.Edge{From: fn1, To: authFn, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: fn2, To: authFn, Type: graph.EdgeCalls})
+	g.AddEdge(&graph.Edge{From: fn3, To: dbFn, Type: graph.EdgeCalls})
+
+	norms := observeFileNorms(g, file)
+	if len(norms) != 1 {
+		t.Fatalf("expected 1 norm, got %d: %v", len(norms), norms)
+	}
+	// Should report "2/3 functions in this file call auth/security patterns"
+	if !strings.Contains(norms[0], "2/3") {
+		t.Errorf("norm should contain '2/3', got %q", norms[0])
+	}
+	if !strings.Contains(norms[0], "auth") {
+		t.Errorf("norm should mention 'auth', got %q", norms[0])
+	}
+}
+
+func TestObserveFileNorms_TooFewNodes_ReturnsNil(t *testing.T) {
+	g := graph.New("test-repo")
+	file := "pkg/single/single.go"
+	// Only one function — not enough to form "N/M"
+	fn1 := makeTestFuncNode(g, file, "OnlyFunc", 1)
+	auth := makeTestFuncNode(g, "pkg/auth/auth.go", "AuthMiddleware", 5)
+	g.AddEdge(&graph.Edge{From: fn1, To: auth, Type: graph.EdgeCalls})
+
+	norms := observeFileNorms(g, file)
+	if len(norms) != 0 {
+		t.Errorf("expected nil for single function, got %v", norms)
+	}
+}
+
+func TestObserveFileNorms_EmptyFile_ReturnsNil(t *testing.T) {
+	g := graph.New("test-repo")
+	norms := observeFileNorms(g, "nonexistent/file.go")
+	if len(norms) != 0 {
+		t.Errorf("expected nil for empty file, got %v", norms)
+	}
+}
+
+func TestObserveFileNorms_NonCallEdgesIgnored(t *testing.T) {
+	g := graph.New("test-repo")
+	file := "pkg/api/handler.go"
+	// Two functions with non-CALLS edges to auth functions — should not count
+	fn1 := makeTestFuncNode(g, file, "HandleGet", 1)
+	fn2 := makeTestFuncNode(g, file, "HandlePost", 2)
+	authFn := makeTestFuncNode(g, "pkg/middleware/auth.go", "AuthMiddleware", 5)
+	// Use EdgeImplements, not EdgeCalls
+	g.AddEdge(&graph.Edge{From: fn1, To: authFn, Type: graph.EdgeImplements})
+	g.AddEdge(&graph.Edge{From: fn2, To: authFn, Type: graph.EdgeImplements})
+
+	norms := observeFileNorms(g, file)
+	if len(norms) != 0 {
+		t.Errorf("non-CALLS edges should not trigger security norm, got %v", norms)
+	}
+}
+
+// ── serializeCompact: SecurityConstraints rendering ──────────────────────────
+
+func TestSerializeCompact_SecurityConstraints_Rendered(t *testing.T) {
+	dc := minimalDCWithRoot()
+	dc.Enrichment = &contextEnrichment{
+		SecurityConstraints: []string{
+			"Handlers must not import database/sql directly [ERROR]",
+			"All API endpoints must use AuthMiddleware [WARNING]",
+		},
+	}
+
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "🔒 Security constraints") {
+		t.Errorf("expected security constraints section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Handlers must not import database/sql directly") {
+		t.Errorf("expected first constraint in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "All API endpoints must use AuthMiddleware") {
+		t.Errorf("expected second constraint in output, got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_SecurityConstraints_AbsentWhenEmpty(t *testing.T) {
+	dc := minimalDCWithRoot()
+	dc.Enrichment = &contextEnrichment{
+		RuleAlerts: []ruleAlert{
+			{RuleID: "r1", Severity: "HIGH", FromNode: "a", ToNode: "b", EdgeType: "CALLS"},
+		},
+		// No SecurityConstraints
+	}
+
+	out := serializeCompact(dc, "full")
+	if strings.Contains(out, "🔒") {
+		t.Errorf("security constraints section should be absent when empty, got:\n%s", out)
+	}
+	// RuleAlerts should still appear
+	if !strings.Contains(out, "rule violation") {
+		t.Errorf("rule alerts should still render, got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_SecurityConstraints_AbsentWhenNilEnrichment(t *testing.T) {
+	dc := minimalDCWithRoot()
+	// dc.Enrichment is nil
+
+	out := serializeCompact(dc, "full")
+	if strings.Contains(out, "🔒") {
+		t.Errorf("security section should be absent with nil enrichment, got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_SecurityConstraints_RenderedAtSummaryLevel(t *testing.T) {
+	// Security constraints should appear even at summary level — agents need safety info
+	// at every detail level.
+	dc := minimalDCWithRoot()
+	dc.Enrichment = &contextEnrichment{
+		SecurityConstraints: []string{"No direct DB access from handler [ERROR]"},
+	}
+
+	out := serializeCompact(dc, "summary")
+	if !strings.Contains(out, "🔒 Security constraints") {
+		t.Errorf("security constraints must appear at summary level, got:\n%s", out)
+	}
+}
+
+func TestSerializeCompact_SecurityConstraints_ShowsCount(t *testing.T) {
+	dc := minimalDCWithRoot()
+	dc.Enrichment = &contextEnrichment{
+		SecurityConstraints: []string{
+			"Rule A [ERROR]",
+			"Rule B [WARNING]",
+			"Rule C [WARNING]",
+		},
+	}
+
+	out := serializeCompact(dc, "full")
+	if !strings.Contains(out, "(3)") {
+		t.Errorf("security constraints header should show count (3), got:\n%s", out)
+	}
+}
+
+// ── Integration: SecurityConstraints populated by enrichment goroutine ───────
+
+func TestGetContext_SecurityConstraints_PopulatedForAddIntent(t *testing.T) {
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Add a structural rule that applies to handlers
+	cfg.Rules = []config.Rule{
+		{
+			ID:          "no-db-in-handler",
+			Description: "Handlers must not import database/sql directly",
+			Severity:    "error",
+			ForbiddenEdge: config.ForbiddenEdge{
+				FromFilePattern: "handler.go",
+			},
+		},
+	}
+
+	// Add a function in the target file
+	fnID := g.MakeNodeID("handler.go", "HandleRequest")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "HandleRequest", File: "handler.go", Line: 1,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{
+		"entity": "HandleRequest",
+		"intent": "add",
+		"format": "json",
+	})
+
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	// The enrichment section must exist and contain security_constraints
+	enrichRaw, ok := m["enrichment"]
+	if !ok {
+		t.Fatal("expected 'enrichment' key in response")
+	}
+	enrichMap, ok := enrichRaw.(map[string]any)
+	if !ok {
+		t.Fatalf("enrichment is not a map: %T", enrichRaw)
+	}
+	constraintsRaw, ok := enrichMap["security_constraints"]
+	if !ok {
+		t.Fatal("expected 'security_constraints' key in enrichment")
+	}
+	constraints, ok := constraintsRaw.([]any)
+	if !ok {
+		t.Fatalf("security_constraints is not a list: %T", constraintsRaw)
+	}
+	if len(constraints) == 0 {
+		t.Fatal("expected at least one security constraint")
+	}
+	// Verify the constraint contains the rule description
+	found := false
+	for _, c := range constraints {
+		if s, ok := c.(string); ok && strings.Contains(s, "Handlers must not import database/sql") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("rule description not found in constraints: %v", constraints)
+	}
+}
+
+func TestGetContext_SecurityConstraints_AbsentForUnderstandIntent(t *testing.T) {
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = []config.Rule{
+		{
+			ID:          "no-db-in-handler",
+			Description: "Handlers must not import database/sql directly",
+			Severity:    "error",
+		},
+	}
+
+	fnID := g.MakeNodeID("handler.go", "HandleRequest")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "HandleRequest", File: "handler.go", Line: 1,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	// "understand" intent should NOT trigger security_constraints
+	req := callTool(map[string]any{
+		"entity": "HandleRequest",
+		"intent": "understand",
+		"format": "json",
+	})
+
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	if enrichRaw, ok := m["enrichment"]; ok {
+		if enrichMap, ok := enrichRaw.(map[string]any); ok {
+			if _, ok := enrichMap["security_constraints"]; ok {
+				t.Error("security_constraints should be absent for intent=understand")
+			}
+		}
+	}
+	// Absence of enrichment entirely is also fine
+}
+
+func TestGetContext_SecurityConstraints_AbsentWhenNoIntent(t *testing.T) {
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = []config.Rule{
+		{ID: "r1", Description: "Some rule", Severity: "warning"},
+	}
+
+	fnID := g.MakeNodeID("svc.go", "DoWork")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "DoWork", File: "svc.go", Line: 1,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	// No intent provided — security_constraints should not appear
+	req := callTool(map[string]any{"entity": "DoWork", "format": "json"})
+
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	if enrichRaw, ok := m["enrichment"]; ok {
+		if enrichMap, ok := enrichRaw.(map[string]any); ok {
+			if _, ok := enrichMap["security_constraints"]; ok {
+				t.Error("security_constraints should be absent when no intent given")
+			}
+		}
+	}
+}
+
+func TestGetContext_SecurityConstraints_PopulatedForModifyIntent(t *testing.T) {
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.Rules = []config.Rule{
+		{ID: "r1", Description: "Use repository layer for DB access", Severity: "warning"},
+	}
+
+	fnID := g.MakeNodeID("service.go", "UpdateUser")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "UpdateUser", File: "service.go", Line: 5,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{
+		"entity": "UpdateUser",
+		"intent": "modify",
+		"format": "json",
+	})
+
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	enrichRaw, ok := m["enrichment"]
+	if !ok {
+		t.Fatal("expected enrichment section")
+	}
+	enrichMap := enrichRaw.(map[string]any)
+	constraintsRaw, ok := enrichMap["security_constraints"]
+	if !ok {
+		t.Fatal("expected security_constraints for intent=modify")
+	}
+	constraints := constraintsRaw.([]any)
+	if len(constraints) == 0 {
+		t.Fatal("expected at least one constraint for intent=modify")
+	}
+}
+
+func TestGetContext_SecurityConstraints_AgentRulesExcluded(t *testing.T) {
+	g := graph.New("test-repo")
+	st := openMCPTestStore(t)
+	dir := t.TempDir()
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	// Agent rule should NOT appear in security_constraints (already in session_init)
+	// Structural rule SHOULD appear.
+	cfg.Rules = []config.Rule{
+		{ID: "agent-rule", Description: "Behavioral agent constraint", Severity: "warning", RuleType: "agent"},
+		{ID: "struct-rule", Description: "Structural constraint for handlers", Severity: "error"},
+	}
+
+	fnID := g.MakeNodeID("handler.go", "Handler")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "Handler", File: "handler.go", Line: 1,
+	})
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{"entity": "Handler", "intent": "add", "format": "json"})
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	enrichMap := m["enrichment"].(map[string]any)
+	constraints := enrichMap["security_constraints"].([]any)
+
+	for _, c := range constraints {
+		if s, ok := c.(string); ok && strings.Contains(s, "Behavioral agent constraint") {
+			t.Error("agent-type rules must not appear in security_constraints")
+		}
+	}
+	found := false
+	for _, c := range constraints {
+		if s, ok := c.(string); ok && strings.Contains(s, "Structural constraint") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("structural rules must appear in security_constraints")
+	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// minimalDCWithRoot creates the smallest directionalContext that produces
+// a non-empty serializeCompact output (root node is required).
+func minimalDCWithRoot() *directionalContext {
+	return &directionalContext{
+		Root: &graph.Node{
+			ID: "root", Name: "DoWork", Type: graph.NodeFunction,
+			File: "svc.go", Line: 1,
+		},
+	}
+}
+
+// makeTestFuncNode adds a NodeFunction to g and returns its NodeID.
+func makeTestFuncNode(g *graph.Graph, file, name string, line int) graph.NodeID {
+	id := g.MakeNodeID(file, name)
+	g.AddNode(&graph.Node{
+		ID:   id,
+		Type: graph.NodeFunction,
+		Name: name,
+		File: file,
+		Line: line,
+	})
+	return id
+}

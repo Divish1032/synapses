@@ -34,10 +34,11 @@ import (
 // contextEnrichment holds auto-injected rules, failures, and task context
 // appended to get_context responses without requiring extra tool calls.
 type contextEnrichment struct {
-	ApplicableRules []ruleHint    `json:"applicable_rules,omitempty"` // architectural rules for this entity's file
-	RuleAlerts      []ruleAlert   `json:"rule_alerts,omitempty"`      // R19: actual violations found in the carved subgraph
-	RecentFailures  []failureHint `json:"recent_failures,omitempty"`  // relevant failure episodes
-	ActiveTask      *taskHint     `json:"active_task,omitempty"`      // linked task context
+	ApplicableRules    []ruleHint    `json:"applicable_rules,omitempty"`    // architectural rules for this entity's file
+	RuleAlerts         []ruleAlert   `json:"rule_alerts,omitempty"`         // R19: actual violations found in the carved subgraph
+	SecurityConstraints []string     `json:"security_constraints,omitempty"` // Sprint 23.6: proactive NL constraints for add/modify intent
+	RecentFailures     []failureHint `json:"recent_failures,omitempty"`     // relevant failure episodes
+	ActiveTask         *taskHint     `json:"active_task,omitempty"`         // linked task context
 }
 type ruleAlert struct {
 	RuleID       string `json:"rule_id"`
@@ -908,6 +909,11 @@ func (s *Server) handleGetContext(
 		dc.BrainStatus = "unavailable"
 	}
 
+	// Sprint 23.6: capture intent for security constraints goroutine closure.
+	// intent is also read earlier (line ~345) for CarveConfig, but is scoped to
+	// that if block. Extract here so the enrichment goroutine can gate on it.
+	intentMode, _ := req.GetArguments()["intent"].(string)
+
 	// ── Parallel enrichment: run independent I/O-bound queries concurrently ──
 	// Each goroutine writes to a separate field of dc — no shared writes.
 	var enrichWg sync.WaitGroup
@@ -1020,7 +1026,42 @@ func (s *Server) handleGetContext(
 			}
 		}
 
-		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RuleAlerts) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {
+		// Sprint 23.6: Security constraints for add/modify intent.
+		// Injected at the Pre-Write timing point (agent calls get_context before editing).
+		// Sources: (1) applicable rules formatted as NL briefings; (2) observed graph norms.
+		// Agent-type rules are excluded — they are already delivered via session_init conventions.
+		if intentMode == "add" || intentMode == "modify" {
+			for _, r := range allRules {
+				if r.IsAgentRule() {
+					continue // already in session_init; not structural constraints
+				}
+				if r.Description == "" {
+					continue
+				}
+				// Only include rules that apply to this file (same match logic as ApplicableRules).
+				matched := r.ForbiddenEdge.FromFilePattern == ""
+				if !matched {
+					matched, _ = filepath.Match(r.ForbiddenEdge.FromFilePattern, filepath.Base(best.File))
+				}
+				if !matched {
+					continue
+				}
+				sev := strings.ToUpper(r.Severity)
+				if sev == "" {
+					sev = "WARNING"
+				}
+				enrichment.SecurityConstraints = append(enrichment.SecurityConstraints,
+					fmt.Sprintf("%s [%s]", r.Description, sev))
+			}
+			// Observed norms: count peers in same file that call auth/security patterns.
+			// Gives agents the "N/M functions in this area call AuthMiddleware" picture.
+			if best.File != "" {
+				norms := observeFileNorms(s.graph, best.File)
+				enrichment.SecurityConstraints = append(enrichment.SecurityConstraints, norms...)
+			}
+		}
+
+		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RuleAlerts) > 0 || len(enrichment.SecurityConstraints) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {
 			dc.Enrichment = &enrichment
 		}
 	}()
@@ -2780,4 +2821,73 @@ func (s *Server) trackContextCall(agentID, entity string) (count int, sinceLast 
 	e.count++
 	e.lastAt = now
 	return e.count, sinceLast
+}
+
+// observeFileNorms analyses call patterns for function/method nodes in the same
+// file as the target entity and returns observed-norm strings like
+// "Observed: 4/6 functions in this file call auth/security patterns".
+//
+// Used by the Sprint 23.6 security constraints computation to give agents a
+// "N/M current" picture of how the existing code handles security concerns,
+// without requiring a full Sprint 26 pattern library.
+//
+// Performance: capped at 30 function nodes to bound the O(N×edges) cost.
+// Each OutEdges call acquires a read lock — safe for concurrent readers.
+func observeFileNorms(g *graph.Graph, file string) []string {
+	fileNodes := g.FindByFile(file)
+	if len(fileNodes) < 2 {
+		return nil
+	}
+
+	// Collect function/method nodes only (structs, interfaces, etc. don't "call").
+	funcNodes := make([]*graph.Node, 0, len(fileNodes))
+	for _, n := range fileNodes {
+		if n.Type == graph.NodeFunction || n.Type == graph.NodeMethod {
+			funcNodes = append(funcNodes, n)
+		}
+	}
+	total := len(funcNodes)
+	if total < 2 {
+		return nil
+	}
+	// Cap to prevent O(N×M) blowup on files with many functions.
+	const maxNodes = 30
+	if total > maxNodes {
+		total = maxNodes
+		funcNodes = funcNodes[:maxNodes]
+	}
+
+	// Count how many function nodes have at least one outgoing CALLS edge to a
+	// security-pattern target (auth, middleware, validate, sanitize).
+	securityCallers := 0
+	for _, fn := range funcNodes {
+		for _, e := range g.OutEdges(fn.ID) {
+			if e.Type != graph.EdgeCalls {
+				continue
+			}
+			if tgt := g.GetNode(e.To); tgt != nil && matchesSecurityPattern(tgt.Name) {
+				securityCallers++
+				break // count each source function once
+			}
+		}
+	}
+	if securityCallers == 0 {
+		return nil
+	}
+
+	norm := fmt.Sprintf("Observed: %d/%d functions in this file call auth/security patterns",
+		securityCallers, total)
+	return []string{norm}
+}
+
+// matchesSecurityPattern reports whether a function/method name suggests a
+// security-related role: authentication, authorization, middleware, or validation.
+// Used by observeFileNorms to detect observed security conventions in a file.
+// Conservative set to minimise false positives — only clear security names.
+func matchesSecurityPattern(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "auth") ||
+		strings.Contains(lower, "middleware") ||
+		strings.Contains(lower, "validate") ||
+		strings.Contains(lower, "sanitize")
 }

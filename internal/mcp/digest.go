@@ -69,6 +69,16 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 	}
 
+	// Sprint 23.6: Security constraints — proactive NL briefings for add/modify intent.
+	// Placed in the high-attention beginning zone so agents see constraints BEFORE writing.
+	// Only populated by the enrichment goroutine when intent=add or intent=modify.
+	if dc.Enrichment != nil && len(dc.Enrichment.SecurityConstraints) > 0 {
+		fmt.Fprintf(&b, "🔒 Security constraints (%d):\n", len(dc.Enrichment.SecurityConstraints))
+		for _, sc := range dc.Enrichment.SecurityConstraints {
+			fmt.Fprintf(&b, "  %s\n", sc)
+		}
+	}
+
 	// R32: Open quality gaps.
 	if len(dc.QualityGaps) > 0 {
 		fmt.Fprintf(&b, "⚠ %d open quality gap(s):\n", len(dc.QualityGaps))
