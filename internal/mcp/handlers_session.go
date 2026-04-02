@@ -2620,8 +2620,11 @@ type compactMemory struct {
 }
 
 // truncateCompactionPacket progressively drops lower-priority items from the
-// recovery packet to fit within the character budget. Drop order:
-// violations → memories → failures → decisions → rules.
+// recovery packet to fit within the character budget. Drop order (lowest
+// priority first): relationship_map → entity_importance → active_violations →
+// entity_memories → explored_entities → session_failures → session_decisions →
+// recent_decisions → rejected_approaches → active_hypotheses → active_rules →
+// task_progress → context_snapshot.
 // Always preserves work_summary and hint (the minimum useful payload).
 // Safe for single-goroutine use — caller must not share packet concurrently.
 func truncateCompactionPacket(packet map[string]interface{}, maxChars int) {
