@@ -27,6 +27,7 @@ func TestGoFrameworks_LoadBuiltin_ContainsFrameworkPatterns(t *testing.T) {
 		"go-echo-missing-auth",
 		"go-echo-missing-rate-limit",
 		"go-nethttp-missing-auth",
+		"go-nethttp-missing-rate-limit",
 	}
 
 	for _, id := range wantIDs {
@@ -43,10 +44,13 @@ func TestGoFrameworks_LoadBuiltin_ContainsFrameworkPatterns(t *testing.T) {
 
 func TestGoFrameworks_DefaultEngine_PatternCount(t *testing.T) {
 	e := DefaultEngine()
-	// 3 pre-existing (generic-admin-elevation, go-generic-hardcoded-secret, go-generic-direct-db-import)
-	// + 7 new framework patterns = 10 total.
-	if e.PatternCount() < 10 {
-		t.Errorf("DefaultEngine PatternCount = %d, want >= 10", e.PatternCount())
+	// 2 go-generic (hardcoded-secret, direct-db-import)
+	// + 1 generic (admin-elevation)
+	// + 6 cross-transport (go-cross-transport-* from Sprint 26.8)
+	// + 8 go-framework patterns (chi auth/rate, gin auth/rate, echo auth/rate, nethttp auth/rate)
+	// = 17 total minimum.
+	if e.PatternCount() < 17 {
+		t.Errorf("DefaultEngine PatternCount = %d, want >= 17", e.PatternCount())
 	}
 }
 
@@ -546,6 +550,67 @@ func TestGoFrameworks_NetHTTP_HandleFuncUsedWithoutAuth_Fires(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// net/http — missing rate limit
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestGoFrameworks_NetHTTP_MissingRateLimit_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/cmd/server/main.go", "net/http")
+	addFunctionWithCalls(g, "/project/cmd/server/main.go", "main", "HandleFunc", "ListenAndServe")
+
+	violations := e.CheckFile(g, "/project/cmd/server/main.go", nil)
+	found := findViolation(violations, "go-nethttp-missing-rate-limit")
+	if found == nil {
+		t.Fatal("expected go-nethttp-missing-rate-limit violation, got none")
+	}
+	if found.Severity != SeverityHigh {
+		t.Errorf("severity = %s, want HIGH", found.Severity)
+	}
+}
+
+func TestGoFrameworks_NetHTTP_MissingRateLimit_WithRateLimiter_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/cmd/server/main.go", "net/http")
+	// RateLimit* matches "RateLimitMiddleware".
+	addFunctionWithCalls(g, "/project/cmd/server/main.go", "main", "HandleFunc", "RateLimitMiddleware")
+
+	violations := e.CheckFile(g, "/project/cmd/server/main.go", nil)
+	if findViolation(violations, "go-nethttp-missing-rate-limit") != nil {
+		t.Error("expected no rate-limit violation: RateLimitMiddleware matches RateLimit* pattern")
+	}
+}
+
+func TestGoFrameworks_NetHTTP_RateLimit_HandleOnlyNoHandleFunc_NoViolation(t *testing.T) {
+	// Same as auth pattern: Handle alone should not trigger net/http rate-limit pattern.
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/server.go", "net/http")
+	addFunctionWithCalls(g, "/project/server.go", "setup", "Handle", "ListenAndServe")
+
+	violations := e.CheckFile(g, "/project/server.go", nil)
+	if findViolation(violations, "go-nethttp-missing-rate-limit") != nil {
+		t.Error("net/http rate-limit pattern should not fire on Handle alone")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Cross-framework isolation — patterns don't bleed across frameworks
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -643,6 +708,7 @@ func TestGoFrameworks_PatternMetadata(t *testing.T) {
 		"go-chi-missing-rate-limit",
 		"go-gin-missing-rate-limit",
 		"go-echo-missing-rate-limit",
+		"go-nethttp-missing-rate-limit",
 	}
 	for _, id := range rateLimitPatterns {
 		p, ok := ps.ByID(id)

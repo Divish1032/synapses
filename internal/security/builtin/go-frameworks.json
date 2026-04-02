@@ -142,7 +142,7 @@
       "framework": "net/http",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A file registers HTTP routes via net/http (http.HandleFunc or http.Handle) without wrapping handlers in authentication middleware. All registered routes are publicly accessible. Secure routes using handler wrapping: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))) or via a ServeMux with middleware wrapping. Unlike framework-based middleware chains, net/http requires explicit per-route or global wrapping.",
+      "description": "A file calls http.HandleFunc to register net/http routes without wrapping handlers in authentication middleware. All registered routes are publicly accessible. Note: http.Handle (not http.HandleFunc) is intentionally excluded from detection — chi, gin, and echo all expose a Handle() router method and universally import net/http, so detecting Handle would produce false positives on framework-based projects. Secure routes using handler wrapping: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))), or validate auth inside each handler.",
       "detection": {
         "check_type": "missing_middleware",
         "framework_identifiers": ["net/http"],
@@ -156,8 +156,30 @@
         "middleware_node_names": [],
         "scope": "file"
       },
-      "message": "File {file} registers net/http routes without calling any authentication function. {count}/{total} other file(s) in this package use auth. Wrap handlers: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))) or validate auth inside each handler.",
+      "message": "File {file} calls http.HandleFunc without any authentication wrapper. {count}/{total} other file(s) in this package use auth. Wrap handlers: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))) or validate auth inside each handler.",
       "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+    },
+    {
+      "id": "go-nethttp-missing-rate-limit",
+      "name": "net/http route registered without rate limiting",
+      "language": "go",
+      "framework": "net/http",
+      "pattern_type": "rate_limiting",
+      "severity": "HIGH",
+      "description": "A file calls http.HandleFunc to register net/http routes without rate limiting. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Use http.Handle('/path', RateLimitMiddleware(handler)) or apply rate limiting at the infrastructure layer (nginx, API gateway, load balancer). Detection uses HandleFunc only as the route discriminator — see go-nethttp-missing-auth for why http.Handle is excluded.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["net/http"],
+        "required_call_patterns": [
+          "RateLimit*", "Throttle*", "NewLimiter", "LimitKey*",
+          "PerSecond", "PerMinute", "LimitHandler*", "rateLimiter", "httprate*"
+        ],
+        "route_node_names": ["HandleFunc"],
+        "middleware_node_names": [],
+        "scope": "file"
+      },
+      "message": "File {file} calls http.HandleFunc without rate limiting. {count}/{total} other file(s) in this package apply rate limiting. Wrap handlers with a rate limiter or apply rate limiting at the infrastructure layer.",
+      "tags": ["owasp-a04", "rate-limiting", "availability"]
     }
   ]
 }
