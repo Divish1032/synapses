@@ -807,6 +807,12 @@ func Load(dir string) (*Config, error) {
 			cfg.Federation[i].Path = filepath.Join(dir, f.Path)
 		}
 	}
+
+	// Resolve relative SecurityPatternsDir against the directory that holds the config.
+	if cfg.SecurityPatternsDir != "" && !filepath.IsAbs(cfg.SecurityPatternsDir) {
+		cfg.SecurityPatternsDir = filepath.Join(dir, cfg.SecurityPatternsDir)
+	}
+
 	mergeGlobalConfig(&cfg, projectRawKeys)
 	return &cfg, nil
 }
@@ -822,6 +828,7 @@ var knownTopLevelKeys = map[string]bool{
 	"data_flow_max_hops": true, "federation": true, "federation_acl": true,
 	"constitution": true, "brain": true, "pulse": true, "session": true,
 	"rate_limits": true, "content_safety": true, "recall": true,
+	"security_patterns_dir": true,
 }
 
 // warnUnknownKeys parses raw JSON to detect top-level keys not recognized

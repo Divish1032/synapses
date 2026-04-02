@@ -16,15 +16,6 @@ import (
 //go:embed builtin/*.json
 var builtinPatternFiles embed.FS
 
-// patternFile is the on-disk JSON format. A single file may contain one pattern
-// or an array of patterns.
-type patternFile struct {
-	// Single pattern (if the root JSON object is a pattern).
-	single *SecurityPattern
-	// Multiple patterns (if the root JSON object is an array or {"patterns": [...]}).
-	multi []SecurityPattern
-}
-
 // patternFileMulti is the envelope format for a JSON file containing multiple patterns.
 type patternFileMulti struct {
 	Patterns []SecurityPattern `json:"patterns"`

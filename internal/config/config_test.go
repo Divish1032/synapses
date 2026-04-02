@@ -1069,3 +1069,52 @@ func TestCheckViolationsForEdges_SingleEdgeRules_Unaffected(t *testing.T) {
 		t.Error("single-edge rule did not fire with g=nil")
 	}
 }
+
+// ── SecurityPatternsDir path resolution ──────────────────────────────────────
+
+func TestLoad_SecurityPatternsDir_RelativeResolvedAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{"version":"1","security_patterns_dir":"my-patterns"}`)
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := filepath.Join(dir, "my-patterns")
+	if cfg.SecurityPatternsDir != want {
+		t.Errorf("SecurityPatternsDir = %q, want %q", cfg.SecurityPatternsDir, want)
+	}
+}
+
+func TestLoad_SecurityPatternsDir_AbsoluteKeptAsIs(t *testing.T) {
+	dir := t.TempDir()
+	absPath := filepath.Join(t.TempDir(), "patterns")
+	data := []byte(`{"version":"1","security_patterns_dir":"` + absPath + `"}`)
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SecurityPatternsDir != absPath {
+		t.Errorf("absolute SecurityPatternsDir = %q, want %q", cfg.SecurityPatternsDir, absPath)
+	}
+}
+
+func TestLoad_SecurityPatternsDir_EmptyNotModified(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte(`{"version":"1"}`)
+	if err := os.WriteFile(filepath.Join(dir, "synapses.json"), data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SecurityPatternsDir != "" {
+		t.Errorf("empty SecurityPatternsDir should stay empty, got %q", cfg.SecurityPatternsDir)
+	}
+}
