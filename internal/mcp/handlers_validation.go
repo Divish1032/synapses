@@ -355,6 +355,18 @@ func (s *Server) handleValidatePlan(
 		}
 	}
 
+	// Escalate status when security scan found CRITICAL or HIGH findings.
+	// Must run after the security scan so securityFindings is populated.
+	// Prevents a false "ok"/"unprotected" when blocking security issues exist.
+	if status == "ok" || status == "unprotected" {
+		for _, f := range securityFindings {
+			if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+				status = "security_findings_found"
+				break
+			}
+		}
+	}
+
 	result := map[string]interface{}{
 		"status":     status,
 		"violations": violations,
@@ -790,6 +802,21 @@ func (s *Server) handleVerifyImplementation(
 	if totalViolations > 0 {
 		status = "violations_found"
 	}
+	// Escalate status when CRITICAL or HIGH security findings exist.
+	// An agent that reads only the top-level status must not get a false "pass"
+	// while there are blocking security issues. Sprint 27.4 adds full severity-tier
+	// enforcement; this ensures the status field is honest now.
+	if totalSecurityFindings > 0 && (status == "pass" || status == "pending_indexing") {
+		for _, r := range reports {
+			for _, f := range r.SecurityFindings {
+				if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+					status = "security_findings_found"
+					goto doneSecurityStatus
+				}
+			}
+		}
+	}
+doneSecurityStatus:
 
 	// P3-5: emit validation outcome event.
 	if pc := s.getPulseClient(); pc != nil {

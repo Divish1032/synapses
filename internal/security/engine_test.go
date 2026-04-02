@@ -179,6 +179,19 @@ func TestDefaultEngineWithDir_EmptyDir(t *testing.T) {
 	}
 }
 
+func TestDefaultEngineWithDir_InvalidDir(t *testing.T) {
+	// When extraDir loading fails (invalid path with malformed JSON inside),
+	// DefaultEngineWithDir must fall back to built-ins and never return nil.
+	e := DefaultEngineWithDir("/nonexistent/path/that/does/not/exist")
+	if e == nil {
+		t.Fatal("DefaultEngineWithDir(invalid) returned nil")
+	}
+	// Should have fallen back to built-in patterns.
+	if e.PatternCount() == 0 {
+		t.Error("DefaultEngineWithDir(invalid) should fall back to built-in patterns")
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Framework gate
 // ──────────────────────────────────────────────────────────────────────────────
@@ -400,6 +413,114 @@ func TestCheckMissingMiddleware_RouteNodeDetectionViaHeuristic(t *testing.T) {
 	violations := e.CheckFile(g, "/project/api/routes.go", nil)
 	if len(violations) == 0 {
 		t.Fatal("expected violation: route found via NodeRoute, no auth")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CheckTypeMissingAnnotation
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestCheckMissingAnnotation_NoAnnotationCall_Fires(t *testing.T) {
+	p := makeSinglePattern(CheckTypeMissingAnnotation, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Severity = SeverityHigh
+		sp.Language = "go"
+		sp.Detection.AnnotationPatterns = []string{"RequireAuth*", "AuthGuard"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/api/handler.go")
+	addFunctionWithCalls(g, "/project/api/handler.go", "GetUsers", "db.Query") // no annotation call
+
+	violations := e.CheckFile(g, "/project/api/handler.go", nil)
+	if len(violations) == 0 {
+		t.Fatal("expected violation: handler file with no annotation call")
+	}
+	if violations[0].Severity != SeverityHigh {
+		t.Errorf("expected HIGH severity, got %s", violations[0].Severity)
+	}
+}
+
+func TestCheckMissingAnnotation_WithAnnotationCall_NoViolation(t *testing.T) {
+	p := makeSinglePattern(CheckTypeMissingAnnotation, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Language = "go"
+		sp.Detection.AnnotationPatterns = []string{"RequireAuth*"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/api/handler.go")
+	addFunctionWithCalls(g, "/project/api/handler.go", "GetUsers", "RequireAuthMiddleware")
+
+	violations := e.CheckFile(g, "/project/api/handler.go", nil)
+	if violations != nil {
+		t.Errorf("expected no violation: annotation call present, got %v", violations)
+	}
+}
+
+func TestCheckMissingAnnotation_HandlerFilePattern_Scopes(t *testing.T) {
+	p := makeSinglePattern(CheckTypeMissingAnnotation, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.HandlerFilePatterns = []string{"*/views/*.go"}
+		sp.Detection.AnnotationPatterns = []string{"RequireAuth"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// File NOT in views/ — should be skipped even without auth call.
+	addFileWithImports(g, "/project/internal/repo/users.go")
+	addFunctionWithCalls(g, "/project/internal/repo/users.go", "getUser")
+
+	violations := e.CheckFile(g, "/project/internal/repo/users.go", nil)
+	if violations != nil {
+		t.Errorf("expected no violation: file doesn't match HandlerFilePatterns, got %v", violations)
+	}
+}
+
+func TestCheckMissingAnnotation_SignatureMetadata_Suppresses(t *testing.T) {
+	// If a function's metadata["signature"] contains the annotation, no violation.
+	p := makeSinglePattern(CheckTypeMissingAnnotation, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Language = "java"
+		sp.Detection.AnnotationPatterns = []string{"@PreAuthorize*"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/Controller.java")
+	// Add a function node with the annotation in its signature metadata.
+	fnID := g.MakeNodeID("/project/src/Controller.java", "getUsers")
+	g.AddNode(&graph.Node{
+		ID:   fnID,
+		Type: graph.NodeFunction,
+		Name: "getUsers",
+		File: "/project/src/Controller.java",
+		Metadata: map[string]string{
+			"signature": "@PreAuthorize(\"hasRole('USER')\")",
+		},
+	})
+
+	violations := e.CheckFile(g, "/project/src/Controller.java", nil)
+	if violations != nil {
+		t.Errorf("expected no violation: annotation in function signature metadata, got %v", violations)
+	}
+}
+
+func TestCheckMissingAnnotation_EmptyAnnotationPatterns_NoViolation(t *testing.T) {
+	// Empty AnnotationPatterns means the check can't fire.
+	p := makeSinglePattern(CheckTypeMissingAnnotation, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.AnnotationPatterns = nil
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/api/views.go")
+	violations := e.CheckFile(g, "/project/api/views.go", nil)
+	if violations != nil {
+		t.Errorf("expected no violation: empty AnnotationPatterns, got %v", violations)
 	}
 }
 
@@ -1002,6 +1123,58 @@ func TestCheckProject_SingleTransport_NoViolation(t *testing.T) {
 	violations := e.CheckProject(g)
 	if violations != nil {
 		t.Errorf("expected no violations with single transport type, got %v", violations)
+	}
+}
+
+func TestCheckProject_CrossTransport_Fires(t *testing.T) {
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// HTTP routes with auth — protected.
+	addFileWithImports(g, "/project/api/http_routes.go")
+	addRouteNode(g, "/project/api/http_routes.go", "GET", "/users")
+	addRouteNode(g, "/project/api/http_routes.go", "POST", "/users")
+	addRouteNode(g, "/project/api/http_routes.go", "DELETE", "/users")
+	addFunctionWithCalls(g, "/project/api/http_routes.go", "setupRoutes", "AuthMiddleware")
+
+	// WebSocket handler WITHOUT auth — inconsistent.
+	addFileWithImports(g, "/project/ws/handler.go")
+	addRouteNode(g, "/project/ws/handler.go", "WS", "/ws/events")
+	addFunctionWithCalls(g, "/project/ws/handler.go", "handleWS", "json.Unmarshal") // no auth
+
+	violations := e.CheckProject(g)
+	if len(violations) == 0 {
+		t.Fatal("expected cross-transport violation: HTTP routes have auth but WebSocket handler does not")
+	}
+	if violations[0].Severity != SeverityCritical {
+		t.Errorf("expected CRITICAL severity, got %s", violations[0].Severity)
+	}
+}
+
+func TestCheckProject_CrossTransport_BothProtected_NoViolation(t *testing.T) {
+	p := makeSinglePattern(CheckTypeCrossTransportAuth, func(sp *SecurityPattern) {
+		sp.PatternType = PatternTypeAuthMiddleware
+		sp.Detection.RequiredCallPatterns = []string{"AuthMiddleware"}
+	})
+	e := makeEngine(p)
+	g := buildTestGraph(t)
+
+	// Both HTTP and WebSocket have auth.
+	addFileWithImports(g, "/project/api/http_routes.go")
+	addRouteNode(g, "/project/api/http_routes.go", "GET", "/users")
+	addFunctionWithCalls(g, "/project/api/http_routes.go", "setupRoutes", "AuthMiddleware")
+
+	addFileWithImports(g, "/project/ws/handler.go")
+	addRouteNode(g, "/project/ws/handler.go", "WS", "/ws/events")
+	addFunctionWithCalls(g, "/project/ws/handler.go", "handleWS", "AuthMiddleware")
+
+	violations := e.CheckProject(g)
+	if violations != nil {
+		t.Errorf("expected no violations: both transports have auth, got %v", violations)
 	}
 }
 
