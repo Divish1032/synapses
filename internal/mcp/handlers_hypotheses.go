@@ -169,18 +169,20 @@ func (s *Server) handleListHypotheses(
 	}
 
 	type hypothesisItem struct {
-		ID       string `json:"id"`
-		Content  string `json:"content"`
-		State    string `json:"state"`
-		Evidence string `json:"evidence,omitempty"`
+		ID        string `json:"id"`
+		Content   string `json:"content"`
+		State     string `json:"state"`
+		Evidence  string `json:"evidence,omitempty"`
+		CreatedAt int64  `json:"created_at"`
 	}
 	items := make([]hypothesisItem, 0, len(hyps))
 	for _, h := range hyps {
 		items = append(items, hypothesisItem{
-			ID:       h.ID,
-			Content:  h.Content,
-			State:    h.State,
-			Evidence: h.Evidence,
+			ID:        h.ID,
+			Content:   h.Content,
+			State:     h.State,
+			Evidence:  h.Evidence,
+			CreatedAt: h.CreatedAt,
 		})
 	}
 

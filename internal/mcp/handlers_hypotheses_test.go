@@ -169,6 +169,39 @@ func TestHandleHypothesize_Update_NoStateNoEvidence(t *testing.T) {
 	}
 }
 
+// TestHandleHypothesize_Update_EvidenceOnly verifies that an evidence-only update
+// (no state change) preserves the existing state and appends the new evidence.
+func TestHandleHypothesize_Update_EvidenceOnly(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create first.
+	cr, _ := srv.handleMemoryDispatch(ctx, callTool(map[string]any{
+		"action":   "hypothesize",
+		"agent_id": "tester",
+		"content":  "The timeout is caused by a missing index",
+	}))
+	cm := mustResult(t, cr, nil)
+	id := cm["hypothesis_id"].(string)
+
+	// Update with evidence only — no state provided.
+	ur, err := srv.handleMemoryDispatch(ctx, callTool(map[string]any{
+		"action":        "hypothesize",
+		"agent_id":      "tester",
+		"hypothesis_id": id,
+		"evidence":      "EXPLAIN ANALYZE shows seq scan on users table",
+		// no state
+	}))
+	um := mustResult(t, ur, err)
+
+	// State must remain active.
+	if um["state"] != "active" {
+		t.Errorf("expected state=active after evidence-only update, got %v", um["state"])
+	}
+	if _, ok := um["invalidation_prompt"]; ok {
+		t.Error("evidence-only update should not include invalidation_prompt")
+	}
+}
+
 // TestHandleListHypotheses_Basic verifies that list_hypotheses returns created hypotheses.
 func TestHandleListHypotheses_Basic(t *testing.T) {
 	srv := newTestServer(t)
