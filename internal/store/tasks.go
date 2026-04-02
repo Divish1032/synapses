@@ -550,7 +550,7 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	if err := json.Unmarshal([]byte(commitsJSON), &t.CommitsSinceStart); err != nil {
 		logutil.Debug("synapses: tasks: unmarshal commits_since_start for task %q: %v\n", t.ID, err)
 	}
-	if specJSON != "" && specJSON != "null" {
+	if specJSON != "" && specJSON != "[]" && specJSON != "null" {
 		if err := json.Unmarshal([]byte(specJSON), &t.SpecItems); err != nil {
 			logutil.Debug("synapses: tasks: unmarshal spec_items for task %q: %v\n", t.ID, err)
 		}

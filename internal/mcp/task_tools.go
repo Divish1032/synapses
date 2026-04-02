@@ -744,9 +744,6 @@ func (s *Server) writeRetrospectiveAnnotations(taskID, agentID, completionNotes 
 	}
 }
 
-// entityWithPath returns "name@dir/file" for disambiguation when the same
-// function name exists in multiple packages. Uses the last two path components.
-// Example: "Health@internal/api/server.go" → unambiguous across packages.
 // handleUpdateSpecItem marks a spec item within a task as done or not-done.
 // action=update_spec_item requires: task_id, item_id, done (bool).
 // Used to tick off individual checklist items as work progresses. validate(phase=post)
@@ -824,6 +821,9 @@ func (s *Server) handleUpdateSpecItem(
 	})
 }
 
+// entityWithPath returns "name@dir/file" for disambiguation when the same
+// function name exists in multiple packages. Uses the last two path components.
+// Example: "Health@internal/api/server.go" → unambiguous across packages.
 func entityWithPath(name, filePath string) string {
 	if filePath == "" {
 		return name
