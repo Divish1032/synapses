@@ -20,6 +20,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	"github.com/SynapsesOS/synapses/internal/security"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -330,6 +331,30 @@ func (s *Server) handleValidatePlan(
 		}
 	}
 
+	// Sprint 26.7: security pattern scan over changed files.
+	// Runs graph-based checks (import, middleware, admin) without file content.
+	// Content-based checks (hardcoded secrets) are included when the file exists on disk.
+	var securityFindings []security.Violation
+	if s.graph != nil && s.patternEngine != nil {
+		const maxSecurityFiles = 10
+		scanned := 0
+		for _, c := range changes {
+			if c.File == "" || scanned >= maxSecurityFiles {
+				continue
+			}
+			absFile := c.File
+			if repoRoot != "" && !filepath.IsAbs(absFile) {
+				absFile = filepath.Join(repoRoot, absFile)
+			}
+			if !pathWithinRoot(repoRoot, absFile) {
+				continue
+			}
+			src, _ := os.ReadFile(absFile) // nil on non-existent proposed files
+			scanned++
+			securityFindings = append(securityFindings, s.patternEngine.CheckFile(s.graph, absFile, src)...)
+		}
+	}
+
 	result := map[string]interface{}{
 		"status":     status,
 		"violations": violations,
@@ -351,6 +376,9 @@ func (s *Server) handleValidatePlan(
 	}
 	if len(logicWarnings) > 0 {
 		result["logic_warnings"] = logicWarnings
+	}
+	if len(securityFindings) > 0 {
+		result["security_findings"] = securityFindings
 	}
 
 	// Cross-project drift check: if any changed file has entities with
@@ -401,8 +429,8 @@ func (s *Server) handleValidatePlan(
 		if !hasRules {
 			safetyStatus = "no_rules"
 		}
-		result["_summary"] = fmt.Sprintf("Plan %s: %d violation(s), %d logic warning(s), %d change(s). Safety: %s.",
-			status, len(violations), len(logicWarnings), len(changes), safetyStatus)
+		result["_summary"] = fmt.Sprintf("Plan %s: %d violation(s), %d security finding(s), %d logic warning(s), %d change(s). Safety: %s.",
+			status, len(violations), len(securityFindings), len(logicWarnings), len(changes), safetyStatus)
 	}
 
 	return jsonResult(result)
@@ -453,18 +481,20 @@ func (s *Server) handleVerifyImplementation(
 
 	// Per-file analysis.
 	type fileReport struct {
-		File             string                 `json:"file"`
-		InGraph          bool                   `json:"in_graph"`
-		NodeCount        int                    `json:"node_count"`
-		Entities         []string               `json:"entities,omitempty"`
-		Violations       []config.Violation     `json:"violations,omitempty"`
-		SignatureImpact  []signatureImpactEntry `json:"signature_impact,omitempty"`
-		FreshnessWarning string                 `json:"freshness_warning,omitempty"`
+		File             string                   `json:"file"`
+		InGraph          bool                     `json:"in_graph"`
+		NodeCount        int                      `json:"node_count"`
+		Entities         []string                 `json:"entities,omitempty"`
+		Violations       []config.Violation       `json:"violations,omitempty"`
+		SecurityFindings []security.Violation     `json:"security_findings,omitempty"`
+		SignatureImpact  []signatureImpactEntry   `json:"signature_impact,omitempty"`
+		FreshnessWarning string                   `json:"freshness_warning,omitempty"`
 	}
 
 	var reports []fileReport
 	totalViolations := 0
 	totalImpactWarnings := 0
+	totalSecurityFindings := 0
 
 	for _, f := range files {
 		r := fileReport{File: f}
@@ -626,7 +656,7 @@ func (s *Server) handleVerifyImplementation(
 			}
 		}
 
-		// Freshness check.
+		// Freshness check + security pattern scan.
 		absFile := f
 		if repoRoot != "" && !filepath.IsAbs(absFile) {
 			absFile = filepath.Join(repoRoot, absFile)
@@ -636,9 +666,21 @@ func (s *Server) handleVerifyImplementation(
 			reports = append(reports, r)
 			continue
 		}
+
+		// Read content once; used by both freshness check and security scan.
+		fileContent, _ := os.ReadFile(absFile)
+
 		if fi, err := os.Stat(absFile); err == nil {
 			if age := time.Since(fi.ModTime()); age < 10*time.Second {
 				r.FreshnessWarning = fmt.Sprintf("modified %s ago — graph may be stale", age.Round(time.Second))
+			}
+		}
+
+		// Sprint 26.7: security pattern findings.
+		if s.graph != nil && s.patternEngine != nil {
+			if findings := s.patternEngine.CheckFile(s.graph, absFile, fileContent); len(findings) > 0 {
+				r.SecurityFindings = findings
+				totalSecurityFindings += len(findings)
 			}
 		}
 
@@ -774,10 +816,11 @@ func (s *Server) handleVerifyImplementation(
 	}
 
 	result := map[string]interface{}{
-		"status":           status,
-		"total_violations": totalViolations,
-		"impact_warnings":  totalImpactWarnings,
-		"files":            reports,
+		"status":                  status,
+		"total_violations":        totalViolations,
+		"impact_warnings":         totalImpactWarnings,
+		"total_security_findings": totalSecurityFindings,
+		"files":                   reports,
 	}
 	if taskVerification != nil {
 		result["task_verification"] = taskVerification
@@ -820,8 +863,8 @@ func (s *Server) handleVerifyImplementation(
 		if totalViolations > 0 {
 			status = "violations_found"
 		}
-		result["_summary"] = fmt.Sprintf("%s: %d file(s), %d violation(s), %d impact warning(s)",
-			status, len(files), totalViolations, totalImpactWarnings)
+		result["_summary"] = fmt.Sprintf("%s: %d file(s), %d violation(s), %d security finding(s), %d impact warning(s)",
+			status, len(files), totalViolations, totalSecurityFindings, totalImpactWarnings)
 	}
 
 	return jsonResult(result)

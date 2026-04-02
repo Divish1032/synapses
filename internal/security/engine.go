@@ -1,0 +1,983 @@
+// Package security — engine.go: the pattern matching engine (Sprint 26.7).
+//
+// The engine applies SecurityPatterns from a PatternSet against the parsed AST
+// graph, producing Violations. It is the runtime counterpart to the declarative
+// pattern format defined in pattern.go.
+//
+// Architecture:
+//   - Engine is constructed via NewEngine(PatternSet) or DefaultEngine().
+//   - CheckFile(g, filePath, content) is the primary entry point; it evaluates
+//     all patterns applicable to a single file.
+//   - CheckProject(g) evaluates project-scope patterns (CheckTypeCrossTransportAuth).
+//   - Per-file context is built once per CheckFile call via buildFileContext and
+//     shared across all check algorithms — avoids repeated graph queries.
+//   - Every check algorithm returns nil (not empty slice) when no violation fires.
+//
+// Thread-safety:
+//   Engine is immutable after construction and safe for concurrent use.
+//   buildFileContext takes only read-locks via the Graph API.
+package security
+
+import (
+	"fmt"
+	"path"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Violation — the output of a pattern match
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Violation is a single security finding produced by the pattern matching engine.
+// Every field except Evidence is always populated on a returned violation.
+type Violation struct {
+	// PatternID is the unique slug of the pattern that fired (e.g. "go-chi-missing-auth").
+	PatternID string `json:"pattern_id"`
+
+	// PatternName is the human-readable name of the pattern.
+	PatternName string `json:"pattern_name"`
+
+	// Severity determines the required agent response (CRITICAL/HIGH/MEDIUM).
+	Severity Severity `json:"severity"`
+
+	// File is the absolute or repo-relative path of the file containing the violation.
+	File string `json:"file"`
+
+	// Target is the specific entity where the violation was found:
+	// a route path, function name, variable name, or import path.
+	Target string `json:"target"`
+
+	// Message is the natural-language finding with template placeholders filled.
+	// Written for an AI agent to act on — never contains raw source code.
+	Message string `json:"message"`
+
+	// Evidence is the structural proof: "8/8 handlers have auth, this one doesn't".
+	// Always a natural-language string.
+	Evidence string `json:"evidence"`
+
+	// Tags from the pattern (e.g. "owasp-a01", "auth", "production-critical").
+	Tags []string `json:"tags,omitempty"`
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Engine
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Engine applies SecurityPatterns against the parsed graph.
+// Construct via NewEngine, DefaultEngine, or DefaultEngineWithDir.
+// The zero value is valid but produces no violations.
+type Engine struct {
+	patterns *PatternSet
+}
+
+// NewEngine creates an engine backed by the given PatternSet.
+// A nil PatternSet is valid; CheckFile and CheckProject return nil.
+func NewEngine(patterns *PatternSet) *Engine {
+	return &Engine{patterns: patterns}
+}
+
+// DefaultEngine loads the built-in patterns and returns an engine.
+// If loading fails (should never happen in a correctly built binary),
+// returns an engine with no patterns. Never returns nil.
+func DefaultEngine() *Engine {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		return &Engine{patterns: newPatternSet(nil)}
+	}
+	return &Engine{patterns: ps}
+}
+
+// DefaultEngineWithDir loads built-in patterns merged with user patterns
+// from extraDir. Falls back to built-ins only if extraDir loading fails.
+// Never returns nil.
+func DefaultEngineWithDir(extraDir string) *Engine {
+	ps, err := LoadAll(extraDir)
+	if err != nil {
+		ps, _ = LoadBuiltin() // nolint:errcheck — already handled above
+	}
+	if ps == nil {
+		ps = newPatternSet(nil)
+	}
+	return &Engine{patterns: ps}
+}
+
+// CheckFile runs all applicable patterns against filePath using the graph.
+//
+// content is the raw source file bytes. Pass nil to skip content-based checks:
+// CheckTypeHardcodedSecret requires content and is silently skipped when content
+// is nil. All graph-based checks run regardless of content.
+//
+// Returns nil if no violations are found. The returned slice is never empty.
+func (e *Engine) CheckFile(g *graph.Graph, filePath string, content []byte) []Violation {
+	if e == nil || e.patterns == nil || g == nil || filePath == "" {
+		return nil
+	}
+
+	lang := languageFromPath(filePath)
+	applicable := e.patterns.ForLanguage(lang)
+	if len(applicable) == 0 {
+		return nil
+	}
+
+	// Build per-file context once; shared across all check algorithms.
+	fc := buildFileContext(g, filePath)
+
+	var violations []Violation
+	for _, p := range applicable {
+		if !p.IsEnabled() {
+			continue
+		}
+
+		// Framework gate: if FrameworkIdentifiers are specified, this file MUST
+		// import at least one matching package to be eligible.
+		// This is the zero-false-positive guarantee: chi patterns never fire on
+		// files that don't use chi.
+		if len(p.Detection.FrameworkIdentifiers) > 0 {
+			if !fc.importsAny(p.Detection.FrameworkIdentifiers) {
+				continue
+			}
+		}
+
+		var found []Violation
+		switch p.Detection.CheckType {
+		case CheckTypeDirectImport:
+			found = checkDirectImport(fc, p)
+		case CheckTypeMissingMiddleware:
+			found = checkMissingMiddleware(fc, p, g)
+		case CheckTypeMissingAnnotation:
+			found = checkMissingAnnotation(fc, p)
+		case CheckTypeHardcodedSecret:
+			if content != nil {
+				found = checkHardcodedSecret(fc, p, content)
+			}
+		case CheckTypeAdminElevation:
+			found = checkAdminElevation(fc, p)
+		case CheckTypeCrossTransportAuth:
+			// Project-scope check: skipped per-file.
+			// Use CheckProject for cross-transport analysis.
+		}
+		violations = append(violations, found...)
+	}
+
+	if len(violations) == 0 {
+		return nil
+	}
+	return violations
+}
+
+// CheckProject runs project-scope patterns (CheckTypeCrossTransportAuth) against
+// the entire graph. Per-file patterns are NOT run here — use CheckFile for those.
+// Returns nil if no violations are found.
+func (e *Engine) CheckProject(g *graph.Graph) []Violation {
+	if e == nil || e.patterns == nil || g == nil {
+		return nil
+	}
+	var violations []Violation
+	for _, p := range e.patterns.ForCheckType(CheckTypeCrossTransportAuth) {
+		if p.IsEnabled() {
+			found := checkCrossTransportAuth(g, p)
+			violations = append(violations, found...)
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	return violations
+}
+
+// PatternCount returns the total number of patterns in the engine.
+func (e *Engine) PatternCount() int {
+	if e == nil || e.patterns == nil {
+		return 0
+	}
+	return e.patterns.Len()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fileContext — per-file graph data, built once per CheckFile call
+// ──────────────────────────────────────────────────────────────────────────────
+
+// fileContext caches graph data for a single file, shared by all check algorithms.
+type fileContext struct {
+	g        *graph.Graph
+	filePath string
+	nodes    []*graph.Node // all nodes whose File == filePath
+	imports  []*graph.Node // NodePackage nodes this file imports (via IMPORTS edges)
+	// callees maps callee node Name → true for all CALLS edges from any node in this file.
+	// Function-level (not per-node) — sufficient for file-scope auth checks.
+	callees map[string]bool
+	routes  []*graph.Node // NodeRoute nodes in this file
+}
+
+// buildFileContext constructs the fileContext by issuing a single FindByFile
+// call and walking the resulting nodes' outgoing edges under read-locks.
+func buildFileContext(g *graph.Graph, filePath string) *fileContext {
+	fc := &fileContext{
+		g:        g,
+		filePath: filePath,
+		callees:  make(map[string]bool),
+	}
+
+	nodes := g.FindByFile(filePath)
+	fc.nodes = nodes
+
+	for _, n := range nodes {
+		switch n.Type {
+		case graph.NodeFile:
+			// Collect NodePackage nodes via IMPORTS edges from the file node.
+			for _, e := range g.OutEdges(n.ID) {
+				if e.Type == graph.EdgeImports {
+					if imp := g.GetNode(e.To); imp != nil && imp.Type == graph.NodePackage {
+						fc.imports = append(fc.imports, imp)
+					}
+				}
+			}
+
+		case graph.NodeRoute:
+			fc.routes = append(fc.routes, n)
+
+		case graph.NodeFunction, graph.NodeMethod:
+			// Collect callee names from CALLS edges.
+			for _, e := range g.OutEdges(n.ID) {
+				if e.Type == graph.EdgeCalls {
+					if callee := g.GetNode(e.To); callee != nil {
+						fc.callees[callee.Name] = true
+					}
+				}
+			}
+		}
+	}
+
+	return fc
+}
+
+// importsAny reports whether any imported package name matches any of the
+// identifier patterns. Identifiers can be exact import paths or glob patterns
+// (e.g. "github.com/go-chi/chi/*" matches "github.com/go-chi/chi/v5").
+func (fc *fileContext) importsAny(identifiers []string) bool {
+	for _, imp := range fc.imports {
+		for _, id := range identifiers {
+			if matchGlob(id, imp.Name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// callsAny reports whether any function in this file calls a function whose
+// name matches any of the glob patterns.
+func (fc *fileContext) callsAny(patterns []string) bool {
+	for callee := range fc.callees {
+		for _, p := range patterns {
+			if matchGlob(p, callee) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasRouteRegistrations reports whether this file appears to register routes.
+// Checked via: (1) NodeRoute nodes detected by the heuristic pass, or
+// (2) CALLS edges to functions matching the routeNodeNames list.
+func (fc *fileContext) hasRouteRegistrations(routeNodeNames []string) bool {
+	if len(fc.routes) > 0 {
+		return true
+	}
+	return fc.callsAny(routeNodeNames)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Check algorithms
+// ──────────────────────────────────────────────────────────────────────────────
+
+// checkDirectImport fires when a file that matches HandlerFilePatterns directly
+// imports a package matching ForbiddenImportPatterns.
+//
+// This detects layer violations where a handler/controller accesses the data
+// layer directly instead of going through a repository or service.
+func checkDirectImport(fc *fileContext, p SecurityPattern) []Violation {
+	// Step 1: Does this file path match the handler file patterns?
+	// Empty HandlerFilePatterns means "match all files".
+	if len(p.Detection.HandlerFilePatterns) > 0 {
+		if !fileMatchesAny(fc.filePath, p.Detection.HandlerFilePatterns) {
+			return nil
+		}
+	}
+
+	// Step 2: Does this file import any forbidden package?
+	var violations []Violation
+	for _, imp := range fc.imports {
+		for _, forbidden := range p.Detection.ForbiddenImportPatterns {
+			if matchGlob(forbidden, imp.Name) {
+				msg := fillTemplate(p.Message, map[string]string{
+					"file":   fc.filePath,
+					"target": imp.Name,
+				})
+				violations = append(violations, Violation{
+					PatternID:   p.ID,
+					PatternName: p.Name,
+					Severity:    p.Severity,
+					File:        fc.filePath,
+					Target:      imp.Name,
+					Message:     msg,
+					Evidence:    fmt.Sprintf("%s matches a handler path pattern and directly imports %q — bypass the data layer via a repository or service instead", filepath.Base(fc.filePath), imp.Name),
+					Tags:        p.Tags,
+				})
+				break // one violation per import, not per pattern
+			}
+		}
+	}
+	return nilIfEmpty(violations)
+}
+
+// checkMissingMiddleware fires when a file registers routes but no function in
+// the file calls any required call pattern (e.g. auth middleware).
+//
+// Scope: file-level. A file that registers routes but has zero auth calls
+// is the primary target. Evidence is enriched by counting sibling files in
+// the same package that do call auth, producing "N/M files have auth, this one doesn't".
+func checkMissingMiddleware(fc *fileContext, p SecurityPattern, g *graph.Graph) []Violation {
+	// Must register routes to be relevant.
+	if !fc.hasRouteRegistrations(p.Detection.RouteNodeNames) {
+		return nil
+	}
+
+	// If any function in this file calls a required auth pattern, no violation.
+	if fc.callsAny(p.Detection.RequiredCallPatterns) {
+		return nil
+	}
+
+	// Also check for middleware application via Use/Group/With calls.
+	// If MiddlewareNodeNames is configured and the file calls them, it might be
+	// applying middleware — but without knowing which middleware was applied, we
+	// still fire the violation as a reminder to confirm auth is included.
+	// (Per-route precision is outside scope for Sprint 26.7.)
+
+	// Build evidence: count sibling files in same directory that DO call auth.
+	authCount, totalSiblings := countSiblingsWithCall(g, fc.filePath, p.Detection.RequiredCallPatterns)
+	var evidence string
+	switch {
+	case totalSiblings == 0:
+		evidence = "This file registers routes but does not call any required auth pattern"
+	case authCount == 0:
+		evidence = fmt.Sprintf("No file in this package calls an auth pattern; this file registers routes without auth (%d sibling(s) checked)", totalSiblings)
+	default:
+		evidence = fmt.Sprintf("%d/%d other file(s) in this package call an auth function — this file registers routes without one", authCount, totalSiblings)
+	}
+
+	target := filepath.Base(fc.filePath)
+	msg := fillTemplate(p.Message, map[string]string{
+		"file":   fc.filePath,
+		"target": target,
+		"count":  fmt.Sprint(authCount),
+		"total":  fmt.Sprint(totalSiblings),
+	})
+
+	return []Violation{{
+		PatternID:   p.ID,
+		PatternName: p.Name,
+		Severity:    p.Severity,
+		File:        fc.filePath,
+		Target:      target,
+		Message:     msg,
+		Evidence:    evidence,
+		Tags:        p.Tags,
+	}}
+}
+
+// checkMissingAnnotation fires when handler functions in the file do not have
+// required annotations. Annotations are detected via CALLS edges (decorators
+// resolved as call sites) and node metadata (signature field).
+//
+// This primarily targets Java Spring (@PreAuthorize) and Python FastAPI (Depends).
+func checkMissingAnnotation(fc *fileContext, p SecurityPattern) []Violation {
+	// Scope to handler files when HandlerFilePatterns is configured.
+	if len(p.Detection.HandlerFilePatterns) > 0 {
+		if !fileMatchesAny(fc.filePath, p.Detection.HandlerFilePatterns) {
+			return nil
+		}
+	}
+	if len(p.Detection.AnnotationPatterns) == 0 {
+		return nil
+	}
+
+	// Check at file-level: if ANY annotation pattern is called from this file,
+	// we assume the annotations are present. Per-function precision would require
+	// per-function call-graph analysis and is deferred to Sprint 28 (LSP).
+	if fc.callsAny(p.Detection.AnnotationPatterns) {
+		return nil
+	}
+
+	// Also check function metadata.signatures for annotation markers.
+	for _, n := range fc.nodes {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if sig, ok := n.Metadata["signature"]; ok {
+			for _, annotPat := range p.Detection.AnnotationPatterns {
+				if matchGlob(annotPat, sig) {
+					return nil // at least one function has the annotation in its signature
+				}
+			}
+		}
+	}
+
+	target := filepath.Base(fc.filePath)
+	msg := fillTemplate(p.Message, map[string]string{
+		"file":   fc.filePath,
+		"target": target,
+	})
+	return []Violation{{
+		PatternID:   p.ID,
+		PatternName: p.Name,
+		Severity:    p.Severity,
+		File:        fc.filePath,
+		Target:      target,
+		Message:     msg,
+		Evidence:    fmt.Sprintf("No function in %s calls any required annotation pattern (%s)", filepath.Base(fc.filePath), strings.Join(p.Detection.AnnotationPatterns, ", ")),
+		Tags:        p.Tags,
+	}}
+}
+
+// credentialVarRE matches variable names that commonly hold credentials.
+// Uses substring matching (no \b word boundaries) so it catches camelCase names
+// like "jwtSecret", "apiKey", "bearerToken" where the keyword is embedded.
+var credentialVarRE = regexp.MustCompile(
+	`(?i)(secret|password|passwd|apikey|api_key|token|jwt|auth_key|private_key|` +
+		`bearer|credential|passphrase|access_key|client_secret)`,
+)
+
+// stringLiteralRE captures the value of a string literal assignment.
+// Matches: varname = "value"  or  varname := "value"  (double-quote or backtick).
+// The variable name is in group 1, the string value in group 2.
+var stringLiteralRE = regexp.MustCompile(
+	`\b(\w+)\s*:?=\s*["` + "`" + `]([^"` + "`" + `\r\n]{6,})["` + "`" + `]`,
+)
+
+// checkHardcodedSecret scans file content for hardcoded credentials.
+// A violation fires when a variable with a credential-suggesting name is assigned
+// a string literal that matches a secret value pattern.
+//
+// Test files (_test.go) have their severity downgraded to MEDIUM since
+// test fixtures commonly use dummy credentials.
+func checkHardcodedSecret(fc *fileContext, p SecurityPattern, content []byte) []Violation {
+	if len(p.Detection.SecretPatterns) == 0 {
+		return nil
+	}
+
+	// Compile secret value patterns once.
+	var valueREs []*regexp.Regexp
+	for _, pat := range p.Detection.SecretPatterns {
+		if re, err := regexp.Compile(pat); err == nil {
+			valueREs = append(valueREs, re)
+		}
+	}
+	if len(valueREs) == 0 {
+		return nil
+	}
+
+	// Downgrade severity for test files — test fixtures use dummy credentials.
+	severity := p.Severity
+	if isTestFile(fc.filePath) {
+		severity = SeverityMedium
+	}
+
+	var violations []Violation
+	lines := strings.Split(string(content), "\n")
+	for lineNum, line := range lines {
+		// Quick pre-filter: skip lines that don't have a string assignment.
+		if !strings.ContainsAny(line, `"` + "`") {
+			continue
+		}
+		// Skip obvious false positives: blank/comment lines, imports.
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Skip import blocks.
+		if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, `"`) {
+			continue
+		}
+
+		// Find string literal assignments on this line.
+		matches := stringLiteralRE.FindAllStringSubmatch(line, -1)
+		for _, m := range matches {
+			if len(m) < 3 {
+				continue
+			}
+			varName := m[1]
+			value := m[2]
+
+			// Both conditions must hold: variable name AND value pattern.
+			if !credentialVarRE.MatchString(varName) {
+				continue
+			}
+			for _, valueRE := range valueREs {
+				if valueRE.MatchString(value) {
+					msg := fillTemplate(p.Message, map[string]string{
+						"file":   fc.filePath,
+						"target": varName,
+					})
+					violations = append(violations, Violation{
+						PatternID:   p.ID,
+						PatternName: p.Name,
+						Severity:    severity,
+						File:        fc.filePath,
+						Target:      varName,
+						Message:     msg,
+						Evidence:    fmt.Sprintf("Line %d: variable %q is assigned a string literal matching a credential pattern", lineNum+1, varName),
+						Tags:        p.Tags,
+					})
+					break // one violation per variable, not per pattern
+				}
+			}
+		}
+	}
+	return nilIfEmpty(violations)
+}
+
+// checkAdminElevation fires when a route node in the file has an admin-level
+// path but the file does not call any elevated authorization function.
+//
+// A route is "admin-level" when its path matches any AdminPathPattern or
+// contains "/admin" as a path component.
+func checkAdminElevation(fc *fileContext, p SecurityPattern) []Violation {
+	if len(fc.routes) == 0 {
+		return nil
+	}
+	if len(p.Detection.AdminPathPatterns) == 0 {
+		return nil
+	}
+
+	// Find admin routes in this file.
+	var adminRoutes []*graph.Node
+	for _, route := range fc.routes {
+		routePath := route.Metadata["path"]
+		if routePath == "" {
+			routePath = route.Name // fallback to node name like "GET /admin/users"
+		}
+		for _, adminPat := range p.Detection.AdminPathPatterns {
+			if matchGlob(adminPat, routePath) || matchAdminComponent(routePath) {
+				adminRoutes = append(adminRoutes, route)
+				break
+			}
+		}
+	}
+	if len(adminRoutes) == 0 {
+		return nil
+	}
+
+	// Check if the file calls elevated auth (distinct from basic auth).
+	if len(p.Detection.ElevatedAuthPatterns) > 0 && fc.callsAny(p.Detection.ElevatedAuthPatterns) {
+		return nil
+	}
+
+	var violations []Violation
+	for _, route := range adminRoutes {
+		routePath := route.Metadata["path"]
+		if routePath == "" {
+			routePath = route.Name
+		}
+		msg := fillTemplate(p.Message, map[string]string{
+			"file":   fc.filePath,
+			"target": routePath,
+		})
+		violations = append(violations, Violation{
+			PatternID:   p.ID,
+			PatternName: p.Name,
+			Severity:    p.Severity,
+			File:        fc.filePath,
+			Target:      routePath,
+			Message:     msg,
+			Evidence:    fmt.Sprintf("Admin route %q in %s does not call elevated authorization (role check, admin permission)", routePath, filepath.Base(fc.filePath)),
+			Tags:        p.Tags,
+		})
+	}
+	return nilIfEmpty(violations)
+}
+
+// matchAdminComponent reports whether routePath contains "/admin" as a path
+// component (i.e. not just a prefix like "/administrator").
+func matchAdminComponent(routePath string) bool {
+	parts := strings.Split(routePath, "/")
+	for _, part := range parts {
+		if strings.EqualFold(part, "admin") || strings.EqualFold(part, "management") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkCrossTransportAuth fires when auth middleware is applied to some transport
+// types (e.g. HTTP routes) but not others (e.g. WebSocket handlers, gRPC services)
+// in the same project. This is a project-scope check.
+//
+// Heuristic: looks for NodeRoute nodes across all files, groups them by transport
+// type (HTTP vs WebSocket), and checks consistency of auth calls.
+// Sprint 26.8 will add per-framework patterns for this check; here we provide
+// the generic detection logic the patterns will invoke.
+func checkCrossTransportAuth(g *graph.Graph, p SecurityPattern) []Violation {
+	// Collect all route nodes across the project.
+	type routeEntry struct {
+		file      string
+		path      string
+		transport string // "http", "websocket", "grpc"
+		hasAuth   bool
+	}
+
+	var routes []routeEntry
+	g.IterateNodes(func(n *graph.Node) {
+		if n.Type != graph.NodeRoute {
+			return
+		}
+		routePath := n.Metadata["path"]
+		if routePath == "" {
+			return
+		}
+		transport := detectTransportType(routePath, n.Name)
+		entry := routeEntry{
+			file:      n.File,
+			path:      routePath,
+			transport: transport,
+		}
+		routes = append(routes, entry)
+	})
+
+	if len(routes) == 0 {
+		return nil
+	}
+
+	// For each route, check whether auth calls exist in its file.
+	// Build a file→hasAuth index to avoid repeated graph queries.
+	fileAuthIndex := make(map[string]bool)
+	for _, route := range routes {
+		if _, ok := fileAuthIndex[route.file]; ok {
+			continue
+		}
+		fc := buildFileContext(g, route.file)
+		fileAuthIndex[route.file] = fc.callsAny(p.Detection.RequiredCallPatterns)
+	}
+
+	// Tag each route with its auth status.
+	var authByTransport = make(map[string]int)   // transport → auth-protected count
+	var totalByTransport = make(map[string]int)  // transport → total count
+	var fileByTransport = make(map[string]string) // transport → example file without auth
+
+	for _, route := range routes {
+		totalByTransport[route.transport]++
+		if fileAuthIndex[route.file] {
+			authByTransport[route.transport]++
+		} else if fileByTransport[route.transport] == "" {
+			fileByTransport[route.transport] = route.file
+		}
+	}
+
+	// If only one transport type exists, no cross-transport inconsistency possible.
+	if len(totalByTransport) <= 1 {
+		return nil
+	}
+
+	// Find transports that are less protected than HTTP (the baseline).
+	httpAuth := authByTransport["http"]
+	httpTotal := totalByTransport["http"]
+	if httpTotal == 0 || httpAuth == 0 {
+		return nil // HTTP has no auth either — not a cross-transport issue
+	}
+	httpRatio := float64(httpAuth) / float64(httpTotal)
+
+	var violations []Violation
+	for transport, total := range totalByTransport {
+		if transport == "http" {
+			continue
+		}
+		authCount := authByTransport[transport]
+		if total == 0 {
+			continue
+		}
+		ratio := float64(authCount) / float64(total)
+		// Fire if HTTP auth coverage is significantly better than this transport.
+		if httpRatio-ratio > 0.3 {
+			exampleFile := fileByTransport[transport]
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":   exampleFile,
+				"target": transport,
+			})
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    p.Severity,
+				File:        exampleFile,
+				Target:      transport,
+				Message:     msg,
+				Evidence:    fmt.Sprintf("HTTP routes: %d/%d have auth. %s handlers: %d/%d have auth — inconsistent protection across transports", httpAuth, httpTotal, transport, authCount, total),
+				Tags:        p.Tags,
+			})
+		}
+	}
+	return nilIfEmpty(violations)
+}
+
+// detectTransportType classifies a route as "http", "websocket", or "grpc"
+// based on path and node name heuristics.
+func detectTransportType(routePath, nodeName string) string {
+	lower := strings.ToLower(routePath + " " + nodeName)
+	switch {
+	case strings.Contains(lower, "ws://") ||
+		strings.Contains(lower, "websocket") ||
+		strings.Contains(lower, "/ws") ||
+		strings.HasPrefix(lower, "ws "):
+		return "websocket"
+	case strings.Contains(lower, "grpc") ||
+		strings.HasPrefix(lower, "rpc "):
+		return "grpc"
+	default:
+		return "http"
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Evidence helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// countSiblingsWithCall returns the number of sibling files (same directory,
+// excluding currentFile) that call at least one function matching callPatterns,
+// plus the total number of sibling files scanned.
+//
+// Scans are bounded: at most 30 sibling files are evaluated.
+func countSiblingsWithCall(g *graph.Graph, currentFile string, callPatterns []string) (authCount, totalSiblings int) {
+	if len(callPatterns) == 0 {
+		return 0, 0
+	}
+	dir := filepath.Dir(currentFile)
+	if dir == "" || dir == "." {
+		return 0, 0
+	}
+
+	seen := make(map[string]bool)
+	seen[currentFile] = true
+
+	const maxSiblings = 30
+	g.IterateNodes(func(n *graph.Node) {
+		if totalSiblings >= maxSiblings {
+			return
+		}
+		if n.Type != graph.NodeFile {
+			return
+		}
+		if seen[n.File] {
+			return
+		}
+		if filepath.Dir(n.File) != dir {
+			return
+		}
+		seen[n.File] = true
+		totalSiblings++
+		sib := buildFileContext(g, n.File)
+		if sib.callsAny(callPatterns) {
+			authCount++
+		}
+	})
+	return authCount, totalSiblings
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Pattern/path matching utilities
+// ──────────────────────────────────────────────────────────────────────────────
+
+// languageFromPath maps a file path to a language string matching the
+// Language field in SecurityPattern ("go", "typescript", "javascript", etc.).
+// Returns the lowercased extension (without dot) for unknown types.
+func languageFromPath(filePath string) string {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".go":
+		return "go"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".js", ".jsx", ".mjs", ".cjs":
+		return "javascript"
+	case ".py":
+		return "python"
+	case ".java":
+		return "java"
+	case ".rs":
+		return "rust"
+	case ".rb":
+		return "ruby"
+	case ".cs":
+		return "csharp"
+	case ".php":
+		return "php"
+	default:
+		if ext == "" {
+			return ""
+		}
+		return ext[1:] // strip leading dot
+	}
+}
+
+// fileMatchesAny reports whether filePath matches any of the given glob patterns.
+//
+// Matching strategy (tried in order, first match wins):
+//  1. Match the basename alone against the pattern.
+//  2. Match progressively longer path suffixes against the pattern.
+//     E.g. "*/handler/*.go" matches "internal/handler/users.go" via the suffix
+//     "internal/handler/users.go".
+//  3. Cross-slash match of the pattern against the full normalized path, where
+//     * can span path separators. E.g. "*handler*.go" matches any path that
+//     contains "handler" anywhere (including as a directory component).
+//
+// Uses path.Match (forward-slash, cross-platform) for strategies 1 and 2.
+func fileMatchesAny(filePath string, patterns []string) bool {
+	// Normalize to forward slashes for consistent cross-platform matching.
+	clean := filepath.ToSlash(filePath)
+	base := filepath.Base(filePath)
+
+	for _, pat := range patterns {
+		pat = filepath.ToSlash(pat)
+
+		// 1. Base name match (e.g. "*_handler.go", "users_controller.go").
+		if m, _ := path.Match(pat, base); m {
+			return true
+		}
+
+		// 2. Suffix match: try each successive path suffix.
+		// "a/b/c/d.go" → "a/b/c/d.go", "b/c/d.go", "c/d.go"
+		// This allows "*/handler/*.go" to match "internal/handler/users.go".
+		parts := strings.Split(clean, "/")
+		for i := 0; i < len(parts)-1; i++ {
+			suffix := strings.Join(parts[i:], "/")
+			if m, _ := path.Match(pat, suffix); m {
+				return true
+			}
+		}
+
+		// 3. Cross-slash match: * can span path separators.
+		// Handles patterns like "*handler*.go" that should match a file in a
+		// directory named "handler" even when the basename doesn't contain "handler".
+		if matchGlobCrossSlash(pat, clean) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchGlobCrossSlash reports whether pattern matches s with * matching any
+// sequence of characters including path separators (/).
+// This is used by fileMatchesAny as a final fallback.
+func matchGlobCrossSlash(pattern, s string) bool {
+	for {
+		if len(pattern) == 0 {
+			return len(s) == 0
+		}
+		if pattern[0] == '*' {
+			// Consume consecutive stars (they're equivalent to a single *).
+			for len(pattern) > 0 && pattern[0] == '*' {
+				pattern = pattern[1:]
+			}
+			if len(pattern) == 0 {
+				return true // trailing * matches everything
+			}
+			// Try matching the remainder of the pattern at each position in s.
+			for i := 0; i <= len(s); i++ {
+				if matchGlobCrossSlash(pattern, s[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(s) == 0 {
+			return false
+		}
+		if pattern[0] == '?' {
+			// ? matches any single character (including /).
+			pattern = pattern[1:]
+			s = s[1:]
+			continue
+		}
+		if pattern[0] != s[0] {
+			return false
+		}
+		pattern = pattern[1:]
+		s = s[1:]
+	}
+}
+
+// matchGlob reports whether name matches the glob pattern.
+// Used for import paths, function names, and package names.
+// Uses path.Match (not filepath.Match) so behaviour is consistent cross-platform.
+// An empty pattern never matches. A "*" pattern matches everything.
+//
+// Special case: patterns ending with "/*" (e.g. "gorm.io/*") match any
+// sub-path at any depth, so "gorm.io/*" matches both "gorm.io/gorm" and
+// "gorm.io/driver/postgres". This is needed for import-path prefixes where
+// the full sub-module path is not known at pattern-authoring time.
+func matchGlob(pattern, name string) bool {
+	if pattern == "" {
+		return false
+	}
+	if pattern == "*" {
+		return true
+	}
+	// Fast path: exact match (most common for import identifiers).
+	if pattern == name {
+		return true
+	}
+	m, _ := path.Match(pattern, name)
+	if m {
+		return true
+	}
+	// Fallback: patterns ending with "/*" should match any sub-path at any depth.
+	// e.g. "gorm.io/*" should match "gorm.io/driver/postgres" (not just "gorm.io/gorm").
+	// path.Match only matches * within a single path component (no /), so we need
+	// a prefix-based fallback here.
+	if strings.HasSuffix(pattern, "/*") {
+		prefix := strings.TrimSuffix(pattern, "*") // e.g. "gorm.io/"
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Template and utility helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// fillTemplate replaces placeholders in tmpl with values from vars.
+// Supported placeholders: {target}, {file}, {count}, {total}.
+// Unknown placeholders are left as-is.
+func fillTemplate(tmpl string, vars map[string]string) string {
+	result := tmpl
+	for k, v := range vars {
+		result = strings.ReplaceAll(result, "{"+k+"}", v)
+	}
+	return result
+}
+
+// isTestFile reports whether filePath looks like a test or test-fixture file.
+// Used to downgrade severity for CheckTypeHardcodedSecret.
+func isTestFile(filePath string) bool {
+	base := strings.ToLower(filepath.Base(filePath))
+	return strings.HasSuffix(base, "_test.go") ||
+		strings.Contains(filePath, "/testdata/") ||
+		strings.Contains(filePath, "/test/") ||
+		strings.Contains(filePath, "/tests/") ||
+		strings.Contains(filePath, "/fixtures/") ||
+		strings.Contains(filePath, "/mocks/")
+}
+
+// nilIfEmpty returns nil when violations is empty, otherwise returns violations.
+// Ensures CheckFile never returns an empty (non-nil) slice.
+func nilIfEmpty(violations []Violation) []Violation {
+	if len(violations) == 0 {
+		return nil
+	}
+	return violations
+}

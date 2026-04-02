@@ -29,6 +29,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/scout"
+	"github.com/SynapsesOS/synapses/internal/security"
 	"github.com/SynapsesOS/synapses/internal/skills"
 	"github.com/SynapsesOS/synapses/internal/store"
 	"github.com/SynapsesOS/synapses/internal/watcher"
@@ -134,6 +135,7 @@ type Server struct {
 	sdlcDetect         *sdlcDetector          // Sprint 27.1: auto-detects SDLC phase from tool-call patterns
 	toolTracker        *sessionToolTracker    // Sprint 27.3: per-session tool call counts for suggestion suppression
 	goalReinforcer     *goalReinforcer        // Sprint 25.6: per-session response counter for goal+convention reminders
+	patternEngine      *security.Engine       // Sprint 26.7: security pattern matching engine
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -604,6 +606,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		toolDescs:        make(map[string]string),
 		sdlcDetect:       newSDLCDetector(),
 		toolTracker:      newSessionToolTracker(),
+		patternEngine:    security.DefaultEngine(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
