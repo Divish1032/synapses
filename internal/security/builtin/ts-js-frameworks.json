@@ -249,10 +249,10 @@
       "framework": "next.js",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A Next.js API route handler file does not call any authentication function. In Next.js App Router, route.ts files export GET/POST handlers that execute server-side — they must validate the caller's identity explicitly. In Pages Router, pages/api/*.ts handlers are similarly unprotected. Auth can be handled via: getServerSession() from next-auth, auth() from Auth.js v5, currentUser() from Clerk, or a custom authenticate() function. Note: if auth is enforced globally via middleware.ts using withAuth or similar, this per-route finding can be suppressed.",
+      "description": "A Next.js API route handler file does not call any authentication function. In Next.js App Router, route.ts files export GET/POST handlers that execute server-side — they must validate the caller's identity explicitly. In Pages Router, pages/api/*.ts handlers are similarly unprotected. Auth can be handled via: getServerSession() from next-auth, auth() from Auth.js v5, currentUser() from Clerk, or a custom authenticate() function. Note: if auth is enforced globally via middleware.ts using withAuth or similar, this per-route finding can be suppressed. Note: no framework_identifiers gate is used — the route.ts and pages/api/*.ts file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
       "detection": {
         "check_type": "missing_annotation",
-        "framework_identifiers": ["next/server", "next"],
+        "framework_identifiers": [],
         "annotation_patterns": [
           "getServerSession", "getSession", "auth",
           "withAuth*", "currentUser*", "currentUserId*",
@@ -554,10 +554,10 @@
       "framework": "next.js",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A Next.js API route handler (JavaScript) does not call any authentication function. App Router route.js files and Pages Router pages/api/*.js handlers must validate caller identity. Use getServerSession(), auth(), currentUser(), or a custom authenticate() function. Suppress if auth is enforced globally via middleware.js.",
+      "description": "A Next.js API route handler (JavaScript) does not call any authentication function. App Router route.js files and Pages Router pages/api/*.js handlers must validate caller identity. Use getServerSession(), auth(), currentUser(), or a custom authenticate() function. Suppress if auth is enforced globally via middleware.js. Note: no framework_identifiers gate is used — the route.js and pages/api/*.js file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
       "detection": {
         "check_type": "missing_annotation",
-        "framework_identifiers": ["next/server", "next"],
+        "framework_identifiers": [],
         "annotation_patterns": [
           "getServerSession", "getSession", "auth",
           "withAuth*", "currentUser*", "currentUserId*",

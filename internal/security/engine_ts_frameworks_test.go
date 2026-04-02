@@ -769,7 +769,7 @@ func TestTSFrameworks_Nextjs_TS_MissingAuth_WithCurrentUser_NoViolation(t *testi
 	}
 }
 
-func TestTSFrameworks_Nextjs_TS_FrameworkGate_NonNextjsFile_NoViolation(t *testing.T) {
+func TestTSFrameworks_Nextjs_TS_PathGate_PluralRoutesTsNotMatched(t *testing.T) {
 	ps, err := LoadBuiltin()
 	if err != nil {
 		t.Fatalf("LoadBuiltin: %v", err)
@@ -777,13 +777,34 @@ func TestTSFrameworks_Nextjs_TS_FrameworkGate_NonNextjsFile_NoViolation(t *testi
 	e := NewEngine(ps)
 	g := buildTestGraph(t)
 
-	// route.ts file but imports express (not next/server or next).
-	addFileWithImports(g, "/project/src/routes.ts", "express")
+	// "routes.ts" (plural) does NOT match the handler_file_patterns "*/route.ts" (singular).
+	// The pattern scopes via path only — no framework_identifiers gate.
+	addFileWithImports(g, "/project/src/routes.ts", "next/server")
 	addFunctionWithCalls(g, "/project/src/routes.ts", "handler", "get")
 
 	violations := e.CheckFile(g, "/project/src/routes.ts", nil)
 	if findViolation(violations, "ts-nextjs-api-missing-auth") != nil {
-		t.Error("next.js pattern fired on non-next file (framework gate failure)")
+		t.Error("next.js pattern fired on routes.ts (plural) — handler_file_patterns must not match")
+	}
+}
+
+func TestTSFrameworks_Nextjs_TS_MinimalHandler_NoImports_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Minimal App Router handler: no imports at all (uses only built-in Response).
+	// Previously bypassed detection because framework_identifiers gate required next/server import.
+	// Now handler_file_patterns alone is the gate — this MUST fire.
+	addFileWithImports(g, "/project/app/api/users/route.ts") // no imports
+	addFunctionWithCalls(g, "/project/app/api/users/route.ts", "GET", "Response")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.ts", nil)
+	if findViolation(violations, "ts-nextjs-api-missing-auth") == nil {
+		t.Fatal("expected ts-nextjs-api-missing-auth on minimal handler with no imports, got none")
 	}
 }
 
@@ -973,6 +994,24 @@ func TestTSFrameworks_JS_Nextjs_MissingAuth_Fires_JsFile(t *testing.T) {
 	}
 }
 
+func TestTSFrameworks_JS_Nextjs_MinimalHandler_NoImports_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Minimal App Router JS handler: no imports. handler_file_patterns alone gates.
+	addFileWithImports(g, "/project/app/api/users/route.js") // no imports
+	addFunctionWithCalls(g, "/project/app/api/users/route.js", "GET", "Response")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.js", nil)
+	if findViolation(violations, "js-nextjs-api-missing-auth") == nil {
+		t.Fatal("expected js-nextjs-api-missing-auth on minimal JS handler with no imports, got none")
+	}
+}
+
 func TestTSFrameworks_JS_DirectDB_Fires_JsFile(t *testing.T) {
 	ps, err := LoadBuiltin()
 	if err != nil {
@@ -1094,7 +1133,12 @@ func TestTSFrameworks_PatternMetadata_AuthPatterns(t *testing.T) {
 		if p.Severity != SeverityCritical {
 			t.Errorf("%s: Severity = %q, want CRITICAL", id, p.Severity)
 		}
-		if len(p.Detection.FrameworkIdentifiers) == 0 {
+		// Next.js patterns intentionally have no FrameworkIdentifiers — the
+		// route.ts / pages/api/*.ts naming convention is Next.js-specific and
+		// serves as the sole gate (avoids false negatives on minimal handlers
+		// with no next/* imports). All other auth patterns require the gate.
+		isNextjs := p.Framework == "next.js"
+		if !isNextjs && len(p.Detection.FrameworkIdentifiers) == 0 {
 			t.Errorf("%s: no FrameworkIdentifiers (zero-false-positive gate missing)", id)
 		}
 	}
