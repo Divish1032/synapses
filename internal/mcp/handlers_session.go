@@ -1935,16 +1935,18 @@ func (s *Server) handleSessionInit(
 		if s.store != nil && synapseSessionID != "" {
 			if topEntities, err := s.store.GetTopExploredEntities(s.projectID, synapseSessionID, 2, 8); err == nil && len(topEntities) > 0 {
 				type exploredHint struct {
-					Entity     string `json:"entity"`
-					HitCount   int    `json:"hit_count"`
-					TopFinding string `json:"top_finding,omitempty"`
+					Entity       string `json:"entity"`
+					HitCount     int    `json:"hit_count"`
+					SessionCount int    `json:"session_count,omitempty"`
+					TopFinding   string `json:"top_finding,omitempty"`
 				}
 				hints := make([]exploredHint, 0, len(topEntities))
 				for _, e := range topEntities {
 					hints = append(hints, exploredHint{
-						Entity:     e.Entity,
-						HitCount:   e.HitCount,
-						TopFinding: e.TopFinding,
+						Entity:       e.Entity,
+						HitCount:     e.HitCount,
+						SessionCount: e.SessionCount,
+						TopFinding:   e.TopFinding,
 					})
 				}
 				briefing["previously_explored"] = map[string]interface{}{

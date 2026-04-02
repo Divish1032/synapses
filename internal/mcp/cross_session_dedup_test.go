@@ -233,6 +233,11 @@ func TestSessionInit_PreviouslyExplored_InBriefing(t *testing.T) {
 			if hitCount < 3 {
 				t.Errorf("AuthLogin hit_count: got %.0f, want >= 3", hitCount)
 			}
+			// All 3 hits come from the same "prior-sess" → session_count must be 1.
+			sessionCount, _ := m["session_count"].(float64)
+			if sessionCount != 1 {
+				t.Errorf("AuthLogin session_count: got %.0f, want 1", sessionCount)
+			}
 		}
 	}
 	if !found {
