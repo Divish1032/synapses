@@ -1,0 +1,107 @@
+{
+  "patterns": [
+    {
+      "id": "rust-actix-missing-auth",
+      "name": "Actix-web route registered without authentication middleware",
+      "language": "rust",
+      "framework": "actix-web",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A file using Actix-web registers HTTP routes but does not apply any authentication middleware. Actix-web applies middleware via .wrap() on the App, Scope, or Resource: App::new().wrap(HttpAuthentication::bearer(validator)). Authentication can also be applied per-scope using web::scope('/api').wrap(auth_middleware). This check fires when a file registers routes (via .route(), .service(), or HTTP method shortcuts) but calls no recognised authentication function. Note: request extractors that carry auth state (e.g. Identity, a custom AuthUser extractor) also count — if the file calls any matching auth function, this check will not fire.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["actix_web", "actix-web"],
+        "required_call_patterns": [
+          "Auth*", "authenticate*",
+          "JWT*", "jwt*",
+          "Bearer*",
+          "HttpAuthentication*",
+          "RequireAuth*",
+          "Authorize*", "authorize*",
+          "ValidateToken*", "VerifyToken*", "ParseToken*",
+          "Identity*",
+          "SessionMiddleware*", "CookieSession*",
+          "checkToken*", "check_token*",
+          "token_required*", "login_required*",
+          "require_auth*", "requires_auth*"
+        ],
+        "route_node_names": [
+          "route", "service",
+          "get", "post", "put", "delete", "patch", "head", "options"
+        ],
+        "middleware_node_names": ["wrap", "scope"],
+        "scope": "file"
+      },
+      "message": "File {file} registers Actix-web routes without calling any authentication middleware or auth extractor. {count}/{total} other file(s) in this package use auth. Apply .wrap(HttpAuthentication::bearer(validator)) on the App or Scope, or use per-route auth extractors.",
+      "tags": ["owasp-a01", "auth", "middleware", "actix-web", "production-critical"]
+    },
+    {
+      "id": "rust-axum-missing-auth",
+      "name": "Axum route registered without authentication middleware or extractor",
+      "language": "rust",
+      "framework": "axum",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A file using Axum registers HTTP routes but does not apply any authentication. Axum supports two auth patterns: (1) Tower middleware layers — Router::new().layer(auth_layer) where auth_layer is typically a ValidateRequest layer or a custom tower::Layer; (2) Extractor-based auth — handler functions receive a type implementing FromRequestParts that carries auth state (e.g. a custom Claims or AuthUser extractor). This check fires when a file registers routes via .route(), .nest(), or .merge() but calls no recognised authentication function. The framework gate fires only when 'axum' is imported.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["axum"],
+        "required_call_patterns": [
+          "Auth*", "authenticate*",
+          "JWT*", "jwt*",
+          "Bearer*",
+          "RequireAuth*", "require_auth*", "requires_auth*",
+          "Authorize*", "authorize*",
+          "ValidateToken*", "VerifyToken*", "ParseToken*",
+          "validate_token*", "verify_token*", "parse_token*",
+          "Claims*",
+          "AuthLayer*", "AuthMiddleware*",
+          "login_required*", "token_required*",
+          "check_token*", "checkToken*",
+          "from_request*", "extract_auth*"
+        ],
+        "route_node_names": [
+          "route", "nest", "nest_service", "merge"
+        ],
+        "middleware_node_names": ["layer", "route_layer"],
+        "scope": "file"
+      },
+      "message": "File {file} registers Axum routes without calling any authentication function or auth extractor. {count}/{total} other file(s) in this package use auth. Apply Router::new().layer(auth_middleware) for Tower-based auth, or add a FromRequestParts extractor to handler signatures for per-handler auth.",
+      "tags": ["owasp-a01", "auth", "middleware", "axum", "production-critical"]
+    },
+    {
+      "id": "rust-rocket-missing-auth",
+      "name": "Rocket route mounted without authentication fairing or guard",
+      "language": "rust",
+      "framework": "rocket",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A file using Rocket mounts routes but does not apply any authentication. Rocket provides two auth mechanisms: (1) Fairings (middleware) — applied via .attach(AuthFairing) on the Rocket instance before launch; (2) Request guards — handler function parameters that implement FromRequest (e.g. AuthToken, Claims, a custom User guard). This check fires when a file calls .mount() or .ignite() but calls no recognised auth function. Note: request guard types in handler signatures are typically represented as type references rather than function calls in the AST — use this finding as a prompt to review whether each mounted route requires authentication.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": ["rocket"],
+        "required_call_patterns": [
+          "Auth*", "authenticate*",
+          "JWT*", "jwt*",
+          "Bearer*",
+          "RequireAuth*", "require_auth*", "requires_auth*",
+          "Authorize*", "authorize*",
+          "ValidateToken*", "VerifyToken*", "ParseToken*",
+          "validate_token*", "verify_token*", "parse_token*",
+          "Fairing*", "fairing*",
+          "Guard*",
+          "Claims*",
+          "login_required*", "token_required*",
+          "check_token*", "checkToken*"
+        ],
+        "route_node_names": [
+          "mount"
+        ],
+        "middleware_node_names": ["attach", "manage"],
+        "scope": "file"
+      },
+      "message": "File {file} mounts Rocket routes without calling any authentication fairing or guard function. {count}/{total} other file(s) in this package use auth. Apply .attach(AuthFairing) for global auth, or add a request guard type parameter to each handler function that requires authentication.",
+      "tags": ["owasp-a01", "auth", "middleware", "rocket", "production-critical"]
+    }
+  ]
+}
