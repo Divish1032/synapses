@@ -224,6 +224,43 @@ func TestJavaFrameworks_Spring_MissingAuth_WithRestControllerImport_Fires(t *tes
 	}
 }
 
+func TestJavaFrameworks_Spring_MissingAuth_ResourceNamedSpring_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Some Spring projects name controllers *Resource.java — should still fire.
+	addFileWithImports(g, "/project/src/UserResource.java", "org.springframework.web.bind.annotation.RestController")
+	addFunctionWithCalls(g, "/project/src/UserResource.java", "getUser", "GetMapping")
+
+	violations := e.CheckFile(g, "/project/src/UserResource.java", nil)
+	if findViolation(violations, "java-spring-missing-auth") == nil {
+		t.Error("expected java-spring-missing-auth violation for Spring *Resource.java file with no auth")
+	}
+}
+
+func TestJavaFrameworks_Spring_MissingAuth_ApiPackage_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// A utility/error-handler file in an api/ package — NOT a controller name.
+	// */api/*.java was removed from handler_file_patterns to prevent CRITICAL false positives.
+	addFileWithImports(g, "/project/src/api/ApiErrorHandler.java", "org.springframework.web.bind.annotation")
+	addFunctionWithCalls(g, "/project/src/api/ApiErrorHandler.java", "handleError", "ExceptionHandler")
+
+	violations := e.CheckFile(g, "/project/src/api/ApiErrorHandler.java", nil)
+	if findViolation(violations, "java-spring-missing-auth") != nil {
+		t.Error("false positive: java-spring-missing-auth should not fire on api/ package file that is not a controller")
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Jakarta EE — missing authorization annotation
 // ──────────────────────────────────────────────────────────────────────────────

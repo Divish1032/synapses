@@ -40,8 +40,6 @@
           "*RestController.java",
           "*/controller/*.java",
           "*/controllers/*.java",
-          "*/api/*.java",
-          "*/rest/*.java",
           "*Resource.java",
           "*/resource/*.java",
           "*/resources/*.java"
