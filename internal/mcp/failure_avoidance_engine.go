@@ -264,7 +264,7 @@ func runFailurePatternExtraction(st *store.Store, projectID string) (int, error)
 		sampleApproach := truncate(sample.Approach, 200)
 		sampleReason := truncate(sample.FailureReason, 200)
 
-		text := failurePatternText(keyword, count, sampleReason)
+		text := failurePatternText(keyword, m.patternType, count, sampleReason)
 		fp := store.FailurePattern{
 			ID:              store.FailurePatternID(projectID, keyword),
 			ProjectID:       projectID,
@@ -298,13 +298,28 @@ func classifyLibraryType(tok string) string {
 }
 
 // failurePatternText returns the natural-language warning string for a failure
-// pattern. Format: "'<keyword>' was tried <N> time(s) and abandoned: <reason>."
-func failurePatternText(keyword string, count int, reason string) string {
+// pattern. The phrasing is adapted to the pattern type so each category reads
+// naturally:
+//
+//   - library / package / function: "'jwt-go' was tried 3 times and abandoned: reason."
+//   - error_pattern:                "'nil-pointer-dereference' caused 3 approaches to fail: reason."
+func failurePatternText(keyword, patternType string, count int, reason string) string {
 	times := "times"
 	if count == 1 {
 		times = "time"
 	}
 	r := strings.TrimRight(strings.TrimSpace(reason), ".")
+
+	if patternType == "error_pattern" {
+		// "Was tried and abandoned" is semantically wrong for runtime errors —
+		// agents don't try nil pointer dereferences, they encounter them.
+		if r == "" {
+			return fmt.Sprintf("'%s' caused %d %s to fail.", keyword, count, times)
+		}
+		return fmt.Sprintf("'%s' caused %d approach(es) to fail: %s.", keyword, count, r)
+	}
+
+	// library, package, function — all represent something the agent actively tried.
 	if r == "" {
 		return fmt.Sprintf("'%s' was tried %d %s and abandoned.", keyword, count, times)
 	}

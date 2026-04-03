@@ -16,10 +16,10 @@ import (
 
 // ── failurePatternText ────────────────────────────────────────────────────────
 
-// TestFailurePatternText_withReason verifies the NL text format when a reason
-// is present.
+// TestFailurePatternText_withReason verifies the NL text format for a library
+// pattern when a reason is present.
 func TestFailurePatternText_withReason(t *testing.T) {
-	text := failurePatternText("jwt-go", 3, "incompatible with existing middleware")
+	text := failurePatternText("jwt-go", "library", 3, "incompatible with existing middleware")
 	if !strings.Contains(text, "jwt-go") {
 		t.Errorf("text %q does not contain keyword", text)
 	}
@@ -32,15 +32,19 @@ func TestFailurePatternText_withReason(t *testing.T) {
 	if !strings.HasSuffix(text, ".") {
 		t.Errorf("text %q should end with period", text)
 	}
+	// Library/package/function phrasing.
+	if !strings.Contains(text, "tried") {
+		t.Errorf("library text %q should contain 'tried'", text)
+	}
 }
 
 // TestFailurePatternText_withoutReason verifies graceful handling of empty reason.
 func TestFailurePatternText_withoutReason(t *testing.T) {
-	text := failurePatternText("fasthttp", 2, "")
+	text := failurePatternText("chi-router", "package", 2, "")
 	if text == "" {
 		t.Error("expected non-empty text")
 	}
-	if !strings.Contains(text, "fasthttp") {
+	if !strings.Contains(text, "chi-router") {
 		t.Errorf("text %q does not contain keyword", text)
 	}
 	if !strings.HasSuffix(text, ".") {
@@ -50,13 +54,51 @@ func TestFailurePatternText_withoutReason(t *testing.T) {
 
 // TestFailurePatternText_singularPlural verifies "time" vs "times" grammar.
 func TestFailurePatternText_singularPlural(t *testing.T) {
-	one := failurePatternText("pkg", 1, "error")
+	one := failurePatternText("pkg", "package", 1, "error")
 	if !strings.Contains(one, "1 time ") || strings.Contains(one, "1 times") {
 		t.Errorf("count 1 should use 'time', got %q", one)
 	}
-	two := failurePatternText("pkg", 2, "error")
+	two := failurePatternText("pkg", "package", 2, "error")
 	if !strings.Contains(two, "2 times") {
 		t.Errorf("count 2 should use 'times', got %q", two)
+	}
+}
+
+// TestFailurePatternText_errorPatternPhrasing verifies that error_pattern
+// entries use "caused N approach(es) to fail" instead of "was tried and abandoned".
+func TestFailurePatternText_errorPatternPhrasing(t *testing.T) {
+	text := failurePatternText("nil-pointer-dereference", "error_pattern", 3, "accessing nil user struct")
+	if strings.Contains(text, "tried") || strings.Contains(text, "abandoned") {
+		t.Errorf("error_pattern text should not say 'tried/abandoned', got %q", text)
+	}
+	if !strings.Contains(text, "caused") || !strings.Contains(text, "fail") {
+		t.Errorf("error_pattern text should say 'caused...to fail', got %q", text)
+	}
+	if !strings.Contains(text, "nil-pointer-dereference") {
+		t.Errorf("text %q missing keyword", text)
+	}
+	if !strings.Contains(text, "accessing nil user struct") {
+		t.Errorf("text %q missing reason", text)
+	}
+	if !strings.HasSuffix(text, ".") {
+		t.Errorf("text %q should end with period", text)
+	}
+}
+
+// TestFailurePatternText_errorPatternNoReason verifies error_pattern with empty reason.
+func TestFailurePatternText_errorPatternNoReason(t *testing.T) {
+	text := failurePatternText("connection-refused", "error_pattern", 2, "")
+	if text == "" {
+		t.Error("expected non-empty text")
+	}
+	if strings.Contains(text, "tried") {
+		t.Errorf("error_pattern text should not say 'tried', got %q", text)
+	}
+	if !strings.Contains(text, "connection-refused") {
+		t.Errorf("text %q missing keyword", text)
+	}
+	if !strings.HasSuffix(text, ".") {
+		t.Errorf("text %q should end with period", text)
 	}
 }
 
