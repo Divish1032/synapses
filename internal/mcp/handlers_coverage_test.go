@@ -883,7 +883,9 @@ func newServerWithMultipleNodes(t *testing.T) *Server {
 	id2 := g.MakeNodeID("pkg/core/helper.go", "SharedHelper")
 	g.AddNode(&graph.Node{ID: id1, Name: "SharedHelper", Type: graph.NodeFunction, File: "pkg/util/helper.go", Package: "util", Line: 1})
 	g.AddNode(&graph.Node{ID: id2, Name: "SharedHelper", Type: graph.NodeFunction, File: "pkg/core/helper.go", Package: "core", Line: 1})
-	return New(g, cfg, st)
+	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
+	return srv
 }
 
 func TestHandleGetContext_Disambiguation(t *testing.T) {
@@ -1140,6 +1142,7 @@ func TestHandleVerifyImplementation_WithFreshnessWarning(t *testing.T) {
 	g.SetRoot(root)
 	cfg, _ := config.Load(root)
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	// Query with relative path so repoRoot join is exercised.
 	res, err := s.handleVerifyImplementation(ctx, callTool(map[string]any{
@@ -1159,6 +1162,7 @@ func TestHandleVerifyImplementation_SignatureImpact_ExportedFuncWithCallers(t *t
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	targetID := g.MakeNodeID("pkg/api/api.go", "HandleRequest")
 
@@ -1250,6 +1254,7 @@ func TestHandleVerifyImplementation_SignatureImpact_UnexportedNoImpact(t *testin
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	targetID := g.MakeNodeID("pkg/api/api.go", "internalHelper")
 
@@ -1294,6 +1299,7 @@ func TestHandleVerifyImplementation_SignatureImpact_UnexportedWithTestCaller(t *
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	targetID := g.MakeNodeID("pkg/mcp/explain.go", "buildExplanation")
 	callerID := g.MakeNodeID("pkg/mcp/explain_test.go", "TestBuildExplanation")
@@ -1389,6 +1395,7 @@ func TestHandleVerifyImplementation_SignatureImpact_ExportedStructWithCallers(t 
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	structID := g.MakeNodeID("pkg/store/store.go", "Config")
 	callerID := g.MakeNodeID("pkg/main/main.go", "Run")
@@ -1450,6 +1457,7 @@ func TestHandleVerifyImplementation_SignatureImpact_ZeroCallerNoEntry(t *testing
 	g := graph.New("test-repo")
 	cfg, _ := config.Load(t.TempDir())
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	loneID := g.MakeNodeID("pkg/util/util.go", "LoneFunc")
 
@@ -1570,6 +1578,7 @@ func TestHandleSearch_WithRootPrefix(t *testing.T) {
 	g.AddNode(&graph.Node{ID: id, Name: "HandleRequest", Type: graph.NodeFunction, File: "pkg/api/handler.go", Package: "api", Line: 1})
 	cfg, _ := config.Load(root)
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handleSearch(ctx, callTool(map[string]any{
 		"query": "HandleRequest",
@@ -1934,6 +1943,7 @@ func TestHandleGetContext_WithApplicableRules(t *testing.T) {
 	loginID := g.MakeNodeID("pkg/auth/auth.go", "AuthLogin")
 	g.AddNode(&graph.Node{ID: loginID, Name: "AuthLogin", Type: graph.NodeFunction, File: "pkg/auth/auth.go", Package: "auth", Line: 1})
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
@@ -1978,6 +1988,7 @@ func TestHandleGetContext_WithConstitution(t *testing.T) {
 	loginID := g.MakeNodeID("pkg/auth/auth.go", "AuthLogin")
 	g.AddNode(&graph.Node{ID: loginID, Name: "AuthLogin", Type: graph.NodeFunction, File: "pkg/auth/auth.go", Package: "auth", Line: 1})
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handleGetContext(ctx, callTool(map[string]any{
 		"entity": "AuthLogin",
@@ -2160,6 +2171,7 @@ func TestHandlePrepareContext_AddWithRulesAndConstitution(t *testing.T) {
 	loginID := g.MakeNodeID("pkg/auth/auth.go", "AuthLogin")
 	g.AddNode(&graph.Node{ID: loginID, Name: "AuthLogin", Type: graph.NodeFunction, File: "pkg/auth/auth.go", Package: "auth", Exported: true, Line: 1})
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handlePrepareContext(ctx, callTool(map[string]any{
 		"intent": "add",
@@ -2279,6 +2291,7 @@ func TestHandleSessionInit_WithConstitution(t *testing.T) {
 	cfg.Constitution.Principles = []string{"No CGo", "All handlers fail-silent"}
 	cfg.Constitution.InjectInSessionInit = true
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "const-agent",
@@ -2302,6 +2315,7 @@ func TestHandleSessionInit_WithAgentConstraints(t *testing.T) {
 		RuleType:    "agent",
 	})
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "constraint-agent",
@@ -2649,6 +2663,7 @@ func TestHandleSessionInit_WithPendingTasks(t *testing.T) {
 		t.Fatalf("config.Load: %v", err)
 	}
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	// Create a task so session_init returns a non-empty pending section.
 	_, _, _ = st.CreatePlan("Test plan", "", "task-agent", []store.TaskInput{{Title: "Fix auth bug"}})
@@ -2673,6 +2688,7 @@ func TestHandleSessionInit_NoStore(t *testing.T) {
 	}
 	// No store — exercises the pendingSection==nil path.
 	s := New(g, cfg, nil)
+	t.Cleanup(func() { s.Close() })
 
 	res, err := s.handleSessionInit(ctx, callTool(map[string]any{
 		"agent_id": "no-store-agent",
@@ -2755,6 +2771,7 @@ func TestHandleGetContext_IncludeInferred_FiltersRouteNodes(t *testing.T) {
 	}
 	st := openMCPTestStore(t)
 	s := New(g, cfg, st)
+	t.Cleanup(func() { s.Close() })
 
 	// Add a handler function.
 	handlerID := g.MakeNodeID("pkg/api/handler.go", "GetUsers")

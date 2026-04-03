@@ -261,7 +261,9 @@ func newAdaptiveTestServer(t *testing.T) *Server {
 		ID: id, Type: graph.NodeFunction,
 		Name: "AuthService", File: "pkg/auth/auth.go", Line: 1, Package: "auth",
 	})
-	return New(g, cfg, st)
+	srv := New(g, cfg, st)
+	t.Cleanup(func() { srv.Close() })
+	return srv
 }
 
 func TestHandleGetContext_AdaptiveHint_SetAfterUnhelpfulFeedback(t *testing.T) {
