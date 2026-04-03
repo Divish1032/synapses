@@ -83,3 +83,4 @@ synapses-taskbench.taskbench-synapses.json
 
 # SynapsesBench (standalone benchmark module)
 synapses-bench/
+memory/
