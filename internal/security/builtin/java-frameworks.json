@@ -1,0 +1,147 @@
+{
+  "patterns": [
+    {
+      "id": "java-spring-missing-auth",
+      "name": "Spring controller registered without method-level security annotation",
+      "language": "java",
+      "framework": "spring",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A Spring MVC or Spring Boot controller file does not apply any method-level or class-level security annotation. Spring Security's primary per-endpoint auth mechanisms are @PreAuthorize (SpEL expression, e.g. hasRole('ADMIN')), @Secured (role names), and @RolesAllowed (JSR-250). Without these, endpoints are accessible to any authenticated — or even unauthenticated — user depending on your SecurityFilterChain configuration. This check fires on controller files (matching *Controller.java, */controller/*.java, etc.) that import Spring Web annotations but call no recognised security annotation. NOTE: if your project uses a global SecurityFilterChain that restricts all endpoints via .anyRequest().authenticated(), this is an informational finding. Use @PermitAll on intentionally public endpoints to suppress.",
+      "detection": {
+        "check_type": "missing_annotation",
+        "framework_identifiers": [
+          "org.springframework.web.bind.annotation",
+          "org.springframework.web.bind.annotation.RestController",
+          "org.springframework.web.bind.annotation.Controller",
+          "org.springframework.web.bind.annotation.RequestMapping",
+          "org.springframework.web.bind.annotation.GetMapping",
+          "org.springframework.web.bind.annotation.PostMapping",
+          "org.springframework.web.bind.annotation.PutMapping",
+          "org.springframework.web.bind.annotation.DeleteMapping",
+          "org.springframework.stereotype.Controller",
+          "org.springframework.web.bind.annotation.*"
+        ],
+        "annotation_patterns": [
+          "PreAuthorize*", "*@PreAuthorize*",
+          "Secured*", "*@Secured*",
+          "RolesAllowed*", "*@RolesAllowed*",
+          "PermitAll*", "*@PermitAll*",
+          "DenyAll*", "*@DenyAll*",
+          "SecurityRequirement*",
+          "RequireRole*", "RequiresRole*",
+          "hasRole*", "hasAnyRole*", "hasAuthority*", "hasAnyAuthority*",
+          "isAuthenticated*", "isFullyAuthenticated*",
+          "Authenticated*", "LoginRequired*",
+          "CheckSecurity*"
+        ],
+        "handler_file_patterns": [
+          "*Controller.java",
+          "*RestController.java",
+          "*/controller/*.java",
+          "*/controllers/*.java",
+          "*/api/*.java",
+          "*/rest/*.java",
+          "*Resource.java",
+          "*/resource/*.java",
+          "*/resources/*.java"
+        ],
+        "scope": "file"
+      },
+      "message": "Spring controller file {file} does not call any security annotation (@PreAuthorize, @Secured, @RolesAllowed). All endpoints in this file may be accessible without proper authorization checks. Apply @PreAuthorize(\"hasRole('ROLE')\") to each handler method, or add a class-level @Secured annotation. If global auth is enforced via SecurityFilterChain, add @PermitAll to intentionally public endpoints.",
+      "tags": ["owasp-a01", "auth", "spring", "spring-boot", "production-critical"]
+    },
+    {
+      "id": "java-jakartaee-missing-auth",
+      "name": "Jakarta EE JAX-RS resource without authorization annotation",
+      "language": "java",
+      "framework": "jakartaee",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A Jakarta EE (JAX-RS) resource class does not apply any authorization annotation. JAX-RS security is declared via JSR-250 annotations: @RolesAllowed specifies which roles may call the endpoint, @PermitAll explicitly grants all users access (including unauthenticated), and @DenyAll explicitly blocks all access. Without any annotation, endpoint access is governed by the container's default security policy — which is typically to allow all authenticated users, or in some containers, unauthenticated access. This check fires on JAX-RS resource files (importing jakarta.ws.rs or javax.ws.rs) that lack any recognized authorization annotation. Note: this check covers both jakarta.ws.rs (Jakarta EE 9+) and javax.ws.rs (Jakarta EE 8 / Java EE) namespaces.",
+      "detection": {
+        "check_type": "missing_annotation",
+        "framework_identifiers": [
+          "jakarta.ws.rs",
+          "jakarta.ws.rs.Path",
+          "jakarta.ws.rs.GET",
+          "jakarta.ws.rs.POST",
+          "jakarta.ws.rs.PUT",
+          "jakarta.ws.rs.DELETE",
+          "jakarta.ws.rs.core",
+          "jakarta.ws.rs.*",
+          "javax.ws.rs",
+          "javax.ws.rs.Path",
+          "javax.ws.rs.GET",
+          "javax.ws.rs.POST",
+          "javax.ws.rs.*"
+        ],
+        "annotation_patterns": [
+          "RolesAllowed*", "*@RolesAllowed*",
+          "PermitAll*", "*@PermitAll*",
+          "DenyAll*", "*@DenyAll*",
+          "Authenticated*", "*@Authenticated*",
+          "LoginConfig*",
+          "RequireRole*", "RequiresRole*",
+          "hasRole*", "isAuthenticated*",
+          "CheckSecurity*"
+        ],
+        "handler_file_patterns": [
+          "*Resource.java",
+          "*Controller.java",
+          "*/resource/*.java",
+          "*/resources/*.java",
+          "*/api/*.java",
+          "*/rest/*.java",
+          "*/endpoint/*.java",
+          "*/endpoints/*.java",
+          "*/ws/*.java"
+        ],
+        "scope": "file"
+      },
+      "message": "Jakarta EE JAX-RS resource file {file} does not declare any authorization annotation (@RolesAllowed, @PermitAll, or @DenyAll). Without explicit authorization, endpoint access depends on container defaults. Apply @RolesAllowed({\"role\"}) to restrict access, or @PermitAll for intentionally public endpoints.",
+      "tags": ["owasp-a01", "auth", "jakarta-ee", "jax-rs", "production-critical"]
+    },
+    {
+      "id": "java-spring-direct-repository",
+      "name": "Spring controller directly accesses repository (bypasses service layer)",
+      "language": "java",
+      "framework": "spring",
+      "pattern_type": "layer_violation",
+      "severity": "MEDIUM",
+      "description": "A Spring controller class directly imports and uses a repository (JPA repository, Spring Data repository, or DAO) instead of delegating to a service layer. The standard Spring layered architecture is: Controller → Service → Repository → Database. Controllers are responsible for HTTP translation; business logic and data access belong in the service and repository layers respectively. Direct controller-to-repository access couples the HTTP layer to the data layer, makes the controller harder to unit test (requires a database or mock repository), and bypasses any transaction management or business rules in the service layer. This check fires when a controller file imports a class whose name ends in Repository or resides in a repository or dao package. Note: some simple CRUD microservices intentionally skip the service layer — treat this as a prompt to review, not a definitive violation.",
+      "detection": {
+        "check_type": "direct_import",
+        "framework_identifiers": [
+          "org.springframework.web.bind.annotation",
+          "org.springframework.web.bind.annotation.RestController",
+          "org.springframework.web.bind.annotation.Controller",
+          "org.springframework.stereotype.Controller",
+          "org.springframework.web.bind.annotation.*"
+        ],
+        "handler_file_patterns": [
+          "*Controller.java",
+          "*RestController.java",
+          "*/controller/*.java",
+          "*/controllers/*.java",
+          "*/api/*.java",
+          "*/rest/*.java"
+        ],
+        "forbidden_import_patterns": [
+          "*.repository.*",
+          "*.repositories.*",
+          "*.dao.*",
+          "*Repository",
+          "*Dao",
+          "*DAO",
+          "org.springframework.data.*",
+          "javax.persistence.*",
+          "jakarta.persistence.*"
+        ],
+        "scope": "file"
+      },
+      "message": "Spring controller file {file} directly imports repository or data-access class '{target}'. Controllers should delegate data access to a service layer: Controller → Service → Repository → Database. Inject a @Service instead of the repository directly.",
+      "tags": ["architecture", "layer-violation", "spring", "testability"]
+    }
+  ]
+}
