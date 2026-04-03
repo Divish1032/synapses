@@ -638,27 +638,18 @@ func checkLayerMapping(g *graph.Graph, p SecurityPattern) []Violation {
 			dstLayerName := layers[dstIdx].Name
 
 			// Build natural-language violation.
-			// Find the middle (skipped) layer name for the evidence message.
-			skippedLayer := ""
-			if srcIdx+1 < len(layers) {
-				skippedLayer = layers[srcIdx+1].Name
-			}
+			// srcIdx+1 < len(layers) is guaranteed: the violation condition
+			// dstIdx > srcIdx+1 requires dstIdx ≥ srcIdx+2, and dstIdx is a
+			// valid layer index (< len(layers)), so srcIdx+1 < len(layers).
+			skippedLayer := layers[srcIdx+1].Name
 
-			var evidence string
 			base := filepath.Base(filePath)
-			if skippedLayer != "" {
-				evidence = fmt.Sprintf(
-					"%s is in the %s layer but directly imports %q which is in the %s layer, "+
-						"skipping the %s layer. Route this access through the %s layer instead.",
-					base, srcLayerName, importPath, dstLayerName,
-					skippedLayer, skippedLayer,
-				)
-			} else {
-				evidence = fmt.Sprintf(
-					"%s is in the %s layer but directly imports %q which is in the %s layer.",
-					base, srcLayerName, importPath, dstLayerName,
-				)
-			}
+			evidence := fmt.Sprintf(
+				"%s is in the %s layer but directly imports %q which is in the %s layer, "+
+					"skipping the %s layer. Route this access through the %s layer instead.",
+				base, srcLayerName, importPath, dstLayerName,
+				skippedLayer, skippedLayer,
+			)
 
 			msg := fillTemplate(p.Message, map[string]string{
 				"file":        filePath,
