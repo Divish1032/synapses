@@ -1795,8 +1795,11 @@ func (s *Server) handleSessionInit(
 				if learned, err := s.store.GetProjectConventions(s.projectID, 0.6); err == nil {
 					added := 0
 					for _, c := range learned {
-						if added >= maxLearnedConventions || c.Text == "" {
+						if added >= maxLearnedConventions {
 							break
+						}
+						if c.Text == "" {
+							continue // skip corrupt/empty entries; keep processing
 						}
 						text := c.Text
 						if rs := []rune(text); len(rs) > 120 {
