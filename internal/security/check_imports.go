@@ -165,6 +165,8 @@ func registryLangLabel(lang string) string {
 		return "PyPI"
 	case "rust":
 		return "crates.io"
+	case "java":
+		return "Maven Central"
 	default:
 		return lang
 	}

@@ -408,7 +408,9 @@ func TestRegistryLangLabel(t *testing.T) {
 		{"javascript", "npm"},
 		{"python", "PyPI"},
 		{"rust", "crates.io"},
-		{"java", "java"},      // unsupported: returns lang as-is
+		{"java", "Maven Central"},
+		{"Java", "Maven Central"},
+		{"ruby", "ruby"}, // unsupported: returns lang as-is
 	}
 	for _, tc := range cases {
 		got := registryLangLabel(tc.lang)
@@ -476,5 +478,192 @@ func TestCheckImports_NPMSubPath_NoViolation(t *testing.T) {
 	violations := e.CheckImports(g, "/project/util.ts")
 	if len(violations) != 0 {
 		t.Errorf("npm sub-path imports should resolve to package name: %v", violations)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Java — CheckImports tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+// buildJavaRegistryEngine creates an Engine with a small Java registry for tests.
+func buildJavaRegistryEngine(t *testing.T) *Engine {
+	t.Helper()
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	r := NewPackageRegistry()
+	// Include existing languages so cross-language tests work.
+	_ = r.AddPackages(regLangNPM, []byte("express\n"))
+	_ = r.AddPackages(regLangPyPI, []byte("flask\n"))
+	// Java registry with curated prefixes.
+	javaData := []byte(`
+org.springframework
+com.fasterxml.jackson
+org.hibernate
+lombok
+com.google.guava
+org.junit
+io.netty
+jakarta
+org.slf4j
+ch.qos.logback
+org.mockito
+`)
+	_ = r.AddPackages(regLangJava, javaData)
+	return NewEngine(ps).WithRegistry(r)
+}
+
+func TestCheckImports_Java_KnownPackages_NoViolation(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	// Known packages: stdlib + known registry prefixes
+	addFileWithImports(g, "/project/MyService.java",
+		"java.util.List",                              // JDK stdlib
+		"java.lang.String",                            // JDK stdlib
+		"javax.crypto.Cipher",                         // JDK stdlib
+		"org.springframework.boot.SpringApplication",  // prefix match: org.springframework
+		"com.fasterxml.jackson.databind.ObjectMapper", // prefix match: com.fasterxml.jackson
+		"lombok.Data",                                 // prefix match: lombok
+		"jakarta.persistence.Entity",                  // prefix match: jakarta
+		"org.slf4j.Logger",                            // prefix match: org.slf4j
+	)
+
+	violations := e.CheckImports(g, "/project/MyService.java")
+	if len(violations) != 0 {
+		t.Errorf("known Java imports: expected 0 violations, got %d: %v", len(violations), violations)
+	}
+}
+
+func TestCheckImports_Java_JDKStdlib_NoViolation(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/Utils.java",
+		"java.util.ArrayList",
+		"java.io.BufferedReader",
+		"java.nio.file.Paths",
+		"java.time.LocalDateTime",
+		"javax.net.ssl.SSLContext",
+		"sun.misc.Unsafe",
+		"org.w3c.dom.Document",
+		"org.xml.sax.SAXParser",
+	)
+
+	violations := e.CheckImports(g, "/project/Utils.java")
+	if len(violations) != 0 {
+		t.Errorf("JDK stdlib imports should not fire: %v", violations)
+	}
+}
+
+func TestCheckImports_Java_UnknownPackage_WithSuggestion(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	// "com.fasterxml.jakson" is a typo of "com.fasterxml.jackson"
+	addFileWithImports(g, "/project/Config.java",
+		"org.springframework.boot.SpringApplication",
+		"com.fasterxml.jakson.databind.ObjectMapper", // typo: jakson
+	)
+
+	violations := e.CheckImports(g, "/project/Config.java")
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 violation (com.fasterxml.jakson.*), got %d: %v", len(violations), violations)
+	}
+	v := violations[0]
+	if v.PatternID != "unknown-package-maven-central" {
+		t.Errorf("PatternID = %q, want %q", v.PatternID, "unknown-package-maven-central")
+	}
+	if v.Severity != SeverityHigh {
+		t.Errorf("Severity = %q, want HIGH", v.Severity)
+	}
+	if !strings.Contains(v.Message, "com.fasterxml.jackson") {
+		t.Errorf("Message should suggest com.fasterxml.jackson, got: %q", v.Message)
+	}
+	if !strings.Contains(strings.ToLower(v.Message), "did you mean") {
+		t.Errorf("Message should contain 'did you mean', got: %q", v.Message)
+	}
+	if !strings.Contains(v.Message, "Maven Central") {
+		t.Errorf("Message should mention Maven Central, got: %q", v.Message)
+	}
+}
+
+func TestCheckImports_Java_UnknownPackage_NoSuggestion(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	// Completely hallucinated package
+	addFileWithImports(g, "/project/Fake.java", "com.example.totallyhallucinatedpackage.FakeClass")
+
+	violations := e.CheckImports(g, "/project/Fake.java")
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(violations))
+	}
+	v := violations[0]
+	if v.PatternID != "unknown-package-maven-central" {
+		t.Errorf("PatternID = %q, want %q", v.PatternID, "unknown-package-maven-central")
+	}
+	if strings.Contains(v.Message, "did you mean") {
+		t.Errorf("should not have suggestion for completely different name, got: %q", v.Message)
+	}
+}
+
+func TestCheckImports_Java_MixedKnownUnknown(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	// Mix of stdlib, known, and unknown
+	addFileWithImports(g, "/project/Service.java",
+		"java.util.Map",                                  // known: JDK stdlib
+		"org.springframework.stereotype.Service",         // known: registry prefix
+		"com.google.guava2.collect.ImmutableList",        // unknown: typo (guava2 not in registry)
+		"io.unknown.fake.Library",                        // unknown: no match
+	)
+
+	violations := e.CheckImports(g, "/project/Service.java")
+	if len(violations) != 2 {
+		t.Fatalf("expected 2 violations, got %d: %v", len(violations), violations)
+	}
+	for _, v := range violations {
+		if v.PatternID != "unknown-package-maven-central" {
+			t.Errorf("expected unknown-package-maven-central, got %q", v.PatternID)
+		}
+	}
+}
+
+func TestCheckImports_Java_SlopsquattingGuava(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	// ROADMAP slopsquatting example: "com.google.guava2" instead of "com.google.guava"
+	addFileWithImports(g, "/project/App.java", "com.google.guava2.collect.ImmutableList")
+
+	violations := e.CheckImports(g, "/project/App.java")
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 violation for guava2, got %d", len(violations))
+	}
+	v := violations[0]
+	// Should detect AND suggest the correct package
+	if !strings.Contains(v.Message, "com.google.guava") {
+		t.Errorf("Message should suggest com.google.guava, got: %q", v.Message)
+	}
+}
+
+func TestCheckImports_Java_DotBoundaryExact(t *testing.T) {
+	// "org.spring" must NOT match registry entry "org.springframework"
+	// The dot-boundary rule: prefix must end at a dot, not in the middle of a component.
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/Bad.java", "org.spring.SomeClass")
+
+	violations := e.CheckImports(g, "/project/Bad.java")
+	if len(violations) != 1 {
+		t.Fatalf("org.spring should NOT be known (not a dot-boundary prefix of org.springframework), got %d violations: %v", len(violations), violations)
+	}
+}
+
+func TestCheckImports_Java_VendoredFile_Skipped(t *testing.T) {
+	e := buildJavaRegistryEngine(t)
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/vendor/legacy/Old.java", "com.totally.fake.Package")
+
+	violations := e.CheckImports(g, "/project/vendor/legacy/Old.java")
+	if len(violations) != 0 {
+		t.Errorf("vendor files should be skipped: %v", violations)
 	}
 }

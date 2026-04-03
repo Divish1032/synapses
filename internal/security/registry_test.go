@@ -626,6 +626,11 @@ func TestLoadBuiltinRegistry(t *testing.T) {
 		{"rust", "tokio"},
 		{"go", "github.com/gin-gonic/gin"},
 		{"go", "github.com/go-chi/chi/v5"},
+		// Java — spot-check a few well-known libraries
+		{"java", "org.springframework.boot.SpringApplication"},
+		{"java", "com.fasterxml.jackson.databind.ObjectMapper"},
+		{"java", "lombok.Data"},
+		{"java", "jakarta.persistence.Entity"},
 	}
 	for _, c := range wellKnown {
 		if !r.IsKnown(c.lang, c.pkg) {
@@ -658,6 +663,287 @@ func TestIsVendoredPath(t *testing.T) {
 		got := isVendoredPath(tc.path)
 		if got != tc.want {
 			t.Errorf("isVendoredPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// isJavaStdlib
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestIsJavaStdlib(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		// Core JDK packages — always known
+		{"java.lang.String", true},
+		{"java.util.List", true},
+		{"java.io.File", true},
+		{"java.net.URL", true},
+		{"java.nio.file.Path", true},
+		{"java.time.LocalDate", true},
+		{"java.math.BigDecimal", true},
+		{"java.security.MessageDigest", true},
+		{"java.sql.Connection", true},
+		// javax.* — JDK internal (crypto, naming, etc.)
+		{"javax.crypto.Cipher", true},
+		{"javax.naming.Context", true},
+		{"javax.net.ssl.SSLContext", true},
+		// sun.* and com.sun.* — JDK internal
+		{"sun.misc.Unsafe", true},
+		{"com.sun.net.httpserver.HttpServer", true},
+		{"com.sun.jndi.ldap.LdapClient", true},
+		// jdk.* — Java 9+ internal modules
+		{"jdk.internal.misc.Unsafe", true},
+		// W3C DOM and SAX — shipped with JDK
+		{"org.w3c.dom.Document", true},
+		{"org.w3c.dom.Element", true},
+		{"org.xml.sax.SAXParser", true},
+		{"org.xml.sax.helpers.DefaultHandler", true},
+		{"org.ietf.jgss.GSSContext", true},
+		// Third-party packages — NOT stdlib
+		{"org.springframework.boot.SpringApplication", false},
+		{"com.fasterxml.jackson.databind.ObjectMapper", false},
+		{"jakarta.persistence.Entity", false}, // Jakarta EE is NOT JDK stdlib
+		{"javax.persistence.Entity", false},   // old JEE javax.persistence (not JDK)
+		{"javax.servlet.http.HttpServlet", false}, // old JEE javax.servlet (not JDK)
+		{"org.hibernate.Session", false},
+		{"lombok.Data", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		got := isJavaStdlib(tc.path)
+		if got != tc.want {
+			t.Errorf("isJavaStdlib(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// javaImportKnownByPrefix
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestJavaImportKnownByPrefix(t *testing.T) {
+	pkgs := map[string]struct{}{
+		"org.springframework":      {},
+		"com.fasterxml.jackson":    {},
+		"org.hibernate":            {},
+		"lombok":                   {},
+	}
+	cases := []struct {
+		imp  string
+		want bool
+	}{
+		// Exact match
+		{"org.springframework", true},
+		{"lombok", true},
+		// Prefix match: import extends a known prefix
+		{"org.springframework.boot.SpringApplication", true},
+		{"org.springframework.security.core.Authentication", true},
+		{"com.fasterxml.jackson.databind.ObjectMapper", true},
+		{"com.fasterxml.jackson.core.JsonParser", true},
+		{"org.hibernate.Session", true},
+		{"lombok.Data", true},
+		{"lombok.extern.slf4j.Slf4j", true},
+		// NOT a prefix match: "org.spring" is NOT a prefix of "org.springframework"
+		{"org.spring", false},
+		// Completely unknown
+		{"com.example.MyClass", false},
+		{"io.unknown.Library", false},
+		// Dot-boundary matters: "org.springfr" is NOT a prefix of "org.springframework"
+		{"org.springfr", false},
+	}
+	for _, tc := range cases {
+		got := javaImportKnownByPrefix(pkgs, tc.imp)
+		if got != tc.want {
+			t.Errorf("javaImportKnownByPrefix(%q) = %v, want %v", tc.imp, got, tc.want)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// javaImportPrefix
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestJavaImportPrefix(t *testing.T) {
+	cases := []struct {
+		imp   string
+		depth int
+		want  string
+	}{
+		// Normal cases
+		{"com.google.guava2.collection.ImmutableList", 3, "com.google.guava2"},
+		{"org.springframework.boot.App", 2, "org.springframework"},
+		{"org.springframework.boot.App", 1, "org"},
+		{"com.fasterxml.jackson.databind.ObjectMapper", 3, "com.fasterxml.jackson"},
+		// Fewer components than depth: return full import
+		{"lombok.Data", 5, "lombok.Data"},
+		{"lombok", 3, "lombok"},
+		// Exact depth
+		{"org.springframework", 2, "org.springframework"},
+		// Single component
+		{"lombok", 1, "lombok"},
+		{"lombok.Data", 1, "lombok"},
+		// Depth 0
+		{"com.example.Foo", 0, "com.example.Foo"},
+		// Empty
+		{"", 2, ""},
+	}
+	for _, tc := range cases {
+		got := javaImportPrefix(tc.imp, tc.depth)
+		if got != tc.want {
+			t.Errorf("javaImportPrefix(%q, %d) = %q, want %q", tc.imp, tc.depth, got, tc.want)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PackageRegistry.IsKnown — Java
+// ──────────────────────────────────────────────────────────────────────────────
+
+func buildJavaTestRegistry(t *testing.T) *PackageRegistry {
+	t.Helper()
+	r := NewPackageRegistry()
+	data := []byte(`
+org.springframework
+com.fasterxml.jackson
+org.hibernate
+lombok
+com.google.guava
+org.junit
+io.netty
+jakarta
+`)
+	if err := r.AddPackages(regLangJava, data); err != nil {
+		t.Fatalf("AddPackages java: %v", err)
+	}
+	return r
+}
+
+func TestPackageRegistry_IsKnown_Java(t *testing.T) {
+	r := buildJavaTestRegistry(t)
+
+	cases := []struct {
+		imp  string
+		want bool
+	}{
+		// JDK stdlib — always known
+		{"java.lang.String", true},
+		{"java.util.ArrayList", true},
+		{"javax.crypto.Cipher", true},
+		{"sun.misc.Unsafe", true},
+		{"org.w3c.dom.Document", true},
+		// Exact match to registry entry
+		{"org.springframework", true},
+		{"lombok", true},
+		// Prefix match: import extends a known registry entry
+		{"org.springframework.boot.SpringApplication", true},
+		{"org.springframework.security.core.Authentication", true},
+		{"com.fasterxml.jackson.databind.ObjectMapper", true},
+		{"org.hibernate.Session", true},
+		{"lombok.Data", true},
+		{"lombok.extern.slf4j.Slf4j", true},
+		{"com.google.guava.collect.ImmutableList", true},
+		{"jakarta.persistence.Entity", true},
+		{"jakarta.servlet.http.HttpServlet", true},
+		// Unknown packages — not in registry, not stdlib
+		{"com.example.custom.MyClass", false},
+		{"io.unknown.Library", false},
+		{"net.fakecompany.FakeClass", false},
+		// Slopsquatting attempts — unknown
+		{"com.fasterxml.jakson.databind.ObjectMapper", false}, // typo: jakson
+		{"com.google.guava2.collect.ImmutableList", false},    // typo: guava2
+		// Local import
+		{"./local.package", true},
+	}
+	for _, tc := range cases {
+		got := r.IsKnown("java", tc.imp)
+		if got != tc.want {
+			t.Errorf("IsKnown(java, %q) = %v, want %v", tc.imp, got, tc.want)
+		}
+	}
+}
+
+func TestPackageRegistry_IsKnown_Java_SafeFallback(t *testing.T) {
+	// When no Java packages are registered, IsKnown returns true (safe fallback).
+	r := NewPackageRegistry()
+	// No Java packages added.
+	if !r.IsKnown("java", "org.springframework.boot") {
+		t.Error("IsKnown(java, ...) should return true when no Java registry data loaded (safe fallback)")
+	}
+	if !r.IsKnown("java", "com.totally.fake.Package") {
+		t.Error("IsKnown(java, ...) should return true when no Java registry data loaded (safe fallback)")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PackageRegistry.Suggest — Java
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestPackageRegistry_Suggest_Java(t *testing.T) {
+	r := buildJavaTestRegistry(t)
+
+	cases := []struct {
+		imp  string
+		want string // "" means no suggestion expected
+	}{
+		// One edit in the 3rd component: "guava2" → "guava"
+		{"com.google.guava2.collect.ImmutableList", "com.google.guava"},
+		// One edit in the 2nd component: "fasterxml.jakson" → "fasterxml.jackson"
+		{"com.fasterxml.jakson.databind.ObjectMapper", "com.fasterxml.jackson"},
+		// Completely different org: too far for suggestion (com.* vs org.*)
+		// First-byte filter ("c" vs "o") prevents cross-org suggestions.
+		{"com.springsecurity.core.UserDetails", ""},
+		// No close match: completely made up
+		{"xyz.unknown.package.Class", ""},
+	}
+	for _, tc := range cases {
+		got := r.Suggest("java", tc.imp)
+		if got != tc.want {
+			t.Errorf("Suggest(java, %q) = %q, want %q", tc.imp, got, tc.want)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LoadBuiltinRegistry — Java spot-checks
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestLoadBuiltinRegistry_Java(t *testing.T) {
+	r, err := LoadBuiltinRegistry()
+	if err != nil {
+		t.Fatalf("LoadBuiltinRegistry: %v", err)
+	}
+
+	wellKnown := []struct {
+		imp  string
+		want bool
+	}{
+		// Stdlib — always known
+		{"java.util.List", true},
+		{"javax.crypto.Cipher", true},
+		// Known library prefixes from builtin registry
+		{"org.springframework.boot.SpringApplication", true},
+		{"com.fasterxml.jackson.databind.ObjectMapper", true},
+		{"org.hibernate.Session", true},
+		{"com.google.guava.collect.ImmutableList", true},
+		{"io.netty.channel.ChannelHandler", true},
+		{"org.junit.jupiter.api.Test", true},
+		{"org.mockito.Mockito", true},
+		{"lombok.Data", true},
+		{"jakarta.persistence.Entity", true},
+		{"org.slf4j.Logger", true},
+		{"ch.qos.logback.classic.Logger", true},
+		// Unknown — not in registry, not stdlib
+		{"com.fasterxml.jakson.databind.ObjectMapper", false}, // typo
+		{"com.google.guava2.collect.ImmutableList", false},    // typo
+		{"io.unknown.fake.Library", false},
+	}
+	for _, c := range wellKnown {
+		got := r.IsKnown("java", c.imp)
+		if got != c.want {
+			t.Errorf("LoadBuiltinRegistry Java: IsKnown(java, %q) = %v, want %v", c.imp, got, c.want)
 		}
 	}
 }

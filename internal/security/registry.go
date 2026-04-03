@@ -51,6 +51,7 @@ const (
 	regLangPyPI   registryLang = "pypi"
 	regLangCrates registryLang = "crates"
 	regLangGo     registryLang = "go"
+	regLangJava   registryLang = "java"
 )
 
 // PackageRegistry is an in-memory store of known package names per language ecosystem.
@@ -117,6 +118,8 @@ func registryLangFromFilename(filename string) registryLang {
 		return regLangCrates
 	case "go-modules":
 		return regLangGo
+	case "java-packages":
+		return regLangJava
 	}
 	return ""
 }
@@ -156,7 +159,7 @@ func (r *PackageRegistry) addPackages(lang registryLang, data []byte) error {
 // The following are always treated as known, regardless of registry contents:
 //   - Standard library imports (language-specific detection)
 //   - Local/relative imports (starting with "." or "/")
-//   - Languages not supported by the registry (Java, Ruby, PHP, etc.)
+//   - Languages not supported by the registry (Ruby, PHP, C#, etc.)
 //
 // If the registry is nil, IsKnown always returns true (safe fallback: no false positives).
 func (r *PackageRegistry) IsKnown(lang, importPath string) bool {
@@ -194,6 +197,12 @@ func (r *PackageRegistry) IsKnown(lang, importPath string) bool {
 		return goImportKnownByPrefix(pkgs, normalized)
 	}
 
+	// Java-specific: prefix match — import com.fasterxml.jackson.databind.ObjectMapper is
+	// known if registry has com.fasterxml.jackson (or any other dot-bounded prefix).
+	if lk == regLangJava {
+		return javaImportKnownByPrefix(pkgs, normalized)
+	}
+
 	return false
 }
 
@@ -222,9 +231,35 @@ func (r *PackageRegistry) Suggest(lang, importPath string) string {
 	best := ""
 	bestDist := maxDist + 1 // start just above threshold so the first match replaces it
 
+	// For Java imports, compare the same-depth prefix from the unknown import against
+	// each registry entry. This detects typos like "com.google.guava2" → "com.google.guava"
+	// while avoiding nonsensical cross-org suggestions.
+	compareKey := normalized
+	if lk == regLangJava {
+		for _, cand := range candidates {
+			// Extract a prefix from the unknown import at the same dot-depth as the candidate.
+			// E.g., candidate "com.google.guava" has depth 3; extract first 3 components
+			// from "com.google.guava2.collection.ImmutableList" → "com.google.guava2".
+			depth := strings.Count(cand, ".") + 1
+			importKey := javaImportPrefix(compareKey, depth)
+			if absDiff(len(importKey), len(cand)) > maxDist {
+				continue
+			}
+			// Fast filter: first byte must match (catches com.* vs org.* quickly).
+			if len(importKey) > 0 && len(cand) > 0 && importKey[0] != cand[0] {
+				continue
+			}
+			d := editDistance(importKey, cand)
+			if d < bestDist {
+				best = cand
+				bestDist = d
+			}
+		}
+		return best
+	}
+
 	// For Go imports, compare only the module-name component to avoid cross-host
 	// suggestions (e.g., don't suggest github.com/foo/bar for github.com/foo/baz).
-	compareKey := normalized
 	if lk == regLangGo {
 		// For Go modules, extract the base name from both the target AND each candidate.
 		// Comparing "chi" against "github.com/go-chi/chi/v5" would be misleading due to
@@ -318,8 +353,17 @@ func registryKey(lang, importPath string) (registryLang, string) {
 			root = importPath[:i]
 		}
 		return regLangCrates, normalizePackageName(regLangCrates, root)
+	case "java":
+		// Java imports are fully qualified class or package names:
+		//   com.fasterxml.jackson.databind.ObjectMapper
+		//   org.springframework.web.bind.annotation.RestController
+		// The registry stores dot-bounded prefixes (e.g., "org.springframework",
+		// "com.fasterxml.jackson"). IsKnown uses javaImportKnownByPrefix to match.
+		// The normalized key is the full import path lowercased (Java conventions use
+		// lowercase package names; class names are capitalized but imports include both).
+		return regLangJava, normalizePackageName(regLangJava, importPath)
 	default:
-		// Java, Ruby, PHP, C#, etc. — not yet supported.
+		// Ruby, PHP, C#, etc. — not yet supported.
 		return "", ""
 	}
 }
@@ -362,6 +406,10 @@ func normalizePackageName(lang registryLang, name string) string {
 	case regLangGo:
 		// Go module paths are case-sensitive and canonical. Preserve as-is.
 		return name
+	case regLangJava:
+		// Java package names are conventionally all lowercase. Lowercase to normalize
+		// fully-qualified class names like "com.Example.MyClass" → "com.example.myclass".
+		return strings.ToLower(name)
 	default:
 		return strings.ToLower(name)
 	}
@@ -385,6 +433,8 @@ func isStdlibImport(lang, importPath string) bool {
 		return isRustStdlib(importPath)
 	case "typescript", "javascript":
 		return isNodeBuiltin(importPath)
+	case "java":
+		return isJavaStdlib(importPath)
 	default:
 		return false
 	}
@@ -506,6 +556,151 @@ func goModuleBase(modulePath string) string {
 		return p
 	}
 	return modulePath
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Java-specific helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+// isJavaStdlib reports whether an import path refers to the Java standard library (JDK).
+//
+// Always-known JDK packages:
+//   - java.*               — core Java SE API
+//   - sun.*                — JDK internal (sun.misc.Unsafe etc.)
+//   - jdk.*                — Java 9+ internal modules
+//   - com.sun.*            — JDK internal (com.sun.net.httpserver etc.)
+//   - org.w3c.dom.*        — W3C DOM API shipped with JDK
+//   - org.xml.sax.*        — SAX API shipped with JDK
+//   - org.ietf.jgss.*      — GSS-API shipped with JDK
+//
+// javax.* is NOT entirely stdlib. The JDK includes a specific subset. The remainder
+// (javax.persistence, javax.servlet, javax.ws.rs, javax.jms, javax.mail, javax.faces,
+// javax.enterprise, javax.inject, javax.validation, javax.ejb, javax.el, etc.) are
+// Java EE / Jakarta EE packages that require third-party Maven artifacts.
+//
+// Note: jakarta.* is NOT the JDK stdlib — it is the Jakarta EE namespace (formerly
+// Java EE) and must be imported as a third-party dependency.
+func isJavaStdlib(importPath string) bool {
+	if importPath == "" {
+		return false
+	}
+	// First component check.
+	first := importPath
+	if i := strings.IndexByte(importPath, '.'); i >= 0 {
+		first = importPath[:i]
+	}
+	switch first {
+	case "java", "sun", "jdk":
+		return true
+	}
+	// com.sun.* is JDK internal.
+	if strings.HasPrefix(importPath, "com.sun.") {
+		return true
+	}
+	// W3C DOM, SAX, and GSS-API are shipped with the JDK.
+	if strings.HasPrefix(importPath, "org.w3c.dom") ||
+		strings.HasPrefix(importPath, "org.xml.sax") ||
+		strings.HasPrefix(importPath, "org.ietf.jgss") {
+		return true
+	}
+	// javax.* — only JDK-included sub-packages are stdlib.
+	// Java EE packages (javax.persistence, javax.servlet, javax.ws.rs, etc.) are NOT in JDK.
+	if strings.HasPrefix(importPath, "javax.") {
+		return isJavaxInJDK(importPath)
+	}
+	return false
+}
+
+// isJavaxInJDK reports whether a javax.* import is part of the JDK (not Java EE).
+// The JDK includes a specific subset of javax.* packages from the Java SE module system.
+// Java EE packages use the javax.* namespace but require third-party Maven artifacts.
+func isJavaxInJDK(importPath string) bool {
+	// Extract the second component (e.g., "crypto" from "javax.crypto.Cipher").
+	rest := strings.TrimPrefix(importPath, "javax.")
+	second := rest
+	if i := strings.IndexByte(rest, '.'); i >= 0 {
+		second = rest[:i]
+	}
+	// JDK-included javax sub-packages (Java SE module system).
+	switch second {
+	case
+		"accessibility",  // java.desktop module
+		"annotation",     // java.compiler + basic annotations
+		"crypto",         // java.security.jce module (JCE)
+		"imageio",        // java.desktop module
+		"lang",           // java.compiler module (javax.lang.model)
+		"management",     // java.management module (JMX)
+		"naming",         // java.naming module (JNDI)
+		"net",            // java.base module (javax.net.ssl etc.)
+		"print",          // java.desktop module
+		"rmi",            // java.rmi module
+		"script",         // java.scripting module (JSR 223)
+		"security",       // java.base / java.security.* modules
+		"sound",          // java.desktop module
+		"swing",          // java.desktop module (Swing UI)
+		"tools",          // java.compiler module
+		"transaction",    // java.transaction.xa (only xa sub-package; full JTA is JEE)
+		"xml":            // java.xml module (JAXP)
+		return true
+	}
+	// Everything else (javax.persistence, javax.servlet, javax.ws.rs, javax.jms,
+	// javax.mail, javax.faces, javax.enterprise, javax.inject, javax.validation,
+	// javax.ejb, javax.el, javax.batch, javax.websocket, ...) is Java EE, not JDK.
+	return false
+}
+
+// javaImportKnownByPrefix reports whether any key in pkgs is a dot-bounded prefix of javaImport.
+//
+// Registry stores entries at varying depths, e.g.:
+//   - "org.springframework" covers "org.springframework.boot.App"
+//   - "com.fasterxml.jackson" covers "com.fasterxml.jackson.databind.ObjectMapper"
+//
+// Prefix matching uses dot-boundaries only: "org.spring" is NOT a prefix of "org.springframework"
+// (the prefix must end exactly at a dot). An exact match is also accepted.
+//
+// The function scans from right to left (longest prefix first) for early termination.
+func javaImportKnownByPrefix(pkgs map[string]struct{}, javaImport string) bool {
+	// Direct exact match first (fast path for imports that are themselves registry entries).
+	if _, found := pkgs[javaImport]; found {
+		return true
+	}
+	// Scan dot boundaries from rightmost to leftmost.
+	for i := len(javaImport) - 1; i >= 0; i-- {
+		if javaImport[i] != '.' {
+			continue
+		}
+		prefix := javaImport[:i]
+		if _, found := pkgs[prefix]; found {
+			return true
+		}
+	}
+	return false
+}
+
+// javaImportPrefix extracts the first `depth` dot-delimited components of javaImport.
+// Used in Suggest to compare an unknown import at the same depth as a registry candidate.
+//
+// Examples:
+//
+//	javaImportPrefix("com.google.guava2.collection.ImmutableList", 3) = "com.google.guava2"
+//	javaImportPrefix("org.springframework.boot", 2)                  = "org.springframework"
+//	javaImportPrefix("lombok.Data", 1)                               = "lombok"
+//	javaImportPrefix("lombok", 5)                                    = "lombok"   (fewer components)
+func javaImportPrefix(javaImport string, depth int) string {
+	if depth <= 0 || javaImport == "" {
+		return javaImport
+	}
+	idx := 0
+	for comp := 0; comp < depth; comp++ {
+		dot := strings.IndexByte(javaImport[idx:], '.')
+		if dot < 0 {
+			// Fewer components than depth: return the full import.
+			return javaImport
+		}
+		idx += dot + 1 // advance past the dot
+	}
+	// idx is now one past the depth-th dot; trim the trailing dot.
+	return javaImport[:idx-1]
 }
 
 // pypiNormalize applies PEP 503 name normalization: replaces consecutive runs of

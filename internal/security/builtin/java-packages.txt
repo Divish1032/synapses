@@ -1,0 +1,766 @@
+# Java package registry — curated seed of top library package prefixes
+# Source: Maven Central download statistics, updated 2026-04
+# Run `scripts/refresh-package-registry.sh` to download updated lists
+#
+# Format: one package PREFIX per line (dot-separated, lowercase)
+# Note: Java import paths are dotted class names ("com.fasterxml.jackson.databind.ObjectMapper").
+#   This registry stores PREFIXES, not full class names.
+#   An import is "known" when any registry entry is a dot-bounded prefix of the import.
+#   E.g., "com.fasterxml.jackson" matches "com.fasterxml.jackson.databind.ObjectMapper".
+#
+# Standard library (java.*, javax.*, sun.*, com.sun.*, jdk.*) is always known — NOT listed here.
+# jakarta.* is the Jakarta EE namespace (NOT stdlib) — included below.
+#
+# Slopsquatting examples this registry catches:
+#   com.fasterxml.jakson       → flag, suggest com.fasterxml.jackson
+#   com.google.guava2          → flag, suggest com.google.guava
+#   com.springsecurity         → flag (edit distance too large for suggestion)
+#   org.hibernat               → flag, suggest org.hibernate
+
+# ── Jakarta EE (formerly Java EE) ─────────────────────────────────────────────
+jakarta
+jakarta.persistence
+jakarta.servlet
+jakarta.validation
+jakarta.ws.rs
+jakarta.enterprise
+jakarta.inject
+jakarta.annotation
+jakarta.security
+jakarta.xml.bind
+jakarta.mail
+jakarta.jms
+jakarta.transaction
+jakarta.json
+jakarta.faces
+jakarta.batch
+
+# ── Spring Framework / Spring Boot ───────────────────────────────────────────
+org.springframework
+org.springframework.boot
+org.springframework.security
+org.springframework.web
+org.springframework.data
+org.springframework.core
+org.springframework.context
+org.springframework.beans
+org.springframework.jdbc
+org.springframework.orm
+org.springframework.tx
+org.springframework.cloud
+org.springframework.integration
+org.springframework.batch
+org.springframework.amqp
+org.springframework.kafka
+org.springframework.session
+org.springframework.test
+org.springframework.aop
+org.springframework.scheduling
+org.springframework.cache
+org.springframework.retry
+org.springframework.vault
+org.springframework.ldap
+
+# ── Hibernate / JPA ──────────────────────────────────────────────────────────
+org.hibernate
+org.hibernate.orm
+org.hibernate.validator
+org.hibernate.envers
+org.hibernate.search
+org.hibernate.spatial
+
+# ── Jackson (JSON) ───────────────────────────────────────────────────────────
+com.fasterxml.jackson
+com.fasterxml.jackson.core
+com.fasterxml.jackson.databind
+com.fasterxml.jackson.annotation
+com.fasterxml.jackson.datatype
+com.fasterxml.jackson.dataformat
+com.fasterxml.jackson.module
+com.fasterxml.jackson.jr
+
+# ── Netty ────────────────────────────────────────────────────────────────────
+io.netty
+
+# ── gRPC ─────────────────────────────────────────────────────────────────────
+io.grpc
+
+# ── Google libraries ─────────────────────────────────────────────────────────
+com.google.guava
+com.google.gson
+com.google.protobuf
+com.google.inject
+com.google.common
+com.google.api
+com.google.cloud
+com.google.firebase
+com.google.auth
+com.google.http
+com.google.oauth2
+com.google.errorprone
+com.google.auto
+com.google.j2objc
+com.google.code.findbugs
+com.google.code.gson
+
+# ── Apache Commons ───────────────────────────────────────────────────────────
+org.apache.commons
+org.apache.commons.lang3
+org.apache.commons.lang
+org.apache.commons.io
+org.apache.commons.collections4
+org.apache.commons.collections
+org.apache.commons.codec
+org.apache.commons.text
+org.apache.commons.csv
+org.apache.commons.math3
+org.apache.commons.compress
+org.apache.commons.pool2
+org.apache.commons.dbcp2
+org.apache.commons.validator
+org.apache.commons.beanutils
+org.apache.commons.configuration2
+org.apache.commons.email
+org.apache.commons.fileupload
+org.apache.commons.net
+org.apache.commons.logging
+org.apache.commons.cli
+org.apache.commons.digester3
+org.apache.commons.jxpath
+
+# ── Apache HTTP Client ────────────────────────────────────────────────────────
+org.apache.http
+org.apache.hc
+
+# ── Apache Kafka ──────────────────────────────────────────────────────────────
+org.apache.kafka
+org.apache.kafka.clients
+org.apache.kafka.common
+org.apache.kafka.streams
+org.apache.kafka.connect
+
+# ── Apache Logging (Log4j 2) ──────────────────────────────────────────────────
+org.apache.logging
+org.apache.logging.log4j
+org.apache.log4j
+
+# ── Apache Spark ──────────────────────────────────────────────────────────────
+org.apache.spark
+
+# ── Apache Avro ───────────────────────────────────────────────────────────────
+org.apache.avro
+
+# ── Apache Cassandra ──────────────────────────────────────────────────────────
+org.apache.cassandra
+com.datastax.oss
+
+# ── Apache ZooKeeper ──────────────────────────────────────────────────────────
+org.apache.zookeeper
+
+# ── Apache Flink ──────────────────────────────────────────────────────────────
+org.apache.flink
+
+# ── Apache Beam ───────────────────────────────────────────────────────────────
+org.apache.beam
+
+# ── Apache POI (Excel/Word) ───────────────────────────────────────────────────
+org.apache.poi
+
+# ── Apache Lucene / Solr ──────────────────────────────────────────────────────
+org.apache.lucene
+org.apache.solr
+
+# ── Apache Tomcat ─────────────────────────────────────────────────────────────
+org.apache.tomcat
+org.apache.catalina
+org.apache.coyote
+org.apache.jasper
+
+# ── Apache CXF (web services) ─────────────────────────────────────────────────
+org.apache.cxf
+
+# ── Apache Shiro (security) ───────────────────────────────────────────────────
+org.apache.shiro
+
+# ── Apache Camel ──────────────────────────────────────────────────────────────
+org.apache.camel
+
+# ── Apache Axis ───────────────────────────────────────────────────────────────
+org.apache.axis2
+
+# ── SLF4J ────────────────────────────────────────────────────────────────────
+org.slf4j
+
+# ── Logback ──────────────────────────────────────────────────────────────────
+ch.qos.logback
+
+# ── Log4j (legacy) ───────────────────────────────────────────────────────────
+org.apache.log4j
+log4j
+
+# ── JUnit ────────────────────────────────────────────────────────────────────
+org.junit
+org.junit.jupiter
+org.junit.vintage
+junit
+
+# ── Mockito ──────────────────────────────────────────────────────────────────
+org.mockito
+
+# ── TestNG ───────────────────────────────────────────────────────────────────
+org.testng
+
+# ── AssertJ ──────────────────────────────────────────────────────────────────
+org.assertj
+
+# ── Hamcrest ─────────────────────────────────────────────────────────────────
+org.hamcrest
+
+# ── EasyMock ─────────────────────────────────────────────────────────────────
+org.easymock
+
+# ── PowerMock ────────────────────────────────────────────────────────────────
+org.powermock
+
+# ── ArchUnit ─────────────────────────────────────────────────────────────────
+com.tngtech.archunit
+
+# ── OkHttp / Retrofit (Square) ───────────────────────────────────────────────
+com.squareup.okhttp3
+com.squareup.retrofit2
+okhttp3
+retrofit2
+
+# ── RxJava ───────────────────────────────────────────────────────────────────
+io.reactivex
+io.reactivex.rxjava3
+io.reactivex.rxjava2
+
+# ── Project Reactor ──────────────────────────────────────────────────────────
+reactor
+io.projectreactor
+
+# ── Micronaut ────────────────────────────────────────────────────────────────
+io.micronaut
+
+# ── Quarkus ──────────────────────────────────────────────────────────────────
+io.quarkus
+
+# ── Vert.x ───────────────────────────────────────────────────────────────────
+io.vertx
+
+# ── Lombok ───────────────────────────────────────────────────────────────────
+lombok
+
+# ── MapStruct ────────────────────────────────────────────────────────────────
+org.mapstruct
+
+# ── Bouncy Castle (cryptography) ─────────────────────────────────────────────
+org.bouncycastle
+
+# ── JWT libraries ────────────────────────────────────────────────────────────
+io.jsonwebtoken
+com.auth0
+com.nimbusds
+
+# ── JJWT ────────────────────────────────────────────────────────────────────
+io.jsonwebtoken
+
+# ── Database / JDBC drivers ──────────────────────────────────────────────────
+org.postgresql
+com.mysql
+com.microsoft.sqlserver
+com.oracle.database
+oracle.jdbc
+org.h2
+com.h2database
+org.xerial
+com.ibm.db2
+org.mariadb.jdbc
+
+# ── Connection pools ─────────────────────────────────────────────────────────
+com.zaxxer.hikari
+org.apache.tomcat.jdbc
+com.mchange.v2
+
+# ── Redis clients ────────────────────────────────────────────────────────────
+io.lettuce
+redis.clients
+
+# ── MongoDB ──────────────────────────────────────────────────────────────────
+com.mongodb
+org.mongodb
+
+# ── Elasticsearch ────────────────────────────────────────────────────────────
+org.elasticsearch
+co.elastic
+
+# ── AWS SDK ──────────────────────────────────────────────────────────────────
+com.amazonaws
+software.amazon.awssdk
+software.amazon
+
+# ── Azure SDK ────────────────────────────────────────────────────────────────
+com.microsoft.azure
+com.azure
+
+# ── GCP (non-guava) ──────────────────────────────────────────────────────────
+com.google.cloud.storage
+com.google.cloud.bigquery
+com.google.cloud.pubsub
+
+# ── Kubernetes / Fabric8 ─────────────────────────────────────────────────────
+io.kubernetes
+io.fabric8
+
+# ── Micrometer (metrics) ─────────────────────────────────────────────────────
+io.micrometer
+
+# ── Resilience4j ─────────────────────────────────────────────────────────────
+io.github.resilience4j
+
+# ── Feign (HTTP client) ───────────────────────────────────────────────────────
+feign
+io.github.openfeign
+
+# ── OpenAPI / Swagger ─────────────────────────────────────────────────────────
+io.swagger
+io.swagger.v3
+org.openapitools
+springfox
+
+# ── JAXB / XML ───────────────────────────────────────────────────────────────
+com.sun.xml.bind
+org.glassfish.jaxb
+
+# ── JAX-RS implementations ───────────────────────────────────────────────────
+org.glassfish.jersey
+org.jboss.resteasy
+com.sun.jersey
+
+# ── CDI / DI implementations ─────────────────────────────────────────────────
+org.jboss.weld
+
+# ── JBoss / WildFly / Quarkus ────────────────────────────────────────────────
+org.jboss
+org.wildfly
+
+# ── Flyway (database migrations) ─────────────────────────────────────────────
+org.flywaydb
+
+# ── Liquibase ────────────────────────────────────────────────────────────────
+liquibase
+org.liquibase
+
+# ── MyBatis ──────────────────────────────────────────────────────────────────
+org.mybatis
+
+# ── jOOQ ─────────────────────────────────────────────────────────────────────
+org.jooq
+
+# ── QueryDSL ─────────────────────────────────────────────────────────────────
+com.querydsl
+
+# ── EclipseLink ──────────────────────────────────────────────────────────────
+org.eclipse.persistence
+
+# ── Eclipse collections ──────────────────────────────────────────────────────
+org.eclipse.collections
+
+# ── Vavr (functional Java) ───────────────────────────────────────────────────
+io.vavr
+
+# ── Arrow (functional Kotlin/Java) ───────────────────────────────────────────
+arrow
+
+# ── Kotlin stdlib (often used from Java) ─────────────────────────────────────
+kotlin
+kotlinx
+
+# ── Byte Buddy ───────────────────────────────────────────────────────────────
+net.bytebuddy
+
+# ── ASM (bytecode) ───────────────────────────────────────────────────────────
+org.objectweb.asm
+
+# ── CGLib ────────────────────────────────────────────────────────────────────
+net.sf.cglib
+cglib
+
+# ── Javassist ────────────────────────────────────────────────────────────────
+javassist
+org.javassist
+
+# ── Reflections library ──────────────────────────────────────────────────────
+org.reflections
+
+# ── CheckerFramework / JSR 305 ───────────────────────────────────────────────
+org.checkerframework
+javax.annotation
+
+# ── Error Prone annotations ──────────────────────────────────────────────────
+com.google.errorprone.annotations
+
+# ── Caffeine (cache) ──────────────────────────────────────────────────────────
+com.github.ben-manes.caffeine
+
+# ── Ehcache ──────────────────────────────────────────────────────────────────
+org.ehcache
+net.sf.ehcache
+
+# ── Hazelcast ────────────────────────────────────────────────────────────────
+com.hazelcast
+
+# ── Infinispan ───────────────────────────────────────────────────────────────
+org.infinispan
+
+# ── RabbitMQ / AMQP ──────────────────────────────────────────────────────────
+com.rabbitmq
+
+# ── ActiveMQ ─────────────────────────────────────────────────────────────────
+org.apache.activemq
+
+# ── MQTT / HiveMQ ────────────────────────────────────────────────────────────
+com.hivemq
+
+# ── Prometheus client ─────────────────────────────────────────────────────────
+io.prometheus
+
+# ── OpenTelemetry ─────────────────────────────────────────────────────────────
+io.opentelemetry
+
+# ── Zipkin / Brave ────────────────────────────────────────────────────────────
+io.zipkin
+brave
+
+# ── Jaeger ────────────────────────────────────────────────────────────────────
+io.jaegertracing
+
+# ── Thrift ───────────────────────────────────────────────────────────────────
+org.apache.thrift
+
+# ── Protocol Buffers ─────────────────────────────────────────────────────────
+com.google.protobuf
+
+# ── FlatBuffers ───────────────────────────────────────────────────────────────
+com.google.flatbuffers
+
+# ── Kryo (serialization) ──────────────────────────────────────────────────────
+com.esotericsoftware.kryo
+com.esotericsoftware
+
+# ── Hessian ───────────────────────────────────────────────────────────────────
+com.caucho
+
+# ── Apache Thrift ─────────────────────────────────────────────────────────────
+org.apache.thrift
+
+# ── Dropwizard ───────────────────────────────────────────────────────────────
+io.dropwizard
+
+# ── Play Framework ───────────────────────────────────────────────────────────
+play
+akka
+
+# ── Akka ─────────────────────────────────────────────────────────────────────
+akka
+com.typesafe.akka
+
+# ── Scala stdlib (used from Java) ────────────────────────────────────────────
+scala
+
+# ── Groovy (used from Java) ──────────────────────────────────────────────────
+groovy
+org.codehaus.groovy
+
+# ── Freemarker ───────────────────────────────────────────────────────────────
+freemarker
+
+# ── Thymeleaf ────────────────────────────────────────────────────────────────
+org.thymeleaf
+
+# ── Velocity ─────────────────────────────────────────────────────────────────
+org.apache.velocity
+
+# ── Mustache ─────────────────────────────────────────────────────────────────
+com.github.mustachejava
+
+# ── EclipseLink / TopLink ─────────────────────────────────────────────────────
+oracle.toplink
+
+# ── JacksonXml ────────────────────────────────────────────────────────────────
+com.fasterxml.jackson.dataformat.xml
+
+# ── Snake YAML ───────────────────────────────────────────────────────────────
+org.yaml.snakeyaml
+
+# ── SnakeYAML ────────────────────────────────────────────────────────────────
+org.yaml
+
+# ── TOML ─────────────────────────────────────────────────────────────────────
+com.moandjiezana.toml
+
+# ── Typesafe Config ──────────────────────────────────────────────────────────
+com.typesafe
+
+# ── Joda-Time (pre-java.time) ────────────────────────────────────────────────
+org.joda
+
+# ── ThreeTen (JSR 310 backport) ───────────────────────────────────────────────
+org.threeten
+
+# ── Guice (Google DI) ────────────────────────────────────────────────────────
+com.google.inject
+
+# ── Dagger ───────────────────────────────────────────────────────────────────
+dagger
+
+# ── PicoContainer ────────────────────────────────────────────────────────────
+org.picocontainer
+
+# ── Spring Statemachine ──────────────────────────────────────────────────────
+org.springframework.statemachine
+
+# ── Drools (rules engine) ─────────────────────────────────────────────────────
+org.drools
+org.kie
+
+# ── jBPM ─────────────────────────────────────────────────────────────────────
+org.jbpm
+
+# ── Camunda ──────────────────────────────────────────────────────────────────
+org.camunda
+
+# ── Activiti ─────────────────────────────────────────────────────────────────
+org.activiti
+
+# ── Keycloak ─────────────────────────────────────────────────────────────────
+org.keycloak
+
+# ── Shiro ────────────────────────────────────────────────────────────────────
+org.apache.shiro
+
+# ── Spring Security OAuth ────────────────────────────────────────────────────
+org.springframework.security.oauth2
+
+# ── OAuth2 / OIDC ────────────────────────────────────────────────────────────
+com.nimbusds.oauth2
+com.nimbusds.openid
+
+# ── Netty extras ─────────────────────────────────────────────────────────────
+io.netty.handler
+io.netty.channel
+io.netty.buffer
+
+# ── Apache Mina ──────────────────────────────────────────────────────────────
+org.apache.mina
+
+# ── NanoHTTPD ────────────────────────────────────────────────────────────────
+fi.iki.elonen
+
+# ── Undertow ─────────────────────────────────────────────────────────────────
+io.undertow
+
+# ── Jetty ────────────────────────────────────────────────────────────────────
+org.eclipse.jetty
+
+# ── Grizzly ──────────────────────────────────────────────────────────────────
+org.glassfish.grizzly
+
+# ── Apache Wicket ────────────────────────────────────────────────────────────
+org.apache.wicket
+
+# ── Struts ───────────────────────────────────────────────────────────────────
+org.apache.struts
+com.opensymphony.xwork2
+
+# ── Vaadin ───────────────────────────────────────────────────────────────────
+com.vaadin
+
+# ── GWT ──────────────────────────────────────────────────────────────────────
+com.google.gwt
+
+# ── RichFaces / PrimeFaces (JSF) ─────────────────────────────────────────────
+org.richfaces
+org.primefaces
+
+# ── OpenCSV ──────────────────────────────────────────────────────────────────
+com.opencsv
+
+# ── Super CSV ────────────────────────────────────────────────────────────────
+net.sf.supercsv
+
+# ── iText (PDF) ───────────────────────────────────────────────────────────────
+com.itextpdf
+com.lowagie
+
+# ── Apache PDFBox ────────────────────────────────────────────────────────────
+org.apache.pdfbox
+
+# ── JasperReports ────────────────────────────────────────────────────────────
+net.sf.jasperreports
+
+# ── Docx4j ───────────────────────────────────────────────────────────────────
+org.docx4j
+
+# ── Apache Tika ───────────────────────────────────────────────────────────────
+org.apache.tika
+
+# ── Jsoup (HTML parsing) ──────────────────────────────────────────────────────
+org.jsoup
+
+# ── HTMLUnit ─────────────────────────────────────────────────────────────────
+net.sourceforge.htmlunit
+
+# ── Selenium ─────────────────────────────────────────────────────────────────
+org.openqa.selenium
+io.github.bonigarcia
+
+# ── Playwright (Java) ────────────────────────────────────────────────────────
+com.microsoft.playwright
+
+# ── Cucumber ─────────────────────────────────────────────────────────────────
+io.cucumber
+
+# ── JBehave ──────────────────────────────────────────────────────────────────
+org.jbehave
+
+# ── Gauge ────────────────────────────────────────────────────────────────────
+com.thoughtworks.gauge
+
+# ── REST-assured ─────────────────────────────────────────────────────────────
+io.rest-assured
+io.restassured
+
+# ── WireMock ─────────────────────────────────────────────────────────────────
+com.github.tomakehurst
+org.wiremock
+
+# ── MockServer ───────────────────────────────────────────────────────────────
+org.mock-server
+
+# ── Testcontainers ───────────────────────────────────────────────────────────
+org.testcontainers
+
+# ── Awaitility ───────────────────────────────────────────────────────────────
+org.awaitility
+
+# ── JMH (benchmarks) ─────────────────────────────────────────────────────────
+org.openjdk.jmh
+
+# ── JMeter ───────────────────────────────────────────────────────────────────
+org.apache.jmeter
+
+# ── Gatling ──────────────────────────────────────────────────────────────────
+io.gatling
+
+# ── JaCoCo (coverage) ────────────────────────────────────────────────────────
+org.jacoco
+
+# ── Cobertura ────────────────────────────────────────────────────────────────
+net.sourceforge.cobertura
+
+# ── SonarQube ────────────────────────────────────────────────────────────────
+org.sonarsource
+
+# ── PMD ──────────────────────────────────────────────────────────────────────
+net.sourceforge.pmd
+
+# ── SpotBugs / FindBugs ───────────────────────────────────────────────────────
+com.github.spotbugs
+edu.umd.cs.findbugs
+
+# ── Checkstyle ───────────────────────────────────────────────────────────────
+com.puppycrawl.tools.checkstyle
+
+# ── JDepend ───────────────────────────────────────────────────────────────────
+jdepend
+
+# ── Maven ────────────────────────────────────────────────────────────────────
+org.apache.maven
+
+# ── Gradle ───────────────────────────────────────────────────────────────────
+org.gradle
+
+# ── Ant ──────────────────────────────────────────────────────────────────────
+org.apache.tools.ant
+
+# ── Ktor (Kotlin, commonly imported from Java) ───────────────────────────────
+io.ktor
+
+# ── Exposed (Kotlin ORM) ─────────────────────────────────────────────────────
+org.jetbrains.exposed
+
+# ── Jetbrains / IntelliJ ─────────────────────────────────────────────────────
+org.jetbrains
+com.intellij
+
+# ── JFreeChart ───────────────────────────────────────────────────────────────
+org.jfree
+
+# ── Batik (SVG) ───────────────────────────────────────────────────────────────
+org.apache.batik
+
+# ── Javax (non-stdlib — Jakarta compat layer) ────────────────────────────────
+# Note: javax.* is JDK stdlib, but some artifacts re-export under javax.*
+# The most common non-stdlib javax packages (old JEE before jakarta migration):
+javax.persistence
+javax.servlet
+javax.ws.rs
+javax.validation
+javax.jms
+javax.mail
+javax.faces
+javax.enterprise
+javax.inject
+
+# ── Java Money ────────────────────────────────────────────────────────────────
+org.javamoney
+javax.money
+
+# ── CDI (standalone) ─────────────────────────────────────────────────────────
+org.jboss.arquillian
+
+# ── Arquillian ───────────────────────────────────────────────────────────────
+org.jboss.arquillian
+
+# ── Spock Framework ──────────────────────────────────────────────────────────
+org.spockframework
+
+# ── Kotest ───────────────────────────────────────────────────────────────────
+io.kotest
+
+# ── Truth (Google testing) ────────────────────────────────────────────────────
+com.google.truth
+
+# ── R2DBC (reactive SQL) ──────────────────────────────────────────────────────
+io.r2dbc
+
+# ── Helidon ──────────────────────────────────────────────────────────────────
+io.helidon
+
+# ── SmallRye ─────────────────────────────────────────────────────────────────
+io.smallrye
+
+# ── MicroProfile ─────────────────────────────────────────────────────────────
+org.eclipse.microprofile
+
+# ── JOOQ extras ──────────────────────────────────────────────────────────────
+org.jooq.meta
+org.jooq.codegen
+
+# ── Apache Camel ─────────────────────────────────────────────────────────────
+org.apache.camel
+
+# ── Hawtio ───────────────────────────────────────────────────────────────────
+io.hawt
+
+# ── JMX ──────────────────────────────────────────────────────────────────────
+# (java.lang.management is stdlib)
+com.sun.jmx
+
+# ── SnakeYAML engine ─────────────────────────────────────────────────────────
+org.snakeyaml
+
+# ── Eclipse EMF ──────────────────────────────────────────────────────────────
+org.eclipse.emf
