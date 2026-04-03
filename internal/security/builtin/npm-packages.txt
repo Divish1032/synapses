@@ -313,6 +313,29 @@ lerna
 parcel
 
 # ── TypeScript / transpilation ────────────────────────────────────────────────
+@types/node
+@types/react
+@types/express
+@types/lodash
+@types/jest
+@types/mocha
+@types/uuid
+@types/cors
+@types/bcrypt
+@types/jsonwebtoken
+@types/multer
+@types/pg
+@types/mysql
+@types/passport
+@types/passport-local
+@types/passport-jwt
+@types/ws
+@types/supertest
+@types/cookie-parser
+@types/morgan
+@types/compression
+@types/helmet
+@types/debug
 typescript
 ts-node
 ts-jest

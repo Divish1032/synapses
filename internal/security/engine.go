@@ -72,6 +72,7 @@ type Violation struct {
 // The zero value is valid but produces no violations.
 type Engine struct {
 	patterns *PatternSet
+	registry *PackageRegistry // optional; nil = skip unknown-package checks
 }
 
 // NewEngine creates an engine backed by the given PatternSet.
