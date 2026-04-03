@@ -91,8 +91,8 @@ func cmdHooksRemove(args []string) error {
 	return nil
 }
 
-// cmdValidate is a thin CLI wrapper around the daemon's verify_implementation
-// tool. Designed for the Claude Code PostToolUse hook — always exits 0.
+// cmdValidate is a thin CLI wrapper around the daemon's "validate" tool
+// (phase="post"). Designed for the Claude Code PostToolUse hook — always exits 0.
 //
 // When invoked from a Claude Code PostToolUse hook, the file path is read from
 // stdin (Claude Code sends tool call details as JSON). The --file flag can
@@ -130,12 +130,16 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 
+	// "validate" is the consolidated tool name (Sprint 23.9 merge). The
+	// post-write phase is selected via the "phase" field; "scope" is a CLI-only
+	// concept used for the flag description and is not forwarded to the daemon.
+	_ = *scope // consumed by flag; not sent to daemon
 	body := map[string]interface{}{
+		"phase":         "post",
 		"files_written": string(filesJSON),
-		"scope":         *scope,
 	}
 
-	output, err := callDaemonTool("verify_implementation", absPath, body, 5*time.Second)
+	output, err := callDaemonTool("validate", absPath, body, 5*time.Second)
 	if err != nil {
 		// Daemon not running or unreachable — exit silently, don't block the hook.
 		return nil
@@ -222,6 +226,10 @@ func fileFromHookStdin() string {
 	return hookData.ToolInput.Path
 }
 
+// daemonBaseURL is the base URL for the Synapses daemon REST API. Overridden in
+// tests to point at a local httptest.Server.
+var daemonBaseURL = "http://127.0.0.1:11435"
+
 // callDaemonTool calls a Synapses MCP tool via the daemon REST API and returns
 // the tool's text output. Returns an error if the daemon is unreachable or
 // returns a non-OK status.
@@ -232,7 +240,7 @@ func fileFromHookStdin() string {
 //
 // The response is a JSON-encoded *mcp.CallToolResult with a "content" array.
 func callDaemonTool(toolName, projectPath string, body map[string]interface{}, timeout time.Duration) (string, error) {
-	endpoint := "http://127.0.0.1:11435/v1/tools/" + toolName +
+	endpoint := daemonBaseURL + "/v1/tools/" + toolName +
 		"?project=" + url.QueryEscape(projectPath)
 
 	payload, err := json.Marshal(body)

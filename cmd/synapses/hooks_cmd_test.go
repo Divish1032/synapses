@@ -216,6 +216,52 @@ func TestCmdHooksInstall_PreservesExistingHooks(t *testing.T) {
 	}
 }
 
+// ── cmdValidate — endpoint and body verification ─────────────────────────────
+
+// TestCmdValidate_CallsValidateEndpointWithPhasePost verifies that cmdValidate
+// calls the "validate" MCP tool (not the old "verify_implementation") and sends
+// {"phase": "post", "files_written": ...} in the request body.
+func TestCmdValidate_CallsValidateEndpointWithPhasePost(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		data, _ := io.ReadAll(r.Body)
+		json.Unmarshal(data, &gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+			"content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "ok"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	// Override the daemon base URL to point at the test server.
+	old := daemonBaseURL
+	daemonBaseURL = srv.URL
+	defer func() { daemonBaseURL = old }()
+
+	dir := t.TempDir()
+	if err := cmdValidate([]string{"--path", dir, "--file", "/some/file.go"}); err != nil {
+		t.Fatalf("cmdValidate: %v", err)
+	}
+
+	if gotPath != "/v1/tools/validate" {
+		t.Errorf("expected /v1/tools/validate, got %q", gotPath)
+	}
+	if gotBody["phase"] != "post" {
+		t.Errorf("expected phase=post in body, got: %v", gotBody["phase"])
+	}
+	if _, ok := gotBody["files_written"]; !ok {
+		t.Error("body missing files_written field")
+	}
+	if _, ok := gotBody["scope"]; ok {
+		t.Error("body should NOT contain scope field (CLI-only, not forwarded to daemon)")
+	}
+}
+
 // ── cmdValidate (daemon not running) ─────────────────────────────────────────
 
 func TestCmdValidate_DaemonNotRunning_ExitsZero(t *testing.T) {
