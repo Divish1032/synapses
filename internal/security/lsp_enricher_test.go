@@ -3,6 +3,7 @@ package security
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -23,20 +24,8 @@ func (m *mockVerifier) VerifySymbol(_ context.Context, _, file string, line, _ i
 	if m.confirmed == nil {
 		return false, nil
 	}
-	import_key := file + ":" + itoa(line)
-	return m.confirmed[import_key], nil
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 10)
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	return string(buf)
+	key := file + ":" + strconv.Itoa(line)
+	return m.confirmed[key], nil
 }
 
 // buildGraph constructs a minimal graph containing a single function node.
@@ -210,7 +199,7 @@ func TestEnrich_InputSliceNotMutated(t *testing.T) {
 }
 
 func TestEnrich_MultipleViolationsMixedConfidence(t *testing.T) {
-	// One MEDIUM (confirmed), one LOW (not confirmed), one HIGH (skipped).
+	// One MEDIUM (confirmed → HIGH), one LOW (confirmed → MEDIUM), one HIGH (skipped).
 	mv := &mockVerifier{confirmed: map[string]bool{"/repo/handler.go:44": true}}
 	e := NewLSPEnricher(mv)
 	g := buildGraph(t, "/repo/handler.go", "adminHandler", 45)
