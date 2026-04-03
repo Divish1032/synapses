@@ -16,7 +16,7 @@ var (
 
 // langCache is a fixed-size slice indexed by TSSymbol for O(1) lookup.
 type langCache struct {
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	types []string // indexed by Symbol; "" = uncached
 }
 
@@ -51,11 +51,14 @@ func ensureLangCache(lang *sitter.Language) *langCache {
 // This is the fast path — no allocation for cache hits.
 func nodeTypeFor(n sitter.Node, lc *langCache) string {
 	sym := int(n.Symbol())
+	lc.mu.RLock()
 	if sym < len(lc.types) {
 		if t := lc.types[sym]; t != "" {
+			lc.mu.RUnlock()
 			return t
 		}
 	}
+	lc.mu.RUnlock()
 	t := n.Type()
 	lc.mu.Lock()
 	if sym < len(lc.types) {
