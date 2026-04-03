@@ -69,6 +69,23 @@ type Violation struct {
 
 	// Tags from the pattern (e.g. "owasp-a01", "auth", "production-critical").
 	Tags []string `json:"tags,omitempty"`
+
+	// Confidence is the detection-method quality of this finding.
+	// Orthogonal to Severity — indicates how certain Synapses is that the finding
+	// is a true positive, independent of how the agent should respond.
+	//
+	//   HIGH   — import-level or literal-value match; near-zero false positive rate.
+	//   MEDIUM — tree-sitter name-based AST pattern; LSP can upgrade to HIGH (28.5).
+	//   LOW    — heuristic (function-name BFS); treat as "verify, not act".
+	//
+	// Always set on violations returned by CheckFile, CheckProject, CheckNorms,
+	// and CheckImports. Format in agent output: "CRITICAL [Confidence: HIGH — import-path-match]".
+	Confidence ConfidenceLevel `json:"confidence"`
+
+	// ConfidenceReason is a short label explaining WHY this confidence level was
+	// assigned. Examples: "import-path-match", "ast-call-pattern", "function-name-heuristic".
+	// Helps agents and reviewers understand the detection basis without reading source.
+	ConfidenceReason string `json:"confidence_reason"`
 }
 
 // actionForSeverity returns the behavioral directive string for the given severity.
@@ -215,6 +232,8 @@ func (e *Engine) CheckFile(g *graph.Graph, filePath string, content []byte) []Vi
 			// Project-scope check: skipped per-file.
 			// Use CheckProject for cross-transport analysis.
 		}
+		// Stamp detection confidence from check type before accumulating.
+		setFindingConfidence(found, ConfidenceForCheckType(p.Detection.CheckType), ConfidenceReasonForCheckType(p.Detection.CheckType))
 		violations = append(violations, found...)
 	}
 
@@ -236,12 +255,14 @@ func (e *Engine) CheckProject(g *graph.Graph) []Violation {
 	for _, p := range e.patterns.ForCheckType(CheckTypeCrossTransportAuth) {
 		if p.IsEnabled() {
 			found := checkCrossTransportAuth(g, p)
+			setFindingConfidence(found, ConfidenceForCheckType(CheckTypeCrossTransportAuth), ConfidenceReasonForCheckType(CheckTypeCrossTransportAuth))
 			violations = append(violations, found...)
 		}
 	}
 	for _, p := range e.patterns.ForCheckType(CheckTypeLayerMapping) {
 		if p.IsEnabled() {
 			found := checkLayerMapping(g, p)
+			setFindingConfidence(found, ConfidenceForCheckType(CheckTypeLayerMapping), ConfidenceReasonForCheckType(CheckTypeLayerMapping))
 			violations = append(violations, found...)
 		}
 	}
@@ -424,13 +445,15 @@ func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
 		}
 
 		violations = append(violations, Violation{
-			PatternID:   "norm:" + normKey,
-			PatternName: fmt.Sprintf("Observed norm — %q in %d/%d route file(s)", normKey, count, siblingRouteCount),
-			Severity:    severity,
-			File:        filePath,
-			Target:      filepath.Base(filePath),
-			Message:     msg,
-			Evidence:    evidence,
+			PatternID:        "norm:" + normKey,
+			PatternName:      fmt.Sprintf("Observed norm — %q in %d/%d route file(s)", normKey, count, siblingRouteCount),
+			Severity:         severity,
+			File:             filePath,
+			Target:           filepath.Base(filePath),
+			Message:          msg,
+			Evidence:         evidence,
+			Confidence:       ConfidenceMedium,
+			ConfidenceReason: "statistical-norm",
 		})
 	}
 

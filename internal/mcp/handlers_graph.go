@@ -287,6 +287,25 @@ func (s *Server) handleFindEntity(
 // get_impact, tasks, end_session, memory.
 
 // buildSearchWhy produces a natural-language "why" string for a search result.
+// searchMatchConfidence maps an internal search hit score to a ConfidenceLevel string.
+// Scores mirror the scoring logic in handleSearch:
+//
+//	≥20 — exact or prefix name match → HIGH (unambiguous entity)
+//	6–19 — name-contains, semantic, path, or multi-word → MEDIUM
+//	<6  — doc-only or keyword match → LOW (verify before acting)
+//
+// Sprint 28.4: provides agents with a confidence signal alongside search results.
+func searchMatchConfidence(score int) string {
+	switch {
+	case score >= 20:
+		return "HIGH"
+	case score >= 6:
+		return "MEDIUM"
+	default:
+		return "LOW"
+	}
+}
+
 // It combines the match reason (how the entity was found), relationship context
 // (fan-in/fan-out), and any extra tags (e.g. "recently modified", "has
 // architectural rule"). Tags come from buildSearchTags and are appended after
@@ -578,15 +597,20 @@ func (s *Server) handleSearch(
 	}
 
 	type result struct {
-		Type      string `json:"type"`
-		Name      string `json:"name"`
-		File      string `json:"file"`
-		Line      int    `json:"line"`
-		Doc       string `json:"doc,omitempty"`
-		Signature string `json:"signature,omitempty"`
-		Why       string `json:"why"`
-		Callers   int    `json:"callers,omitempty"`
-		Callees   int    `json:"callees,omitempty"`
+		Type             string `json:"type"`
+		Name             string `json:"name"`
+		File             string `json:"file"`
+		Line             int    `json:"line"`
+		Doc              string `json:"doc,omitempty"`
+		Signature        string `json:"signature,omitempty"`
+		Why              string `json:"why"`
+		Callers          int    `json:"callers,omitempty"`
+		Callees          int    `json:"callees,omitempty"`
+		// MatchConfidence is the quality of the name resolution used to find this result.
+		// HIGH  — exact or prefix name match (score ≥ 20): unambiguous entity.
+		// MEDIUM — name-contains, semantic, or path match (score 6–19): likely correct.
+		// LOW   — doc-only or keyword match (score < 6): verify before acting.
+		MatchConfidence string `json:"match_confidence"`
 	}
 
 	results := make([]result, len(hits))
@@ -595,15 +619,16 @@ func (s *Server) handleSearch(
 		fanin := s.graph.Fanin(h.node.ID)
 		fanout := s.graph.Fanout(h.node.ID)
 		results[i] = result{
-			Type:      string(h.node.Type),
-			Name:      h.node.Name,
-			File:      rel,
-			Line:      h.node.Line,
-			Doc:       h.node.Metadata["doc"],
-			Signature: h.node.Metadata["signature"],
-			Why:       buildSearchWhy(h.matchType, fanin, fanout, s.buildSearchTags(h.node.File, rel)...),
-			Callers:   fanin,
-			Callees:   fanout,
+			Type:            string(h.node.Type),
+			Name:            h.node.Name,
+			File:            rel,
+			Line:            h.node.Line,
+			Doc:             h.node.Metadata["doc"],
+			Signature:       h.node.Metadata["signature"],
+			Why:             buildSearchWhy(h.matchType, fanin, fanout, s.buildSearchTags(h.node.File, rel)...),
+			Callers:         fanin,
+			Callees:         fanout,
+			MatchConfidence: searchMatchConfidence(h.score),
 		}
 	}
 

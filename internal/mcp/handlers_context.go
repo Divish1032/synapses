@@ -2069,6 +2069,11 @@ type blastRadiusSummary struct {
 	AffectedFiles     int `json:"affected_files"`
 	UntestedEntities  int `json:"untested_entities"`
 	HighRiskEntities  int `json:"high_risk_entities"`
+	// EdgeConfidence describes the resolution quality of the call edges used to
+	// build this blast radius. MEDIUM is the current baseline (tree-sitter name-based
+	// call-edge resolution). Edges verified by LSP (gopls/tsserver — Sprint 28.2/28.3)
+	// are upgraded to HIGH by the LSP enrichment layer (Sprint 28.5).
+	EdgeConfidence string `json:"edge_confidence"`
 }
 
 type testGap struct {
@@ -2154,6 +2159,9 @@ func (s *Server) enrichImpactForReview(result *graph.ImpactResult, rootName, roo
 		}
 	}
 	ri.BlastRadius.AffectedFiles = len(result.AffectedFiles)
+	// Sprint 28.4: call-edge confidence baseline. MEDIUM reflects tree-sitter name-based
+	// resolution. LSP enrichment (Sprint 28.5) upgrades verified edges to HIGH.
+	ri.BlastRadius.EdgeConfidence = "MEDIUM — tree-sitter call-edge resolution; enable gopls/tsserver for HIGH confidence"
 
 	// 2. Test gaps — check up to 30 impacted entities for test coverage.
 	// Depth-1 entities are checked first (most important for review).

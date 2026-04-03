@@ -143,14 +143,16 @@ func buildUnknownImportViolation(filePath, importPath, lang string, suggestion s
 	}
 
 	return Violation{
-		PatternID:   patternID,
-		PatternName: fmt.Sprintf("Unknown %s package", langLabel),
-		Severity:    SeverityHigh,
-		File:        filePath,
-		Target:      importPath,
-		Message:     msg,
-		Evidence:    evidence,
-		Tags:        []string{"supply-chain", "slopsquatting", "hallucination"},
+		PatternID:        patternID,
+		PatternName:      fmt.Sprintf("Unknown %s package", langLabel),
+		Severity:         SeverityHigh,
+		File:             filePath,
+		Target:           importPath,
+		Message:          msg,
+		Evidence:         evidence,
+		Tags:             []string{"supply-chain", "slopsquatting", "hallucination"},
+		Confidence:       ConfidenceHigh,
+		ConfidenceReason: "import-path-match",
 	}
 }
 
