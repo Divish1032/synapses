@@ -345,6 +345,264 @@ func TestRunFailurePatternExtraction_idempotent(t *testing.T) {
 	}
 }
 
+// ── Strategy 2: backtick-quoted identifiers ───────────────────────────────────
+
+// TestRunFailurePatternExtraction_backtickFunction verifies that identifiers
+// written in backticks (e.g. `AuthMiddleware`) are extracted and promoted when
+// they appear in ≥ MinOccurrencesForFailurePattern records.
+func TestRunFailurePatternExtraction_backtickFunction(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-backtick"
+	for i := 0; i < MinOccurrencesForFailurePattern; i++ {
+		_, err := st.InsertRejectedApproach(store.RejectedApproach{
+			ID:            fmt.Sprintf("rej-bt-%d", i),
+			ProjectID:     projID,
+			Approach:      "Tried using `AuthMiddleware` for JWT validation",
+			FailureReason: "panics with nil context when token is missing",
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+
+	n, err := runFailurePatternExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runFailurePatternExtraction: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected ≥1 pattern from backtick identifier, got 0")
+	}
+
+	patterns, err := st.GetProjectFailurePatterns(projID, 0.0)
+	if err != nil {
+		t.Fatalf("GetProjectFailurePatterns: %v", err)
+	}
+
+	// Keyword stored lowercase; patternType must be "function".
+	found := false
+	for _, p := range patterns {
+		if p.Keyword == "authmiddleware" {
+			found = true
+			if p.PatternType != "function" {
+				t.Errorf("pattern_type: got %q, want 'function'", p.PatternType)
+			}
+			if p.OccurrenceCount != MinOccurrencesForFailurePattern {
+				t.Errorf("occurrence_count: got %d, want %d", p.OccurrenceCount, MinOccurrencesForFailurePattern)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected pattern with keyword 'authmiddleware', got: %v", patterns)
+	}
+}
+
+// TestRunFailurePatternExtraction_backtickStopListExcluded verifies that
+// language keywords in backticks (e.g. `error`, `context`) are NOT promoted.
+func TestRunFailurePatternExtraction_backtickStopListExcluded(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-bt-stop"
+	for i := 0; i < 3; i++ {
+		_, err := st.InsertRejectedApproach(store.RejectedApproach{
+			ID:            fmt.Sprintf("rej-bt-stop-%d", i),
+			ProjectID:     projID,
+			Approach:      "Returning `error` from `context` caused issues",
+			FailureReason: "used `nil` check instead of `error` wrapping",
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach: %v", err)
+		}
+	}
+
+	_, err := runFailurePatternExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runFailurePatternExtraction: %v", err)
+	}
+	patterns, err := st.GetProjectFailurePatterns(projID, 0.0)
+	if err != nil {
+		t.Fatalf("GetProjectFailurePatterns: %v", err)
+	}
+	for _, p := range patterns {
+		if p.PatternType == "function" {
+			switch p.Keyword {
+			case "error", "context", "nil":
+				t.Errorf("stop-list identifier %q should not be promoted", p.Keyword)
+			}
+		}
+	}
+}
+
+// TestRunFailurePatternExtraction_backtickSingleRecordDedup verifies that a
+// backtick identifier appearing multiple times in a single record's text counts
+// as one occurrence, not many.
+func TestRunFailurePatternExtraction_backtickSingleRecordDedup(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-bt-dedup"
+	// Only one record, but `RateLimiter` appears three times in approach text.
+	_, err := st.InsertRejectedApproach(store.RejectedApproach{
+		ProjectID:     projID,
+		Approach:      "Used `RateLimiter` — `RateLimiter` caused issues — removed `RateLimiter`",
+		FailureReason: "thread safety problems",
+	})
+	if err != nil {
+		t.Fatalf("InsertRejectedApproach: %v", err)
+	}
+
+	n, err := runFailurePatternExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runFailurePatternExtraction: %v", err)
+	}
+	// Only 1 record → occurrence_count = 1 → below threshold → 0 patterns promoted.
+	if n != 0 {
+		t.Errorf("single-record dedup: expected 0 patterns, got %d", n)
+	}
+}
+
+// ── Strategy 3: known error pattern normalization ─────────────────────────────
+
+// TestRunFailurePatternExtraction_knownErrorPattern verifies that a known runtime
+// error phrase in the Blocker field is normalized to a stable keyword and promoted
+// when it appears in ≥ MinOccurrencesForFailurePattern records.
+func TestRunFailurePatternExtraction_knownErrorPattern(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-error-pat"
+	for i := 0; i < MinOccurrencesForFailurePattern; i++ {
+		_, err := st.InsertRejectedApproach(store.RejectedApproach{
+			ID:            fmt.Sprintf("rej-ep-%d", i),
+			ProjectID:     projID,
+			Approach:      "Accessing user map concurrently from multiple goroutines",
+			FailureReason: "race condition in map access",
+			Blocker:       fmt.Sprintf("fatal error: concurrent map read and map write at goroutine %d", i+1),
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+
+	n, err := runFailurePatternExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runFailurePatternExtraction: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected ≥1 pattern from error normalization, got 0")
+	}
+
+	patterns, err := st.GetProjectFailurePatterns(projID, 0.0)
+	if err != nil {
+		t.Fatalf("GetProjectFailurePatterns: %v", err)
+	}
+
+	found := false
+	for _, p := range patterns {
+		if p.Keyword == "concurrent-map-access" {
+			found = true
+			if p.PatternType != "error_pattern" {
+				t.Errorf("pattern_type: got %q, want 'error_pattern'", p.PatternType)
+			}
+			if p.OccurrenceCount != MinOccurrencesForFailurePattern {
+				t.Errorf("occurrence_count: got %d, want %d", p.OccurrenceCount, MinOccurrencesForFailurePattern)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected pattern with keyword 'concurrent-map-access', got: %v", patterns)
+	}
+}
+
+// TestRunFailurePatternExtraction_errorPatternFirstMatchWins verifies that when a
+// blocker matches multiple known error patterns, only the most specific one
+// (earliest in the knownErrorPatterns table) is emitted per record.
+func TestRunFailurePatternExtraction_errorPatternFirstMatchWins(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-ep-firstmatch"
+	for i := 0; i < MinOccurrencesForFailurePattern; i++ {
+		// This blocker matches both "nil pointer dereference" (specific)
+		// AND "runtime error" (generic catch-all) — specific must win.
+		_, err := st.InsertRejectedApproach(store.RejectedApproach{
+			ID:            fmt.Sprintf("rej-fm-%d", i),
+			ProjectID:     projID,
+			Approach:      "Calling GetUser without checking session",
+			FailureReason: "panics on unauthenticated requests",
+			Blocker:       "runtime error: invalid memory address or nil pointer dereference",
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+
+	_, err := runFailurePatternExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runFailurePatternExtraction: %v", err)
+	}
+
+	patterns, err := st.GetProjectFailurePatterns(projID, 0.0)
+	if err != nil {
+		t.Fatalf("GetProjectFailurePatterns: %v", err)
+	}
+
+	// "nil-pointer-dereference" should be present; "go-runtime-error" should NOT
+	// (first-match-wins prevents double-counting the same blocker text).
+	hasSpecific := false
+	hasGeneric := false
+	for _, p := range patterns {
+		if p.PatternType != "error_pattern" {
+			continue
+		}
+		if p.Keyword == "nil-pointer-dereference" {
+			hasSpecific = true
+		}
+		if p.Keyword == "go-runtime-error" {
+			hasGeneric = true
+		}
+	}
+	if !hasSpecific {
+		t.Error("expected 'nil-pointer-dereference' pattern to be promoted")
+	}
+	if hasGeneric {
+		t.Error("'go-runtime-error' should not be promoted when more specific pattern matched first")
+	}
+}
+
+// TestRunFailurePatternExtraction_emptyBlockerSkipsErrorStrategy verifies that
+// records with an empty Blocker field do not produce error_pattern entries.
+func TestRunFailurePatternExtraction_emptyBlockerSkipsErrorStrategy(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-empty-blocker"
+	for i := 0; i < MinOccurrencesForFailurePattern; i++ {
+		_, err := st.InsertRejectedApproach(store.RejectedApproach{
+			ID:            fmt.Sprintf("rej-eb-%d", i),
+			ProjectID:     projID,
+			Approach:      "Direct DB access from handler",
+			FailureReason: "violates layering", // Blocker is empty
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+
+	_, err := runFailurePatternExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runFailurePatternExtraction: %v", err)
+	}
+
+	patterns, err := st.GetProjectFailurePatterns(projID, 0.0)
+	if err != nil {
+		t.Fatalf("GetProjectFailurePatterns: %v", err)
+	}
+	for _, p := range patterns {
+		if p.PatternType == "error_pattern" {
+			t.Errorf("expected no error_pattern with empty Blocker, got keyword=%q", p.Keyword)
+		}
+	}
+}
+
 // ── integration: session_init _briefing.failure_avoidance ─────────────────────
 
 // TestSessionInit_FailureAvoidance_InBriefing verifies end-to-end that failure

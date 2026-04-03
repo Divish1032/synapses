@@ -17,6 +17,10 @@ const MinOccurrencesForFailurePattern = 2
 // records read by the extractor. Keeps extraction O(N) with a bounded N.
 const maxRejectedApproachesToScan = 200
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Strategy 1: Hyphenated package/library names
+// ─────────────────────────────────────────────────────────────────────────────
+
 // hyphenatedPkgRE matches hyphenated package/library names: lowercase letter,
 // followed by lowercase alphanumerics, a hyphen, then at least one lowercase
 // letter (prevents matching version strings like "v3" or plain adjectives).
@@ -45,11 +49,117 @@ var hyphenatedStopList = map[string]bool{
 	"set-up":         true,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Strategy 2: Backtick-quoted identifiers (function/method/type names)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// backtickIdentRE extracts identifiers wrapped in backticks (e.g. `AuthMiddleware`,
+// `parseUserID`). Backtick quotes are an explicit code signal — the author is
+// specifically marking a code entity — so precision is high and false positives
+// are rare. Minimum 4 characters to exclude noise like `ok`, `err`, `id`.
+// No spaces or punctuation allowed inside — prevents matching shell commands like
+// `go build ./...` or `git commit -m`.
+var backtickIdentRE = regexp.MustCompile("`([A-Za-z][A-Za-z0-9_]{3,})`")
+
+// backtickStopList filters identifiers that appear in backticks but are language
+// keywords or ubiquitous builtins, not project-specific function or type names.
+// Stored and checked in lowercase — keyword extraction normalises to lowercase.
+var backtickStopList = map[string]bool{
+	// Go builtins / keywords
+	"error": true, "string": true, "bool": true, "byte": true, "rune": true,
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"float32": true, "float64": true, "complex64": true, "complex128": true,
+	"uintptr": true, "make": true, "append": true, "delete": true, "copy": true,
+	"close": true, "panic": true, "recover": true, "print": true, "println": true,
+	"true": true, "false": true, "nil": true, "iota": true,
+	"struct": true, "interface": true, "func": true, "type": true, "chan": true,
+	"range": true, "select": true, "switch": true, "return": true, "break": true,
+	"continue": true, "goto": true, "defer": true, "import": true, "package": true,
+	"const": true, "var": true, "fallthrough": true, "default": true, "case": true,
+	"else": true, "for": true, "if": true, "map": true, "slice": true, "new": true,
+	// Common Go stdlib identifiers too generic to signal a project pattern
+	"context": true, "http": true, "json": true, "sync": true, "time": true,
+	"bytes": true, "bufio": true, "fmt": true, "log": true, "math": true,
+	"sort": true, "path": true, "strconv": true, "strings": true, "unicode": true,
+	// Common test identifiers
+	"testing": true, "testify": true, "assert": true, "require": true,
+	// Python builtins / keywords
+	"self": true, "none": true, "class": true, "lambda": true, "yield": true,
+	"async": true, "await": true, "pass": true, "with": true, "from": true,
+	// JS/TS keywords
+	"this": true, "then": true, "catch": true, "finally": true, "typeof": true,
+	"instanceof": true, "void": true, "function": true, "prototype": true,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Strategy 3: Known runtime/library error patterns
+// ─────────────────────────────────────────────────────────────────────────────
+
+// knownErrorPatterns maps recurring runtime error substrings to stable
+// hyphenated keywords. When a Blocker field contains the error phrase
+// (case-insensitive), the corresponding keyword is promoted as an
+// "error_pattern" FailurePattern. Normalized to hyphenated form so patterns
+// accumulate reliably across sessions even when the full error message varies
+// (e.g., different file paths, line numbers, or goroutine IDs are stripped).
+//
+// Ordered: more specific entries first (a blocker may contain both "nil pointer
+// dereference" and "runtime error" — we want the more specific match).
+var knownErrorPatterns = []struct {
+	contains string // substring to search (matched case-insensitively in blocker text)
+	keyword  string // stable hyphenated keyword stored as FailurePattern.Keyword
+}{
+	// Go runtime panics — specific first
+	{"nil pointer dereference", "nil-pointer-dereference"},
+	{"index out of range", "index-out-of-range"},
+	{"concurrent map read", "concurrent-map-access"},
+	{"send on closed channel", "send-on-closed-channel"},
+	{"all goroutines are asleep", "goroutine-deadlock"},
+	{"deadlock detected", "goroutine-deadlock"},  // alternate phrasing → same keyword
+	{"slice bounds out of range", "slice-bounds-out-of-range"},
+	{"interface conversion", "interface-type-assertion-failed"},
+	// Go context / network
+	{"context deadline exceeded", "context-deadline-exceeded"},
+	{"context canceled", "context-canceled"},
+	{"connection refused", "connection-refused"},
+	{"connection reset by peer", "connection-reset"},
+	{"no such host", "dns-resolution-failed"},
+	{"tls: certificate signed by unknown authority", "tls-cert-unknown-authority"},
+	{"tls handshake timeout", "tls-handshake-timeout"},
+	// Go filesystem
+	{"permission denied", "permission-denied"},
+	{"no such file or directory", "file-not-found"},
+	{"too many open files", "too-many-open-files"},
+	// Go SQL / DB
+	{"sql: no rows in result set", "sql-no-rows"},
+	{"sql: transaction has already been committed or rolled back", "sql-txn-closed"},
+	{"driver: bad connection", "db-bad-connection"},
+	// Generic runtime
+	{"stack overflow", "stack-overflow"},
+	{"out of memory", "out-of-memory"},
+	{"runtime error", "go-runtime-error"}, // catch-all — least specific, last
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core extraction engine
+// ─────────────────────────────────────────────────────────────────────────────
+
 // runFailurePatternExtraction reads all rejected_approach records for the project
 // and promotes recurring keyword patterns to ExtractedFailurePattern records.
 //
-// A pattern is promoted when the same keyword (library name or hyphenated package
-// name) appears in ≥ MinOccurrencesForFailurePattern rejected_approach records.
+// Three extraction strategies run against each record:
+//
+//  1. Hyphenated library/package names (e.g. "jwt-go", "chi-router", "gin-gonic")
+//     — matched by regex on lowercased approach+blocker text.
+//  2. Backtick-quoted identifiers (e.g. `AuthMiddleware`, `parseUserID`)
+//     — matched by backtick regex on original approach text. High precision:
+//     backticks are explicit code markers, not prose.
+//  3. Known runtime error normalization (e.g. "nil pointer dereference" →
+//     "nil-pointer-dereference") — matched against the Blocker field to produce
+//     stable hyphenated keywords that accumulate cross-session.
+//
+// A pattern is promoted when the same keyword appears in
+// ≥ MinOccurrencesForFailurePattern rejected_approach records.
 //
 // Returns the number of patterns upserted (new + updated). Runs synchronously at
 // end_session as a Tier 1 auto-capture operation — no agent action required. Cost
@@ -91,36 +201,53 @@ func runFailurePatternExtraction(st *store.Store, projectID string) (int, error)
 	}
 
 	for _, r := range approaches {
-		// Combine approach + blocker for keyword scanning (lowercased for
-		// case-insensitive token extraction).
-		text := strings.ToLower(r.Approach + " " + r.Blocker)
-
-		// Extract hyphenated package/library names (e.g., "jwt-go", "chi-router",
-		// "gin-gonic"). The regex matches names directly from the approach text
-		// so the keyword is human-readable ("jwt-go" not "uses_jwt_go").
-		//
-		// Pattern: starts with a lowercase letter, followed by lowercase
-		// alphanumerics, a hyphen, at least one more lowercase letter segment.
-		// This naturally catches library names like "jwt-go", "gin-gonic",
-		// "gorilla-mux", "react-router" while filtering version strings ("v3")
-		// and generic adjectives ("well-known" → in stop list).
+		// seen deduplicates keywords within a single record so one record cannot
+		// inflate the occurrence count for any keyword more than once.
 		seen := make(map[string]bool)
-		for _, tok := range hyphenatedPkgRE.FindAllString(text, -1) {
+
+		// ── Strategy 1: Hyphenated library/package names ─────────────────────
+		// Lowercased combined text — library names are case-insensitive.
+		lowText := strings.ToLower(r.Approach + " " + r.Blocker)
+		for _, tok := range hyphenatedPkgRE.FindAllString(lowText, -1) {
 			if hyphenatedStopList[tok] || seen[tok] {
 				continue
 			}
 			seen[tok] = true
-			// Classify as "library" when the token appears in wellKnownLibraries,
-			// otherwise as "package". This distinction informs the confidence level
-			// in a future enhancement but both generate the same NL warning for now.
-			ptype := "package"
-			for _, lib := range wellKnownLibraries {
-				if strings.Contains(lib.contains, tok) || strings.Contains(tok, strings.TrimLeft(lib.contains, "/")) {
-					ptype = "library"
+			addMatch(tok, classifyLibraryType(tok), r)
+		}
+
+		// ── Strategy 2: Backtick-quoted identifiers ───────────────────────────
+		// Applied to ORIGINAL (non-lowercased) text — backtick content is
+		// case-sensitive code. Keyword stored lowercase for consistent accumulation
+		// across sessions (Go PascalCase, Python snake_case, JS camelCase are all
+		// reduced to the same key regardless of how they were formatted).
+		origText := r.Approach + " " + r.Blocker
+		for _, sub := range backtickIdentRE.FindAllStringSubmatch(origText, -1) {
+			lower := strings.ToLower(sub[1])
+			if backtickStopList[lower] || seen[lower] {
+				continue
+			}
+			seen[lower] = true
+			addMatch(lower, "function", r)
+		}
+
+		// ── Strategy 3: Known runtime error normalization ─────────────────────
+		// Scans the Blocker field (which holds specific error/exception text)
+		// for known multi-word error phrases and maps them to stable hyphenated
+		// keywords. Ordered most-specific-first so "nil pointer dereference"
+		// wins over the catch-all "runtime error".
+		lowerBlocker := strings.ToLower(r.Blocker)
+		if lowerBlocker != "" {
+			for _, ep := range knownErrorPatterns {
+				if strings.Contains(lowerBlocker, ep.contains) && !seen[ep.keyword] {
+					seen[ep.keyword] = true
+					addMatch(ep.keyword, "error_pattern", r)
+					// First match wins per record — prevents one blocker from
+					// adding both "nil-pointer-dereference" and the catch-all
+					// "go-runtime-error" to the same record's keyword set.
 					break
 				}
 			}
-			addMatch(tok, ptype, r)
 		}
 	}
 
@@ -157,6 +284,19 @@ func runFailurePatternExtraction(st *store.Store, projectID string) (int, error)
 	return total, nil
 }
 
+// classifyLibraryType returns "library" when tok matches a well-known library
+// entry, "package" otherwise. Used for the PatternType field — both types
+// produce the same NL warning but the distinction may inform future confidence
+// tuning.
+func classifyLibraryType(tok string) string {
+	for _, lib := range wellKnownLibraries {
+		if strings.Contains(lib.contains, tok) || strings.Contains(tok, strings.TrimLeft(lib.contains, "/")) {
+			return "library"
+		}
+	}
+	return "package"
+}
+
 // failurePatternText returns the natural-language warning string for a failure
 // pattern. Format: "'<keyword>' was tried <N> time(s) and abandoned: <reason>."
 func failurePatternText(keyword string, count int, reason string) string {
@@ -187,4 +327,3 @@ func failurePatternConfidence(count int) float64 {
 		return 0.60
 	}
 }
-
