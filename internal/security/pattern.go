@@ -226,7 +226,10 @@ type Detection struct {
 	// authorization when they do not call ElevatedAuthPatterns.
 	//
 	// Used by: CheckTypeAdminElevation
-	// Examples: ["*admin*", "*management*", "handleAdmin*", "*AdminHandler"]
+	// Examples: ["*admin*", "handleAdmin*", "*AdminHandler"]
+	// Note: "*management*" is intentionally excluded — it matches unrelated names
+	// like "documentManagement" or "UserManager". Use AdminPackagePaths for
+	// management-scoped detection instead.
 	AdminHandlerNamePatterns []string `json:"admin_handler_name_patterns,omitempty"`
 
 	// AdminPackagePaths are file path patterns identifying files that contain

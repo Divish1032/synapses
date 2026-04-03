@@ -918,7 +918,12 @@ func checkAdminElevation(fc *fileContext, p SecurityPattern) []Violation {
 	// ── Strategy 2: functions/methods whose names indicate admin handling ─────
 	// Patterns are matched case-insensitively so both "AdminUsers" and
 	// "adminUsers" are caught without requiring duplicate pattern entries.
-	if len(p.Detection.AdminHandlerNamePatterns) > 0 {
+	//
+	// Test files (_test.go, testdata/, etc.) are skipped entirely: test helpers
+	// like TestAdminEndpoint or setupAdminFixture match "*admin*" but do not
+	// represent production handlers that need elevated auth. Flagging them is
+	// always a false positive.
+	if len(p.Detection.AdminHandlerNamePatterns) > 0 && !isTestFile(fc.filePath) {
 		seen := make(map[string]bool)
 		for _, n := range fc.nodes {
 			if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
@@ -957,7 +962,10 @@ func checkAdminElevation(fc *fileContext, p SecurityPattern) []Violation {
 	// admin-named routes would already be caught by strategy 1 or 2).
 	// Requires the file to contain at least one function or method to be worth flagging
 	// (avoids noisy findings on config/init files with no handler logic).
+	// Test files are skipped: admin/handlers_test.go is a test file, not a production
+	// admin handler, and flagging it for missing elevated auth is a false positive.
 	if len(violations) == 0 && len(p.Detection.AdminPackagePaths) > 0 &&
+		!isTestFile(fc.filePath) &&
 		fileMatchesAny(fc.filePath, p.Detection.AdminPackagePaths) {
 		hasFunctions := false
 		for _, n := range fc.nodes {

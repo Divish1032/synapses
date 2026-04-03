@@ -467,3 +467,53 @@ func TestAdminElevation_LoadBuiltin_GenericPattern_AdminPackageFires(t *testing.
 		t.Fatal("generic-admin-elevation should fire for file in admin/ package, got none")
 	}
 }
+
+// ── Test file exclusion ───────────────────────────────────────────────────────
+
+func TestAdminElevation_HandlerNamePattern_SkipsTestFile(t *testing.T) {
+	// Test functions like TestAdminGetUsers match "*admin*" but must NOT fire —
+	// test files have no production auth requirements.
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/api/admin_test.go", "net/http")
+	addFunctionWithCalls(g, "/project/api/admin_test.go", "TestAdminGetUsers")
+	addFunctionWithCalls(g, "/project/api/admin_test.go", "setupAdminFixture")
+
+	e := makeEngine(adminElevationPattern(func(d *Detection) {
+		d.AdminHandlerNamePatterns = []string{"*admin*"}
+	}))
+	vs := e.CheckFile(g, "/project/api/admin_test.go", nil)
+	if findAdminViolation(vs) != nil {
+		t.Error("Strategy 2 must not fire on test files (false positive for test helpers)")
+	}
+}
+
+func TestAdminElevation_AdminPackagePath_SkipsTestFile(t *testing.T) {
+	// admin/handlers_test.go is a test file in the admin package — must NOT fire.
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/internal/admin/handlers_test.go", "net/http")
+	addFunctionWithCalls(g, "/project/internal/admin/handlers_test.go", "TestListAdminUsers")
+
+	e := makeEngine(adminElevationPattern(func(d *Detection) {
+		d.AdminPackagePaths = []string{"*/admin/*"}
+	}))
+	vs := e.CheckFile(g, "/project/internal/admin/handlers_test.go", nil)
+	if findAdminViolation(vs) != nil {
+		t.Error("Strategy 3 must not fire on test files in admin/ directory")
+	}
+}
+
+func TestAdminElevation_TestdataDirectory_SkipsTestFile(t *testing.T) {
+	// testdata/ files should also be excluded.
+	g := buildTestGraph(t)
+	addFileWithImports(g, "/project/testdata/admin/sample.go", "net/http")
+	addFunctionWithCalls(g, "/project/testdata/admin/sample.go", "setupAdmin")
+
+	e := makeEngine(adminElevationPattern(func(d *Detection) {
+		d.AdminHandlerNamePatterns = []string{"*admin*"}
+		d.AdminPackagePaths = []string{"*/admin/*"}
+	}))
+	vs := e.CheckFile(g, "/project/testdata/admin/sample.go", nil)
+	if findAdminViolation(vs) != nil {
+		t.Error("test-file detection must exclude testdata/ files")
+	}
+}
