@@ -101,6 +101,23 @@ func addStructWithHeritage(g *graph.Graph, filePath, structName string, bases ..
 	return id
 }
 
+// addFunctionWithSignature adds a NodeFunction whose Metadata["signature"] is set to sig.
+// No CALLS edges are added — this simulates a handler whose auth type appears only as a
+// parameter type (e.g. a Rust extractor/guard) rather than as a function call.
+func addFunctionWithSignature(g *graph.Graph, filePath, fnName, sig string) graph.NodeID {
+	fnID := g.MakeNodeID(filePath, fnName)
+	g.AddNode(&graph.Node{
+		ID:   fnID,
+		Type: graph.NodeFunction,
+		Name: fnName,
+		File: filePath,
+		Metadata: map[string]string{
+			"signature": sig,
+		},
+	})
+	return fnID
+}
+
 // makeSinglePattern creates a minimal Pattern for a given check type.
 func makeSinglePattern(checkType CheckType, extra ...func(*SecurityPattern)) SecurityPattern {
 	b := true

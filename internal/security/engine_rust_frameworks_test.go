@@ -416,6 +416,119 @@ func TestRustFrameworks_Rocket_NoRoutes_NoViolation(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Extractor / guard — required_signature_patterns
+// These tests verify that auth types appearing as handler parameter types
+// (Rust extractors for Axum, request guards for Rocket) suppress the violation
+// even when no auth function is called (no CALLS edges to auth functions).
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Axum: handler fn with Claims extractor in signature — no violation.
+func TestRustFrameworks_Axum_ClaimsExtractor_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/router.rs", "axum")
+	// Route registration call (no auth call — auth is via extractor parameter type).
+	addFunctionWithCalls(g, "/project/src/router.rs", "build_router", "route")
+	// Handler: fn get_user(claims: Claims) -> Json<User>
+	addFunctionWithSignature(g, "/project/src/router.rs", "get_user",
+		"fn get_user(claims: Claims) -> Json<User>")
+
+	violations := e.CheckFile(g, "/project/src/router.rs", nil)
+	if findViolation(violations, "rust-axum-missing-auth") != nil {
+		t.Error("expected no violation: Claims extractor in handler signature means auth is present")
+	}
+}
+
+// Axum: handler fn with AuthUser extractor — no violation.
+func TestRustFrameworks_Axum_AuthUserExtractor_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/api.rs", "axum")
+	addFunctionWithCalls(g, "/project/src/api.rs", "create_router", "route", "nest")
+	// Handler: fn profile(user: AuthUser, db: State<Db>) -> Json<Profile>
+	addFunctionWithSignature(g, "/project/src/api.rs", "profile",
+		"fn profile(user: AuthUser, db: State<Db>) -> Json<Profile>")
+
+	violations := e.CheckFile(g, "/project/src/api.rs", nil)
+	if findViolation(violations, "rust-axum-missing-auth") != nil {
+		t.Error("expected no violation: AuthUser extractor in handler signature means auth is present")
+	}
+}
+
+// Axum: no auth extractor and no auth call — violation fires.
+func TestRustFrameworks_Axum_NoExtractorNoCall_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/router.rs", "axum")
+	addFunctionWithCalls(g, "/project/src/router.rs", "build_router", "route")
+	// Handler: fn health() -> &'static str — no auth extractor.
+	addFunctionWithSignature(g, "/project/src/router.rs", "health",
+		"fn health() -> &'static str")
+
+	violations := e.CheckFile(g, "/project/src/router.rs", nil)
+	if findViolation(violations, "rust-axum-missing-auth") == nil {
+		t.Fatal("expected violation: no auth call and no auth extractor in signatures")
+	}
+}
+
+// Rocket: handler with AuthToken guard in signature — no violation.
+func TestRustFrameworks_Rocket_AuthTokenGuard_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/main.rs", "rocket")
+	addFunctionWithCalls(g, "/project/src/main.rs", "rocket_build", "mount", "launch")
+	// Handler: fn index(_token: AuthToken) -> &'static str
+	addFunctionWithSignature(g, "/project/src/main.rs", "index",
+		"fn index(_token: AuthToken) -> &'static str")
+
+	violations := e.CheckFile(g, "/project/src/main.rs", nil)
+	if findViolation(violations, "rust-rocket-missing-auth") != nil {
+		t.Error("expected no violation: AuthToken guard in handler signature means auth is present")
+	}
+}
+
+// Rocket: handler with UserGuard — no violation.
+func TestRustFrameworks_Rocket_UserGuard_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/src/main.rs", "rocket")
+	addFunctionWithCalls(g, "/project/src/main.rs", "rocket_build", "mount", "launch")
+	// Handler: fn dashboard(user: UserGuard) -> Template
+	addFunctionWithSignature(g, "/project/src/main.rs", "dashboard",
+		"fn dashboard(user: UserGuard) -> Template")
+
+	violations := e.CheckFile(g, "/project/src/main.rs", nil)
+	if findViolation(violations, "rust-rocket-missing-auth") != nil {
+		t.Error("expected no violation: UserGuard in handler signature means auth is present")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Cross-framework isolation — all three frameworks only fire on their own files
 // ──────────────────────────────────────────────────────────────────────────────
 

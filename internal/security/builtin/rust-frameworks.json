@@ -42,7 +42,7 @@
       "framework": "axum",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A file using Axum registers HTTP routes but does not apply any authentication. Axum supports two auth patterns: (1) Tower middleware layers — Router::new().layer(auth_layer) where auth_layer is typically a ValidateRequest layer or a custom tower::Layer; (2) Extractor-based auth — handler functions receive a type implementing FromRequestParts that carries auth state (e.g. a custom Claims or AuthUser extractor). This check fires when a file registers routes via .route(), .nest(), or .merge() but calls no recognised authentication function. The framework gate fires only when 'axum' is imported.",
+      "description": "A file using Axum registers HTTP routes but does not apply any authentication. Axum supports two auth patterns: (1) Tower middleware layers — Router::new().layer(auth_layer) where auth_layer is typically a ValidateRequest layer or a custom tower::Layer; (2) Extractor-based auth — handler functions receive a type implementing FromRequestParts that carries auth state (e.g. a custom Claims or AuthUser extractor). This check fires when a file registers routes via .route(), .nest(), or .merge() but calls no recognised authentication function AND no handler signature contains a recognised auth extractor type. The framework gate fires only when 'axum' is imported.",
       "detection": {
         "check_type": "missing_middleware",
         "framework_identifiers": ["axum"],
@@ -60,6 +60,13 @@
           "check_token*", "checkToken*",
           "extract_auth*"
         ],
+        "required_signature_patterns": [
+          "*Claims*", "*AuthUser*", "*AuthToken*", "*BearerToken*",
+          "*JwtClaims*", "*JwtToken*",
+          "*AuthGuard*", "*UserGuard*",
+          "*CurrentUser*", "*LoggedInUser*",
+          "*Session*"
+        ],
         "route_node_names": [
           "route", "nest", "nest_service", "merge"
         ],
@@ -76,7 +83,7 @@
       "framework": "rocket",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A file using Rocket mounts routes but does not apply any authentication. Rocket provides two auth mechanisms: (1) Fairings (middleware) — applied via .attach(AuthFairing) on the Rocket instance before launch; (2) Request guards — handler function parameters that implement FromRequest (e.g. AuthToken, Claims, a custom User guard). This check fires when a file calls .mount() but calls no recognised auth function. Note: request guard types in handler signatures are typically represented as type references rather than function calls in the AST — use this finding as a prompt to review whether each mounted route requires authentication.",
+      "description": "A file using Rocket mounts routes but does not apply any authentication. Rocket provides two auth mechanisms: (1) Fairings (middleware) — applied via .attach(AuthFairing) on the Rocket instance before launch; (2) Request guards — handler function parameters that implement FromRequest (e.g. AuthToken, Claims, a custom User guard). This check fires when a file calls .mount() but calls no recognised auth function AND no handler signature contains a recognised guard type. Named auth fairings (AuthFairing*) are caught via required_call_patterns; named guard types (AuthToken, Claims, UserGuard, etc.) are caught via required_signature_patterns.",
       "detection": {
         "check_type": "missing_middleware",
         "framework_identifiers": ["rocket"],
@@ -89,10 +96,17 @@
           "ValidateToken*", "VerifyToken*", "ParseToken*",
           "validate_token*", "verify_token*", "parse_token*",
           "Fairing*", "fairing*",
-          "Guard*",
           "Claims*",
           "login_required*", "token_required*",
           "check_token*", "checkToken*"
+        ],
+        "required_signature_patterns": [
+          "*AuthToken*", "*AuthUser*", "*AuthGuard*",
+          "*UserGuard*", "*AdminGuard*", "*ApiKey*",
+          "*Claims*", "*BearerToken*",
+          "*JwtToken*", "*JwtClaims*",
+          "*CurrentUser*", "*LoggedInUser*",
+          "*Guard*"
         ],
         "route_node_names": [
           "mount"
