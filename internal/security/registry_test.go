@@ -51,12 +51,15 @@ func TestNormalizePackageName_PyPI(t *testing.T) {
 		{"Flask", "flask"},
 		{"Flask-Cors", "flask-cors"},
 		{"flask_cors", "flask-cors"},     // underscore → hyphen
-		{"Flask.Cors", "flask-cors"},     // dot → hyphen
+		{"Flask.Cors", "flask-cors"},     // dot → hyphen (PEP 503 — within a package name)
 		{"scikit_learn", "scikit-learn"},
 		{"Pillow", "pillow"},
 		{"flask__cors", "flask-cors"},    // consecutive underscores collapsed (PEP 503)
 		{"flask--cors", "flask-cors"},    // consecutive hyphens collapsed
 		{"flask_.cors", "flask-cors"},    // mixed separators collapsed
+		// normalizePackageName does PEP 503 only — sub-module stripping is in registryKey.
+		// "requests.adapters" treated as package name: "requests-adapters" (PEP 503).
+		{"requests.adapters", "requests-adapters"}, // dots are PEP 503 separators in package names
 		{"", ""},
 	}
 	for _, tc := range cases {
@@ -73,9 +76,12 @@ func TestNormalizePackageName_Crates(t *testing.T) {
 	}{
 		{"serde", "serde"},
 		{"Serde", "serde"},
-		{"serde-json", "serde_json"},    // hyphen → underscore
+		{"serde-json", "serde_json"},        // hyphen → underscore
 		{"serde_json", "serde_json"},
 		{"tokio-util", "tokio_util"},
+		// normalizePackageName does crate name normalization only — :: stripping is in registryKey.
+		// "serde::Deserialize" treated as a raw crate name → lowercase + hyphen→underscore.
+		{"serde::Deserialize", "serde::deserialize"}, // :: preserved in normalizer (stripping done in registryKey)
 		{"", ""},
 	}
 	for _, tc := range cases {
@@ -94,6 +100,11 @@ func TestNormalizePackageName_NPM(t *testing.T) {
 		{"@types/node", "@types/node"},
 		{"@angular/core", "@angular/core"},
 		{"express", "express"},
+		// Sub-path export stripping: "lodash/fp" → "lodash", "@mui/material/Button" → "@mui/material"
+		{"lodash/fp", "lodash"},             // unscoped sub-path
+		{"date-fns/format", "date-fns"},     // sub-path export
+		{"@mui/material/Button", "@mui/material"}, // scoped sub-path
+		{"@radix-ui/react-dialog/Modal", "@radix-ui/react-dialog"}, // scoped sub-path
 		{"", ""},
 	}
 	for _, tc := range cases {
@@ -362,6 +373,11 @@ func TestPackageRegistry_IsKnown_NPM(t *testing.T) {
 		{"typescript", "fs", true},        // node builtin
 		{"typescript", "path", true},
 		{"typescript", "node:fs", true},
+		// Sub-path exports: "lodash/fp" resolves to "lodash" which IS known
+		{"typescript", "lodash/fp", true},
+		{"typescript", "date-fns/format", false}, // date-fns not in test registry
+		// Scoped sub-path: "@types/node/fs" resolves to "@types/node" which IS known
+		{"typescript", "@types/node/fs", true},
 	}
 	for _, tc := range cases {
 		got := r.IsKnown(tc.lang, tc.imp)
@@ -379,15 +395,19 @@ func TestPackageRegistry_IsKnown_PyPI(t *testing.T) {
 		want bool
 	}{
 		{"flask", true},
-		{"flask_cors", true},       // underscore normalizes to flask-cors
-		{"Flask-Cors", true},       // case normalizes to flask-cors
+		{"flask_cors", true},           // underscore normalizes to flask-cors
+		{"Flask-Cors", true},           // case normalizes to flask-cors
 		{"numpy", true},
-		{"os", true},               // stdlib
-		{"sys", true},              // stdlib
-		{"json", true},             // stdlib
-		{"flask-corse", false},     // hallucinated (typo)
-		{"numpi", false},           // hallucinated
-		{"./local", true},          // local import
+		{"os", true},                   // stdlib
+		{"sys", true},                  // stdlib
+		{"json", true},                 // stdlib
+		{"flask-corse", false},         // hallucinated (typo)
+		{"numpi", false},               // hallucinated
+		{"./local", true},              // local import
+		// Sub-module imports: "requests.adapters" → root is "requests" which IS known
+		{"requests.adapters", true},    // sub-module of known package
+		{"flask.views", true},          // sub-module of known package
+		{"os.path", true},              // stdlib sub-module (os is stdlib)
 	}
 	for _, tc := range cases {
 		got := r.IsKnown("python", tc.imp)
@@ -406,13 +426,17 @@ func TestPackageRegistry_IsKnown_Crates(t *testing.T) {
 	}{
 		{"serde", true},
 		{"serde_json", true},
-		{"serde-json", true},       // hyphen normalizes to serde_json
+		{"serde-json", true},           // hyphen normalizes to serde_json
 		{"tokio", true},
-		{"std", true},              // stdlib
-		{"std::io", true},          // stdlib
-		{"core::mem", true},        // stdlib
-		{"serdes", false},          // hallucinated
-		{"tokioo", false},          // hallucinated
+		{"std", true},                  // stdlib
+		{"std::io", true},              // stdlib
+		{"core::mem", true},            // stdlib
+		{"serdes", false},              // hallucinated
+		{"tokioo", false},              // hallucinated
+		// Module path stripping: "serde::Deserialize" → crate is "serde" which IS known
+		{"serde::Deserialize", true},   // module path stripped to crate name
+		{"tokio::io::AsyncRead", true}, // nested module path
+		{"serde_json::Value", true},    // serde_json with module path
 	}
 	for _, tc := range cases {
 		got := r.IsKnown("rust", tc.imp)

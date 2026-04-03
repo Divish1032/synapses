@@ -352,6 +352,7 @@ func (s *Server) handleValidatePlan(
 			src, _ := os.ReadFile(absFile) // nil on non-existent proposed files
 			scanned++
 			securityFindings = append(securityFindings, s.patternEngine.CheckFile(s.graph, absFile, src)...)
+			securityFindings = append(securityFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
 		}
 	}
 
@@ -688,9 +689,11 @@ func (s *Server) handleVerifyImplementation(
 			}
 		}
 
-		// Sprint 26.7: security pattern findings.
+		// Sprint 26.7: security pattern findings (CheckFile) + Sprint 26.11: unknown import detection (CheckImports).
 		if s.graph != nil && s.patternEngine != nil {
-			if findings := s.patternEngine.CheckFile(s.graph, absFile, fileContent); len(findings) > 0 {
+			findings := s.patternEngine.CheckFile(s.graph, absFile, fileContent)
+			findings = append(findings, s.patternEngine.CheckImports(s.graph, absFile)...)
+			if len(findings) > 0 {
 				r.SecurityFindings = findings
 				totalSecurityFindings += len(findings)
 			}

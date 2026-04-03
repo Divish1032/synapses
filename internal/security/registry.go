@@ -287,6 +287,12 @@ func (r *PackageRegistry) LoadedAt() time.Time {
 
 // registryKey maps an import path for the given language to its (registryLang, normalizedName).
 // Returns ("", "") for unsupported languages or empty paths.
+//
+// Language-specific import path handling (applied before normalization):
+//   - Python: sub-module paths are stripped to the root package ("requests.adapters" → "requests")
+//   - Rust: module paths are stripped to the crate name ("serde::Deserialize" → "serde")
+//   - npm: sub-path exports are stripped to the package name ("lodash/fp" → "lodash"),
+//     handled inside normalizePackageName (also needed for registry loading).
 func registryKey(lang, importPath string) (registryLang, string) {
 	if importPath == "" {
 		return "", ""
@@ -297,9 +303,21 @@ func registryKey(lang, importPath string) (registryLang, string) {
 	case "typescript", "javascript":
 		return regLangNPM, normalizePackageName(regLangNPM, importPath)
 	case "python":
-		return regLangPyPI, normalizePackageName(regLangPyPI, importPath)
+		// Python parsers store full dotted import paths: "requests.adapters", "os.path".
+		// Strip the sub-module suffix to get the top-level package name for registry lookup.
+		root := importPath
+		if i := strings.IndexByte(importPath, '.'); i >= 0 {
+			root = importPath[:i]
+		}
+		return regLangPyPI, normalizePackageName(regLangPyPI, root)
 	case "rust":
-		return regLangCrates, normalizePackageName(regLangCrates, importPath)
+		// Rust parsers store use-paths with :: separators: "serde::Deserialize".
+		// Strip the module path to get the crate name for registry lookup.
+		root := importPath
+		if i := strings.Index(importPath, "::"); i >= 0 {
+			root = importPath[:i]
+		}
+		return regLangCrates, normalizePackageName(regLangCrates, root)
 	default:
 		// Java, Ruby, PHP, C#, etc. — not yet supported.
 		return "", ""
@@ -323,6 +341,18 @@ func normalizePackageName(lang registryLang, name string) string {
 		name = strings.ToLower(name)
 		return pypiNormalize(name)
 	case regLangNPM:
+		// Strip sub-path exports: "lodash/fp" → "lodash", "@scope/pkg/path" → "@scope/pkg".
+		// Scoped packages have two path components before any sub-path.
+		if strings.HasPrefix(name, "@") {
+			// @scope/package[/subpath] → @scope/package
+			parts := strings.SplitN(name, "/", 3)
+			if len(parts) >= 2 {
+				name = parts[0] + "/" + parts[1]
+			}
+		} else if i := strings.IndexByte(name, '/'); i >= 0 {
+			// unscoped: package[/subpath] → package
+			name = name[:i]
+		}
 		return strings.ToLower(name)
 	case regLangCrates:
 		// Rust crate names: lowercase, normalise hyphens and underscores as equivalent.

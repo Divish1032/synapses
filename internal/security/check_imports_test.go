@@ -437,3 +437,44 @@ func TestCheckImports_GoSubPackageKnown(t *testing.T) {
 		t.Errorf("chi sub-packages should be known via prefix: %v", violations)
 	}
 }
+
+func TestCheckImports_PythonSubModule_NoViolation(t *testing.T) {
+	e := buildRegistryEngine(t)
+	g := buildTestGraph(t)
+	// "requests.adapters" should be treated as the "requests" package
+	// "flask.views" should be treated as "flask"
+	// "os.path" is stdlib (os is in pythonStdlib)
+	addFileWithImports(g, "/project/app.py", "requests.adapters", "flask.views", "os.path")
+
+	violations := e.CheckImports(g, "/project/app.py")
+	if len(violations) != 0 {
+		t.Errorf("Python sub-module imports should resolve to root package: %v", violations)
+	}
+}
+
+func TestCheckImports_RustModulePath_NoViolation(t *testing.T) {
+	e := buildRegistryEngine(t)
+	g := buildTestGraph(t)
+	// "serde::Deserialize" should be treated as the "serde" crate
+	// "tokio::io::AsyncRead" should be treated as "tokio"
+	// "std::collections::HashMap" is stdlib
+	addFileWithImports(g, "/project/main.rs", "serde::Deserialize", "tokio::io::AsyncRead", "std::collections::HashMap")
+
+	violations := e.CheckImports(g, "/project/main.rs")
+	if len(violations) != 0 {
+		t.Errorf("Rust module paths should resolve to crate name: %v", violations)
+	}
+}
+
+func TestCheckImports_NPMSubPath_NoViolation(t *testing.T) {
+	e := buildRegistryEngine(t)
+	g := buildTestGraph(t)
+	// "lodash/fp" should resolve to "lodash"
+	// "@types/node/fs" should resolve to "@types/node"
+	addFileWithImports(g, "/project/util.ts", "lodash/fp", "@types/node/fs", "express")
+
+	violations := e.CheckImports(g, "/project/util.ts")
+	if len(violations) != 0 {
+		t.Errorf("npm sub-path imports should resolve to package name: %v", violations)
+	}
+}

@@ -606,7 +606,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		toolDescs:        make(map[string]string),
 		sdlcDetect:       newSDLCDetector(),
 		toolTracker:      newSessionToolTracker(),
-		patternEngine:    security.DefaultEngine(),
+		patternEngine:    security.DefaultEngineWithRegistry(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
 
