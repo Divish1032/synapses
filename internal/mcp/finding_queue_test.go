@@ -257,6 +257,34 @@ func TestInjectPendingFindings_EmptyQueue_NoAppend(t *testing.T) {
 	}
 }
 
+func TestInjectPendingFindings_ConfidencePreserved(t *testing.T) {
+	q := newFindingQueue()
+	const sid = "session-conf"
+
+	v := newTestViolation("conf-pat", "handler", security.SeverityCritical)
+	v.Confidence = security.ConfidenceHigh
+	v.ConfidenceReason = "import-path-match"
+	q.Enqueue(sid, v)
+
+	result := mcp.NewToolResultText(`{"status":"ok"}`)
+	injectPendingFindings(result, q, sid)
+
+	if len(result.Content) < 2 {
+		t.Fatalf("expected injected content block, got %d blocks", len(result.Content))
+	}
+	appended := result.Content[len(result.Content)-1]
+	txt, ok := appended.(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", appended)
+	}
+	if !strings.Contains(txt.Text, "HIGH") {
+		t.Errorf("injected block missing confidence HIGH; got: %s", txt.Text)
+	}
+	if !strings.Contains(txt.Text, "import-path-match") {
+		t.Errorf("injected block missing confidence_reason; got: %s", txt.Text)
+	}
+}
+
 func TestFindingQueue_MultiSession_Isolation(t *testing.T) {
 	q := newFindingQueue()
 

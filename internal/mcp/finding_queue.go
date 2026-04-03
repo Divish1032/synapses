@@ -248,13 +248,15 @@ func findingSeverityOrder(s security.Severity) int {
 
 // piggybackFinding is the wire format for findings injected into tool responses.
 type piggybackFinding struct {
-	PatternID string `json:"pattern_id"`
-	Severity  string `json:"severity"`
-	Action    string `json:"action"`
-	File      string `json:"file"`
-	Target    string `json:"target"`
-	Message   string `json:"message"`
-	Evidence  string `json:"evidence,omitempty"`
+	PatternID        string `json:"pattern_id"`
+	Severity         string `json:"severity"`
+	Action           string `json:"action"`
+	File             string `json:"file"`
+	Target           string `json:"target"`
+	Message          string `json:"message"`
+	Evidence         string `json:"evidence,omitempty"`
+	Confidence       string `json:"confidence,omitempty"`
+	ConfidenceReason string `json:"confidence_reason,omitempty"`
 }
 
 // injectPendingFindings dequeues up to maxPiggybackFindings pending security
@@ -276,13 +278,15 @@ func injectPendingFindings(result *mcp.CallToolResult, q *findingQueue, sessionI
 	pf := make([]piggybackFinding, len(findings))
 	for i, f := range findings {
 		pf[i] = piggybackFinding{
-			PatternID: f.PatternID,
-			Severity:  string(f.Severity),
-			Action:    f.Action,
-			File:      f.File,
-			Target:    f.Target,
-			Message:   f.Message,
-			Evidence:  f.Evidence,
+			PatternID:        f.PatternID,
+			Severity:         string(f.Severity),
+			Action:           f.Action,
+			File:             f.File,
+			Target:           f.Target,
+			Message:          f.Message,
+			Evidence:         f.Evidence,
+			Confidence:       string(f.Confidence),
+			ConfidenceReason: f.ConfidenceReason,
 		}
 	}
 

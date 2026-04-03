@@ -580,3 +580,45 @@ func TestHandleSearch_WhyHasArchitecturalRule(t *testing.T) {
 		t.Error("expected 'has architectural rule' in why field for node in rule-covered file")
 	}
 }
+
+// ── searchMatchConfidence ─────────────────────────────────────────────────────
+
+func TestSearchMatchConfidence_HighThreshold(t *testing.T) {
+	for _, score := range []int{20, 25, 100} {
+		got := searchMatchConfidence(score)
+		if got != "HIGH" {
+			t.Errorf("score %d: expected HIGH, got %q", score, got)
+		}
+	}
+}
+
+func TestSearchMatchConfidence_MediumRange(t *testing.T) {
+	for _, score := range []int{6, 10, 19} {
+		got := searchMatchConfidence(score)
+		if got != "MEDIUM" {
+			t.Errorf("score %d: expected MEDIUM, got %q", score, got)
+		}
+	}
+}
+
+func TestSearchMatchConfidence_LowBelowThreshold(t *testing.T) {
+	for _, score := range []int{0, 1, 5} {
+		got := searchMatchConfidence(score)
+		if got != "LOW" {
+			t.Errorf("score %d: expected LOW, got %q", score, got)
+		}
+	}
+}
+
+func TestSearchMatchConfidence_BoundaryExact(t *testing.T) {
+	// Exact boundary values: 20 → HIGH, 6 → MEDIUM, 5 → LOW.
+	if got := searchMatchConfidence(20); got != "HIGH" {
+		t.Errorf("boundary 20: expected HIGH, got %q", got)
+	}
+	if got := searchMatchConfidence(6); got != "MEDIUM" {
+		t.Errorf("boundary 6: expected MEDIUM, got %q", got)
+	}
+	if got := searchMatchConfidence(5); got != "LOW" {
+		t.Errorf("boundary 5: expected LOW, got %q", got)
+	}
+}

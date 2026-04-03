@@ -349,3 +349,61 @@ func TestGetWatcherSecurityFindings_DirectStore(t *testing.T) {
 		t.Errorf("unexpected target: %q", got[0].Target)
 	}
 }
+
+// ── watcherSecurityFindingHint confidence ─────────────────────────────────────
+
+// TestWatcherSecurity_ConfidencePreservedRoundTrip verifies that a Violation's
+// Confidence field survives persist → episode → getWatcherSecurityFindings.
+func TestWatcherSecurity_ConfidencePreservedRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	srv := newWatcherSecurityServer(t, root)
+
+	f := security.Violation{
+		PatternID:        "hardcoded-secret",
+		PatternName:      "Hardcoded Secret",
+		Severity:         security.SeverityCritical,
+		Target:           "apiKey",
+		Message:          "AWS key found in source",
+		Confidence:       security.ConfidenceHigh,
+		ConfidenceReason: "literal-value-match",
+	}
+	srv.persistWatcherFindingEpisode(f, filepath.Join(root, "handler.go"))
+
+	findings := srv.getWatcherSecurityFindings()
+	if len(findings) == 0 {
+		t.Fatal("expected at least one watcher security finding after persist")
+	}
+	if findings[0].Confidence != "HIGH" {
+		t.Errorf("expected Confidence=HIGH after round-trip, got %q", findings[0].Confidence)
+	}
+}
+
+// TestWatcherSecurity_ConfidenceMissingTag verifies that an episode stored
+// WITHOUT a confidence tag (legacy format) returns an empty Confidence field
+// (not a panic or a spurious value).
+func TestWatcherSecurity_ConfidenceMissingTag(t *testing.T) {
+	root := t.TempDir()
+	srv := newWatcherSecurityServer(t, root)
+
+	ep := store.Episode{
+		EpisodeType: "watcher_security_finding",
+		Outcome:     "failure",
+		Trigger:     "test",
+		Decision:    "OldPattern: target",
+		Rationale:   "legacy finding",
+		Tags:        `["auto","watcher","security"]`, // no confidence tag
+		Importance:  0.85,
+	}
+	if _, err := srv.store.RememberEpisode(ep); err != nil {
+		t.Fatalf("RememberEpisode: %v", err)
+	}
+
+	got := srv.getWatcherSecurityFindings()
+	if len(got) == 0 {
+		t.Fatal("expected 1 watcher finding")
+	}
+	// Legacy episode has no confidence tag — Confidence must be empty, not a panic.
+	if got[0].Confidence != "" {
+		t.Errorf("expected empty Confidence for legacy episode, got %q", got[0].Confidence)
+	}
+}

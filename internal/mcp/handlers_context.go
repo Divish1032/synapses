@@ -2112,6 +2112,10 @@ type impactNL struct {
 	// entity is not in a recognized critical path. Drawn from name/file heuristics,
 	// not architectural rules — use validate for authoritative rule checks.
 	CriticalPathDomains []string `json:"critical_path_domains,omitempty"`
+	// EdgeConfidence describes the resolution quality of the call edges used to
+	// build this blast radius. MEDIUM is the current baseline (tree-sitter name-based
+	// call-edge resolution). Edges verified by LSP (Sprint 28.5) are upgraded to HIGH.
+	EdgeConfidence string `json:"edge_confidence"`
 }
 
 // impactResponse is the default get_impact response shape. It wraps ImpactResult
@@ -2283,6 +2287,10 @@ func buildImpactNL(result *graph.ImpactResult, rootName, rootFile string) impact
 		BlastRadiusSummary:  summary,
 		PackagesAffected:    packages,
 		CriticalPathDomains: domains,
+		// Sprint 28.4: MEDIUM is the current call-edge resolution baseline
+		// (tree-sitter name-based). LSP enrichment (Sprint 28.5) upgrades verified
+		// edges to HIGH. Surfaces in both review and non-review impact responses.
+		EdgeConfidence: "MEDIUM — tree-sitter call-edge resolution; enable gopls/tsserver for HIGH confidence",
 	}
 }
 

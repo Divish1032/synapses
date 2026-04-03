@@ -90,13 +90,17 @@ func (s *Server) persistWatcherFindingEpisode(f security.Violation, filePath str
 		relPath = strings.TrimPrefix(filePath, root+"/")
 	}
 
+	tags := `["auto","watcher","security"]`
+	if conf := string(f.Confidence); conf != "" {
+		tags = fmt.Sprintf(`["auto","watcher","security","confidence:%s"]`, conf)
+	}
 	ep := store.Episode{
 		EpisodeType: "watcher_security_finding",
 		Outcome:     "failure",
 		Trigger:     fmt.Sprintf("file watcher detected security issue after editing %s", relPath),
 		Decision:    fmt.Sprintf("%s: %s", f.PatternName, f.Target),
 		Rationale:   f.Message,
-		Tags:        `["auto","watcher","security"]`,
+		Tags:        tags,
 		Importance:  0.85,
 	}
 	if _, err := s.store.RememberEpisode(ep); err != nil {
@@ -110,6 +114,7 @@ type watcherSecurityFindingHint struct {
 	Target      string `json:"target"`
 	Message     string `json:"message"`
 	At          int64  `json:"detected_at"` // Unix seconds
+	Confidence  string `json:"confidence,omitempty"`
 }
 
 // getWatcherSecurityFindings queries the store for recent watcher-detected security
@@ -133,11 +138,22 @@ func (s *Server) getWatcherSecurityFindings() []watcherSecurityFindingHint {
 			patternName = ep.Decision[:idx]
 			target = ep.Decision[idx+2:]
 		}
+		// Extract confidence from tags: ["auto","watcher","security","confidence:HIGH"]
+		// Tags is a JSON array; scan for the "confidence:<LEVEL>" entry without a
+		// full JSON parse to avoid an encoding/json import in this file.
+		confidence := ""
+		if idx := strings.Index(ep.Tags, "confidence:"); idx >= 0 {
+			rest := ep.Tags[idx+len("confidence:"):]
+			if end := strings.IndexAny(rest, `"]`); end >= 0 {
+				confidence = rest[:end]
+			}
+		}
 		out = append(out, watcherSecurityFindingHint{
 			PatternName: patternName,
 			Target:      target,
 			Message:     ep.Rationale,
 			At:          ep.CreatedAt,
+			Confidence:  confidence,
 		})
 	}
 	return out
