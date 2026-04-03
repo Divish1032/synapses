@@ -1770,13 +1770,13 @@ func (s *Server) handleSessionInit(
 			briefing["unfinished_work"] = w
 		}
 
-		// (2) Conventions: formatter detection + project prompts + agent-type rules.
-		// Formatter conventions are prepended so agents always learn about
-		// auto-formatting tools before other project norms. Agent rules are
-		// manually configured behavioral conventions (e.g. "All handlers use
-		// AuthMiddleware", "DB access goes through repository layer").
-		// Sprint 29 will add cross-session learned conventions here; Sprint 23
-		// establishes the delivery slot and populates it from configured rules.
+		// (2) Conventions: formatter detection + learned (Sprint 29.2) + project prompts + agent rules.
+		// Delivery order (most fundamental first):
+		//   1. Formatter conventions — always first; agents must know about auto-formatting.
+		//   2. Cross-session learned conventions (Sprint 29.2) — up to 3, confidence DESC.
+		//      These are patterns extracted automatically from prior session observations
+		//      (library usage, testing style, architectural layers).
+		//   3. Project prompts (up to 5) and configured agent rules (up to 8 total).
 		// Cap: formatter conventions are always included; 5 from prompts, up to
 		// 8 total from prompts+rules so rule-heavy projects stay terse.
 		{
@@ -1784,6 +1784,28 @@ func (s *Server) handleSessionInit(
 			// regardless of how many prompts or rules the project has.
 			// cachedFormatterConventions computes once per server lifetime.
 			convs := s.cachedFormatterConventions()
+
+			// Append cross-session learned conventions (Sprint 29.2).
+			// GetProjectConventions returns rows ordered by confidence DESC.
+			// Cap at 3 so learned conventions don't crowd out manual configuration.
+			// Apply the same 120-rune truncation as prompts and rules for consistency.
+			const maxLearnedConventions = 3
+			if s.store != nil && s.projectID != "" {
+				if learned, err := s.store.GetProjectConventions(s.projectID, 0.6); err == nil {
+					added := 0
+					for _, c := range learned {
+						if added >= maxLearnedConventions || c.Text == "" {
+							break
+						}
+						text := c.Text
+						if rs := []rune(text); len(rs) > 120 {
+							text = string(rs[:120]) + "…"
+						}
+						convs = append(convs, text)
+						added++
+					}
+				}
+			}
 			// promptsAdded tracks how many prompt bodies have been appended so
 			// that the per-prompt cap (5) is counted independently of the
 			// formatter conventions already in convs.

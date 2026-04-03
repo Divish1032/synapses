@@ -14,6 +14,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/brain/archivist"
 	"github.com/SynapsesOS/synapses/internal/graph"
+	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -26,8 +27,9 @@ type endSessionResult struct {
 	MemoriesSaved       int                    `json:"memories_saved"`
 	SessionSummary      *sessionSummary        `json:"session_summary,omitempty"`
 	MemoriesExpired     int64                  `json:"memories_expired"`
-	ObservationsSaved   int                    `json:"observations_saved,omitempty"`
-	Retrospective       *store.ToolCallSummary `json:"retrospective,omitempty"`
+	ObservationsSaved    int                    `json:"observations_saved,omitempty"`
+	ConventionsExtracted int                    `json:"conventions_extracted,omitempty"`
+	Retrospective        *store.ToolCallSummary `json:"retrospective,omitempty"`
 	EffectivenessReport *EffectivenessReport   `json:"effectiveness_report,omitempty"`
 }
 
@@ -501,6 +503,18 @@ func (s *Server) handleEndSession(
 			_, _ = s.store.InsertSessionObservation(obs)
 		}
 		result.ObservationsSaved = len(observations)
+	}
+
+	// ── Sprint 29.2: Convention extraction engine ──
+	// Aggregate all session_observations for this project and promote recurring
+	// patterns (≥ MinSessionsForConvention distinct sessions) to ExtractedConvention
+	// records. Cheap: only SQL aggregates, no graph traversal.
+	// Runs on every end_session so conventions stay current without a separate
+	// background job. Tier 1 auto-capture — no agent action required.
+	if n, err := runConventionExtraction(s.store, s.projectID); err != nil {
+		logutil.Warn("synapses: convention extraction: %v\n", err)
+	} else {
+		result.ConventionsExtracted = n
 	}
 
 	// ── D4: Archivist session memory synthesis ──

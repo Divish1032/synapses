@@ -1040,6 +1040,21 @@ func Open(path string) (*Store, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_obs_session     ON session_observations(session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_obs_project_cat ON session_observations(project_id, category, key)`,
+		// Sprint 29.2: Convention extraction engine — materialized conventions promoted
+		// from cross-session observations. Upserted at end_session; delivered at session_init.
+		// ID is deterministic: project_id || '::' || category || '::' || key.
+		`CREATE TABLE IF NOT EXISTS extracted_conventions (
+			id            TEXT PRIMARY KEY,
+			project_id    TEXT NOT NULL,
+			category      TEXT NOT NULL,
+			key           TEXT NOT NULL,
+			session_count INTEGER NOT NULL DEFAULT 0,
+			confidence    REAL    NOT NULL DEFAULT 0.0,
+			text          TEXT    NOT NULL DEFAULT '',
+			created_at    INTEGER NOT NULL DEFAULT 0,
+			updated_at    INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_conv_project_conf ON extracted_conventions(project_id, confidence DESC)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

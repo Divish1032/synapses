@@ -166,13 +166,29 @@ func (s *Server) currentTaskGoal(_ string) string {
 }
 
 // topConventions returns up to n conventions for the project.
-// Priority: formatter conventions (always first), then agent-type rules from config.
-// Reuses the already-cached formatter conventions — no extra I/O.
+// Priority: formatter conventions first, then cross-session learned conventions
+// (Sprint 29.2), then configured agent-type rules.
 func (s *Server) topConventions(n int) []string {
 	var convs []string
 
 	// Formatter conventions (cached after first call — free).
 	convs = append(convs, s.cachedFormatterConventions()...)
+	if len(convs) >= n {
+		return convs[:n]
+	}
+
+	// Cross-session learned conventions (Sprint 29.2).
+	// GetProjectConventions is a fast indexed SQL read; at most 1 slot here.
+	if s.store != nil && s.projectID != "" {
+		if learned, err := s.store.GetProjectConventions(s.projectID, 0.6); err == nil {
+			for _, c := range learned {
+				if len(convs) >= n || c.Text == "" {
+					break
+				}
+				convs = append(convs, c.Text)
+			}
+		}
+	}
 	if len(convs) >= n {
 		return convs[:n]
 	}
