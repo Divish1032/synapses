@@ -84,6 +84,31 @@ func archViolationAction(severity string) string {
 	return "inform"
 }
 
+// archViolationResponse wraps config.Violation with the derived action field
+// for the three-tier severity model (Sprint 27.4). Used in JSON responses only
+// — internal calculations still use config.Violation.
+//
+// Embedded struct fields are promoted to the top level in JSON, so the output
+// includes all config.Violation fields plus the `action` field.
+type archViolationResponse struct {
+	config.Violation
+	Action string `json:"action"`
+}
+
+// enrichArchViolations returns an arch-violation slice enriched with the
+// derived action field. Returns nil when the input is empty.
+// Called only at response-building time; internal calculations use []config.Violation.
+func enrichArchViolations(vs []config.Violation) []archViolationResponse {
+	if len(vs) == 0 {
+		return nil
+	}
+	out := make([]archViolationResponse, len(vs))
+	for i, v := range vs {
+		out[i] = archViolationResponse{Violation: v, Action: archViolationAction(v.Severity)}
+	}
+	return out
+}
+
 // worstActionRequired returns the highest-priority action directive across all
 // security findings and architectural violations in a validate response.
 // Priority order: "block" > "warn" > "inform" > "none".
@@ -433,7 +458,7 @@ func (s *Server) handleValidatePlan(
 
 	result := map[string]interface{}{
 		"status":     status,
-		"violations": violations,
+		"violations": enrichArchViolations(violations),
 	}
 	if len(skipped) > 0 {
 		result["skipped"] = skipped
@@ -619,7 +644,7 @@ func (s *Server) handleVerifyImplementation(
 		InGraph                  bool                   `json:"in_graph"`
 		NodeCount                int                    `json:"node_count"`
 		Entities                 []string               `json:"entities,omitempty"`
-		Violations               []config.Violation     `json:"violations,omitempty"`
+		Violations               []archViolationResponse `json:"violations,omitempty"`
 		SecurityFindings         []security.Violation   `json:"security_findings,omitempty"`          // all current findings
 		SecurityFindingsNew      []security.Violation   `json:"security_findings_new,omitempty"`      // Sprint 27.3: introduced by this change
 		SecurityFindingsExisting []security.Violation   `json:"security_findings_existing,omitempty"` // Sprint 27.3: pre-existed, not fixed
@@ -649,7 +674,7 @@ func (s *Server) handleVerifyImplementation(
 			s.rulesMu.RLock()
 			violations := s.config.CheckViolationsForFile(s.graph, f)
 			s.rulesMu.RUnlock()
-			r.Violations = violations
+			r.Violations = enrichArchViolations(violations)
 			totalViolations += len(violations)
 		}
 
@@ -1048,7 +1073,11 @@ doneSecurityStatus:
 		var allArch []config.Violation
 		for _, r := range reports {
 			allSec = append(allSec, r.SecurityFindings...)
-			allArch = append(allArch, r.Violations...)
+			// r.Violations is []archViolationResponse; extract the embedded config.Violation
+			// for worstActionRequired (which reads from config.Violation.Severity).
+			for _, ev := range r.Violations {
+				allArch = append(allArch, ev.Violation)
+			}
 		}
 		allSec = append(allSec, projectSecurityFindings...)
 		result["action_required"] = worstActionRequired(allSec, allArch)
@@ -1515,11 +1544,11 @@ func extractFilePathsFromText(text string) []string {
 
 // preWriteFileResult holds the per-file analysis produced by handleValidatePreWrite.
 type preWriteFileResult struct {
-	File               string               `json:"file"`
-	IsNew              bool                 `json:"is_new"`
-	SecurityFindings   []security.Violation `json:"security_findings,omitempty"`
-	ArchRuleViolations []config.Violation   `json:"arch_rule_violations,omitempty"`
-	Norms              []string             `json:"norms,omitempty"`
+	File               string                  `json:"file"`
+	IsNew              bool                    `json:"is_new"`
+	SecurityFindings   []security.Violation    `json:"security_findings,omitempty"`
+	ArchRuleViolations []archViolationResponse  `json:"arch_rule_violations,omitempty"`
+	Norms              []string                `json:"norms,omitempty"`
 }
 
 // handleValidatePreWrite implements validate(phase="pre_write").
@@ -1643,7 +1672,7 @@ func (s *Server) handleValidatePreWrite(
 			s.rulesMu.RLock()
 			if s.config != nil {
 				archViol := s.config.CheckViolationsForFile(s.graph, relFile)
-				fr.ArchRuleViolations = archViol
+				fr.ArchRuleViolations = enrichArchViolations(archViol)
 				allArchViolations = append(allArchViolations, archViol...)
 			}
 			s.rulesMu.RUnlock()
@@ -1747,7 +1776,7 @@ func (s *Server) handleValidatePreWrite(
 		result["security_findings"] = allSecFindings
 	}
 	if len(allArchViolations) > 0 {
-		result["arch_violations"] = allArchViolations
+		result["arch_violations"] = enrichArchViolations(allArchViolations)
 	}
 	if len(allNorms) > 0 {
 		result["norms"] = allNorms
