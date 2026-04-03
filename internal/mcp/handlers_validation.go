@@ -441,6 +441,8 @@ func (s *Server) handleValidatePlan(
 			scanned++
 			securityFindings = append(securityFindings, s.patternEngine.CheckFile(s.graph, absFile, src)...)
 			securityFindings = append(securityFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
+			// Sprint 27.5: norm-based detection — catches deviations from observed package conventions.
+			securityFindings = append(securityFindings, s.patternEngine.CheckNorms(s.graph, absFile)...)
 		}
 	}
 
@@ -840,9 +842,11 @@ func (s *Server) handleVerifyImplementation(
 
 		// Sprint 26.7: security pattern findings (CheckFile) + Sprint 26.11: unknown import detection (CheckImports).
 		// Sprint 27.3: before/after comparison to attribute findings as new, existing, or fixed.
+		// Sprint 27.5: norm-based violation detection (CheckNorms) — fires for observed convention deviations.
 		if s.graph != nil && s.patternEngine != nil {
 			afterFindings := s.patternEngine.CheckFile(s.graph, absFile, fileContent)
 			afterFindings = append(afterFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
+			afterFindings = append(afterFindings, s.patternEngine.CheckNorms(s.graph, absFile)...)
 			r.SecurityFindings = afterFindings
 			totalSecurityFindings += len(afterFindings)
 
@@ -857,10 +861,11 @@ func (s *Server) handleVerifyImplementation(
 			}
 			if priorContent, ok := gitShowHEADContent(repoRoot, relPath); ok {
 				beforeFindings := s.patternEngine.CheckFile(s.graph, absFile, priorContent)
-				// CheckImports is graph-derived (not content-derived), so its
-				// results are the same before and after; include to avoid
-				// mis-classifying import findings as "new."
+				// CheckImports and CheckNorms are graph-derived (not content-derived), so
+				// their results are the same before and after; include both to avoid
+				// mis-classifying pre-existing findings as "new."
 				beforeFindings = append(beforeFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
+				beforeFindings = append(beforeFindings, s.patternEngine.CheckNorms(s.graph, absFile)...)
 				newOnes, existing, fixed := categorizeFindingChanges(beforeFindings, afterFindings)
 				if len(newOnes) > 0 {
 					r.SecurityFindingsNew = newOnes

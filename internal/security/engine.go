@@ -23,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
@@ -238,6 +239,156 @@ func (e *Engine) CheckProject(g *graph.Graph) []Violation {
 	if len(violations) == 0 {
 		return nil
 	}
+	return withActions(violations)
+}
+
+// CheckNorms observes call patterns shared across route-registering sibling files
+// and reports when the target file deviates from an established norm.
+//
+// A "norm" is a function call made by a statistically significant proportion of
+// route-registering files (files with NodeRoute nodes) in the same package. When a
+// new route-registering file omits a normed call, a violation fires — even without
+// any explicit security rule covering that function.
+//
+// This is the Sprint 27.5 complement to CheckFile: CheckFile enforces explicit
+// patterns; CheckNorms enforces observed convention.
+//
+// Confidence tiers:
+//
+//	HIGH   — call in ≥75% of sibling route files AND at least 3 sibling route files
+//	MEDIUM — call in ≥50% of sibling route files AND at least 2 sibling route files
+//
+// Returns nil when:
+//   - the target file has no NodeRoute nodes (not a route-registering file)
+//   - fewer than 2 sibling route files exist in the same directory
+//   - no call pattern reaches the minimum confidence threshold
+//   - the file is a test file
+func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
+	if e == nil || g == nil || filePath == "" {
+		return nil
+	}
+	if isTestFile(filePath) {
+		return nil
+	}
+
+	// Build context for the target file. Only route-registering files are checked.
+	fc := buildFileContext(g, filePath)
+	if len(fc.routes) == 0 {
+		return nil
+	}
+
+	lang := languageFromPath(filePath)
+	dir := filepath.Dir(filePath)
+	if dir == "" || dir == "." {
+		return nil
+	}
+
+	// Scan sibling files in the same directory and language.
+	// callFreq tracks how many sibling route files call each function name.
+	callFreq := make(map[string]int)
+	siblingRouteCount := 0
+	siblingFilesExamined := 0
+	seen := make(map[string]bool)
+	seen[filePath] = true // exclude target from sibling scan
+
+	const maxSiblingFiles = 30
+	g.IterateNodes(func(n *graph.Node) {
+		if siblingFilesExamined >= maxSiblingFiles {
+			return
+		}
+		if n.Type != graph.NodeFile {
+			return
+		}
+		if seen[n.File] {
+			return
+		}
+		if filepath.Dir(n.File) != dir {
+			return
+		}
+		if languageFromPath(n.File) != lang {
+			return
+		}
+		seen[n.File] = true
+		siblingFilesExamined++
+
+		sib := buildFileContext(g, n.File)
+		if len(sib.routes) == 0 {
+			return // not a route-registering file; don't contribute to norms
+		}
+		siblingRouteCount++
+		for callee := range sib.callees {
+			callFreq[callee]++
+		}
+	})
+
+	if siblingRouteCount < 2 {
+		return nil // not enough route files to establish a norm
+	}
+
+	// Find calls that are "universal" across sibling route files but absent in target.
+	var violations []Violation
+	for callName, count := range callFreq {
+		ratio := float64(count) / float64(siblingRouteCount)
+
+		var severity Severity
+		switch {
+		case ratio >= 0.75 && siblingRouteCount >= 3:
+			severity = SeverityHigh
+		case ratio >= 0.50 && siblingRouteCount >= 2:
+			severity = SeverityMedium
+		default:
+			continue // below minimum confidence threshold — not enough evidence
+		}
+
+		// Only fire if the target file is missing this call.
+		if fc.callees[callName] {
+			continue
+		}
+
+		evidence := fmt.Sprintf(
+			"%d/%d route-registering file(s) in this package call %q — this file registers routes but does not",
+			count, siblingRouteCount, callName,
+		)
+		msg := fmt.Sprintf(
+			"%s registers routes but does not call %q, which %d/%d other route-registering file(s) in this package call. "+
+				"If %q is a security middleware (auth, rate limiting, CSRF), verify this omission is intentional.",
+			filepath.Base(filePath), callName, count, siblingRouteCount, callName,
+		)
+
+		violations = append(violations, Violation{
+			PatternID:   "norm:" + callName,
+			PatternName: fmt.Sprintf("Observed norm — %q called by %d/%d route file(s)", callName, count, siblingRouteCount),
+			Severity:    severity,
+			File:        filePath,
+			Target:      filepath.Base(filePath),
+			Message:     msg,
+			Evidence:    evidence,
+		})
+	}
+
+	if len(violations) == 0 {
+		return nil
+	}
+
+	// Sort for deterministic output: HIGH first, then MEDIUM; within tier, alphabetical.
+	sevPriority := func(s Severity) int {
+		switch s {
+		case SeverityCritical:
+			return 3
+		case SeverityHigh:
+			return 2
+		default:
+			return 1
+		}
+	}
+	sort.Slice(violations, func(i, j int) bool {
+		pi, pj := sevPriority(violations[i].Severity), sevPriority(violations[j].Severity)
+		if pi != pj {
+			return pi > pj
+		}
+		return violations[i].PatternID < violations[j].PatternID
+	})
+
 	return withActions(violations)
 }
 
