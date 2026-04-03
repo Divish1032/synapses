@@ -63,3 +63,38 @@ func (n *noopVerifier) Language() Language { return n.lang }
 
 // Close is a no-op for the null implementation.
 func (n *noopVerifier) Close() error { return nil }
+
+// ── Call Hierarchy ────────────────────────────────────────────────────────────
+
+// CallHierarchyProvider is an optional capability that EdgeVerifier
+// implementations may provide. Use a type assertion to check availability:
+//
+//	if chp, ok := verifier.(lsp.CallHierarchyProvider); ok {
+//	    items, err := chp.PrepareCallHierarchy(ctx, pos)
+//	    ...
+//	}
+//
+// Implementations must be safe for concurrent use from multiple goroutines.
+//
+// The call hierarchy protocol is a three-step query:
+//  1. PrepareCallHierarchy: resolve a position to a callable item.
+//  2. IncomingCalls: enumerate all direct callers of that item.
+//  3. OutgoingCalls: enumerate all direct callees of that item.
+//
+// Steps 2 and 3 are independent — call one or both after step 1.
+type CallHierarchyProvider interface {
+	// PrepareCallHierarchy resolves the call hierarchy item at pos.
+	// pos should point to a function or method definition (not a call site).
+	// Returns an empty slice when pos does not resolve to a callable item,
+	// or nil, nil when the verifier cannot answer (e.g. binary not available).
+	PrepareCallHierarchy(ctx context.Context, pos CallPosition) ([]CallHierarchyItem, error)
+
+	// IncomingCalls returns the direct callers of item (i.e. "find callers").
+	// Each element describes one calling function, including its definition
+	// location. Returns nil, nil on graceful failure.
+	IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error)
+
+	// OutgoingCalls returns the direct callees of item (i.e. "find callees").
+	// Each element describes one called function. Returns nil, nil on graceful failure.
+	OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error)
+}

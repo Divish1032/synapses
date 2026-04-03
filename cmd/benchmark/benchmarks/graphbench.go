@@ -44,6 +44,11 @@ type GraphBenchOptions struct {
 	Mode       string // "full" (default, curated ground truth) or "smoke" (self-validating, CI-safe)
 	Sequential bool   // OOM-safe: clone→index→test→cleanup one repo at a time
 	RepoFilter string // if non-empty, only run suites whose repo contains this substring
+	// CompareLSP enables LSP call hierarchy comparison for find_callers and
+	// find_callees tests. Requires gopls (Go) or typescript-language-server (TS)
+	// to be installed. Adds LSP F1 fields to each test result and an LSP summary
+	// section to the aggregate result.
+	CompareLSP bool
 }
 
 // GraphBenchSuite is one line from the JSONL file.
@@ -87,6 +92,12 @@ type GraphBenchTestResult struct {
 	Error         string   `json:"error,omitempty"`
 	ErrorCategory string   `json:"error_category,omitempty"` // entity_not_found, empty_response, wrong_candidates, timeout
 	RawResponse   string   `json:"raw_response,omitempty"`   // for debugging failures
+	// LSP comparison fields — populated only when CompareLSP is true and the
+	// query type is find_callers or find_callees.
+	LSPNames []string `json:"lsp_names,omitempty"` // names returned by LSP call hierarchy
+	LSPPrec  float64  `json:"lsp_precision,omitempty"`
+	LSPRecall float64 `json:"lsp_recall,omitempty"`
+	LSPF1    float64  `json:"lsp_f1,omitempty"`
 }
 
 // repoStats holds per-repo indexing metadata captured after waitForIndex.
@@ -262,8 +273,18 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 		allRepoStats = append(allRepoStats, rs)
 		log.Printf("  indexed in %dms (nodes=%d, edges=%d)", rs.IndexTimeMs, rs.NodeCount, rs.EdgeCount)
 
+		// Create LSP runner for this repo if compare-lsp is enabled.
+		// Only Go and TypeScript have LSP support; NewLSPBenchRunner returns nil for others.
+		var lspRunner *LSPBenchRunner
+		if opts.CompareLSP {
+			lspRunner, _ = NewLSPBenchRunner(suite.Language, repoDir)
+			if lspRunner != nil {
+				log.Printf("  lsp: runner started for %s", suite.Language)
+			}
+		}
+
 		for j, test := range suite.Tests {
-			result := runGraphTest(projClient, suite, test)
+			result := runGraphTest(projClient, suite, test, lspRunner)
 			// In sequential mode, drop raw responses to save memory.
 			if opts.Sequential {
 				result.RawResponse = ""
@@ -273,9 +294,20 @@ func RunGraphBench(client *agent.SynapsesClient, opts GraphBenchOptions) (*repor
 			if result.Error != "" {
 				status = "✗ " + truncate(result.Error, 80)
 			}
-			log.Printf("  [%d/%d] %s(%s): P=%.0f%% R=%.0f%% F1=%.0f%% %dms %s",
+			lspSuffix := ""
+			if result.LSPF1 > 0 {
+				lspSuffix = fmt.Sprintf(" [LSP F1=%.0f%%]", result.LSPF1*100)
+			}
+			log.Printf("  [%d/%d] %s(%s): P=%.0f%% R=%.0f%% F1=%.0f%% %dms %s%s",
 				j+1, len(suite.Tests), test.QueryType, test.Query,
-				result.Precision*100, result.Recall*100, result.F1*100, result.LatencyMs, status)
+				result.Precision*100, result.Recall*100, result.F1*100, result.LatencyMs, status, lspSuffix)
+		}
+
+		// Shut down LSP process before sequential cleanup to avoid file handle leaks.
+		if lspRunner != nil {
+			if err := lspRunner.Close(); err != nil {
+				log.Printf("  warning: lsp close: %v", err)
+			}
 		}
 
 		// Persist per-repo results immediately so progress survives crashes.
@@ -382,7 +414,9 @@ func waitForIndex(client *agent.SynapsesClient, repoDir string) error {
 }
 
 // runGraphTest executes a single test case against the daemon.
-func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test GraphBenchTest) GraphBenchTestResult {
+// lspRunner is optional; when non-nil, LSP call hierarchy comparison is run for
+// find_callers and find_callees tests and results are stored in LSP* fields.
+func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test GraphBenchTest, lspRunner *LSPBenchRunner) GraphBenchTestResult {
 	result := GraphBenchTestResult{
 		Repo:          suite.Repo,
 		Language:      suite.Language,
@@ -522,6 +556,51 @@ func runGraphTest(client *agent.SynapsesClient, suite GraphBenchSuite, test Grap
 
 	if result.Precision+result.Recall > 0 {
 		result.F1 = 2 * result.Precision * result.Recall / (result.Precision + result.Recall)
+	}
+
+	// LSP enrichment: run call hierarchy query alongside the baseline for
+	// find_callers and find_callees. Uses Root.File/Root.Line from the context
+	// response (function definition position, which LSP requires).
+	if lspRunner != nil && len(test.ExpectedNames) > 0 &&
+		(test.QueryType == "find_callers" || test.QueryType == "find_callees") {
+		var cr contextResponse
+		if json.Unmarshal([]byte(rawResp), &cr) == nil && cr.Root.File != "" {
+			lspCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			var lspNames []string
+			if test.QueryType == "find_callers" {
+				lspNames = lspRunner.QueryCallers(lspCtx, cr.Root.File, cr.Root.Line)
+			} else {
+				lspNames = lspRunner.QueryCallees(lspCtx, cr.Root.File, cr.Root.Line)
+			}
+			cancel()
+
+			if len(lspNames) > 0 {
+				result.LSPNames = lspNames
+				// Recall: what fraction of expected names were returned by LSP?
+				lspRecallHits, lspRecallTotal := setOverlap(test.ExpectedNames, lspNames)
+				if lspRecallTotal > 0 {
+					result.LSPRecall = float64(lspRecallHits) / float64(lspRecallTotal)
+				}
+				// Precision: what fraction of LSP names match an expected name?
+				lspPrecHits := 0
+				for _, n := range lspNames {
+					nn := normalizeName(n)
+					for _, e := range test.ExpectedNames {
+						ne := normalizeName(e)
+						if nn == ne || strings.HasSuffix(nn, "."+ne) || strings.HasSuffix(ne, "."+nn) ||
+							strings.HasPrefix(nn, ne+".") || strings.HasPrefix(ne, nn+".") ||
+							strings.HasPrefix(nn, ne+"::") || strings.HasPrefix(ne, nn+"::") {
+							lspPrecHits++
+							break
+						}
+					}
+				}
+				result.LSPPrec = float64(lspPrecHits) / float64(len(lspNames))
+				if result.LSPPrec+result.LSPRecall > 0 {
+					result.LSPF1 = 2 * result.LSPPrec * result.LSPRecall / (result.LSPPrec + result.LSPRecall)
+				}
+			}
+		}
 	}
 
 	return result
@@ -1279,6 +1358,7 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 	byType := make(map[string]*metricAccum)
 	byLang := make(map[string]*metricAccum)
 	overall := &metricAccum{}
+	lspOverall := &metricAccum{} // only tests that have LSP data
 	errorCount := 0
 	correctCount := 0
 	completeCount := 0
@@ -1336,6 +1416,11 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 		byLang[r.Language].add(r.Precision, r.Recall, r.F1)
 
 		overall.add(r.Precision, r.Recall, r.F1)
+
+		// Track LSP metrics for tests where LSP data was collected.
+		if len(r.LSPNames) > 0 || (r.LSPF1 > 0) {
+			lspOverall.add(r.LSPPrec, r.LSPRecall, r.LSPF1)
+		}
 	}
 
 	var correctness, completeness float64
@@ -1386,6 +1471,31 @@ func aggregateGraphResults(results []GraphBenchTestResult, suites []GraphBenchSu
 		ErrorCategories: errorCategories,
 		FailedQueries:   failedQueries,
 		RepoStatsData:   repoStatsOut,
+	}
+
+	// Populate LSP summary when LSP data was collected.
+	if lspOverall.n > 0 {
+		lspMetrics := reporter.GraphBenchMetrics{
+			Precision: lspOverall.avgP(),
+			Recall:    lspOverall.avgR(),
+			F1:        lspOverall.avgF1(),
+		}
+		gbResult.LSPSummary = &lspMetrics
+		// Delta: LSP minus baseline for the same tests.
+		baselineOnLSPTests := &metricAccum{}
+		for _, r := range results {
+			if len(r.LSPNames) > 0 || r.LSPF1 > 0 {
+				baselineOnLSPTests.add(r.Precision, r.Recall, r.F1)
+			}
+		}
+		if baselineOnLSPTests.n > 0 {
+			delta := reporter.GraphBenchMetrics{
+				Precision: lspMetrics.Precision - baselineOnLSPTests.avgP(),
+				Recall:    lspMetrics.Recall - baselineOnLSPTests.avgR(),
+				F1:        lspMetrics.F1 - baselineOnLSPTests.avgF1(),
+			}
+			gbResult.LSPDelta = &delta
+		}
 	}
 
 	for qt, acc := range byType {

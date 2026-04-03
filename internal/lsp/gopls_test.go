@@ -786,3 +786,212 @@ func TestGoplsVerifier_InitializeRecvError_ConfidenceNone(t *testing.T) {
 func containsSubstr(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
+
+// ── GoplsVerifier — CallHierarchyProvider ────────────────────────────────────
+
+// goplsCallHierarchyItemResult builds a single-item prepareCallHierarchy response.
+func goplsCallHierarchyItemResult(name, detail, uri string, line int) map[string]interface{} {
+	pos := map[string]interface{}{"line": line, "character": 0}
+	rng := map[string]interface{}{"start": pos, "end": pos}
+	return map[string]interface{}{
+		"name":           name,
+		"detail":         detail,
+		"kind":           12,
+		"uri":            uri,
+		"range":          rng,
+		"selectionRange": rng,
+	}
+}
+
+// goplsIncomingCallResult builds one entry of a callHierarchy/incomingCalls response.
+func goplsIncomingCallResult(name, detail, uri string, line int) map[string]interface{} {
+	return map[string]interface{}{
+		"from":       goplsCallHierarchyItemResult(name, detail, uri, line),
+		"fromRanges": []interface{}{},
+	}
+}
+
+// goplsOutgoingCallResult builds one entry of a callHierarchy/outgoingCalls response.
+func goplsOutgoingCallResult(name, detail, uri string, line int) map[string]interface{} {
+	return map[string]interface{}{
+		"to":         goplsCallHierarchyItemResult(name, detail, uri, line),
+		"fromRanges": []interface{}{},
+	}
+}
+
+func TestGoplsVerifier_PrepareCallHierarchy_NotFound_ReturnsNil(t *testing.T) {
+	v := NewGoplsVerifier(GoplsVerifierOptions{
+		ProjectRoot: t.TempDir(),
+		GoplsPath:   "", // not found
+	})
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: "/x.go", Line: 0, Col: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil items when gopls not found, got %v", items)
+	}
+}
+
+func TestGoplsVerifier_PrepareCallHierarchy_EmptyFile_ReturnsNil(t *testing.T) {
+	ft := newGoplsFakeTransport()
+	v := newGoplsTestVerifier(t, ft)
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{}) // empty file
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil for empty file position, got %v", items)
+	}
+	if len(ft.sentMethods()) > 0 {
+		t.Errorf("expected no LSP messages for empty file, got: %v", ft.sentMethods())
+	}
+}
+
+func TestGoplsVerifier_PrepareCallHierarchy_Success(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "handler.go", "package main\n")
+	defURI := pathToURI(src)
+
+	ft := newGoplsFakeTransport()
+	// init response (id=1), then prepareCallHierarchy response (id=2)
+	ft.queueResponse(1, goplsInitResult)
+	ft.queueResponse(2, []interface{}{
+		goplsCallHierarchyItemResult("Use", "(*gin.Engine).Use", defURI, 5),
+	})
+
+	v := newGoplsTestVerifier(t, ft)
+
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: src, Line: 5, Col: 0})
+	if err != nil {
+		t.Fatalf("PrepareCallHierarchy: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Name != "Use" {
+		t.Errorf("expected Name=Use, got %q", items[0].Name)
+	}
+	if items[0].Detail != "(*gin.Engine).Use" {
+		t.Errorf("expected Detail=(*gin.Engine).Use, got %q", items[0].Detail)
+	}
+	if items[0].File != src {
+		t.Errorf("expected File=%q, got %q", src, items[0].File)
+	}
+	if items[0].Line != 5 {
+		t.Errorf("expected Line=5, got %d", items[0].Line)
+	}
+
+	methods := ft.sentMethods()
+	if !containsSubstr(strings.Join(methods, ","), "prepareCallHierarchy") {
+		t.Errorf("textDocument/prepareCallHierarchy not sent; methods: %v", methods)
+	}
+}
+
+func TestGoplsVerifier_PrepareCallHierarchy_NullResponse_ReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "main.go", "package main\n")
+
+	ft := newGoplsFakeTransport()
+	ft.queueResponse(1, goplsInitResult)
+	ft.queueResponse(2, nil) // null → no callable item at position
+
+	v := newGoplsTestVerifier(t, ft)
+
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: src, Line: 0, Col: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items for null response, got %d", len(items))
+	}
+}
+
+func TestGoplsVerifier_IncomingCalls_Success(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "router.go", "package main\n")
+	caller1URI := pathToURI(filepath.Join(dir, "main.go"))
+	caller2URI := pathToURI(filepath.Join(dir, "setup.go"))
+
+	ft := newGoplsFakeTransport()
+	// initialize (id=1), prepareCallHierarchy (id=2), incomingCalls (id=3)
+	ft.queueResponse(1, goplsInitResult)
+	ft.queueResponse(2, []interface{}{
+		goplsCallHierarchyItemResult("Use", "(*Router).Use", pathToURI(src), 10),
+	})
+	ft.queueResponse(3, []interface{}{
+		goplsIncomingCallResult("main", "main", caller1URI, 5),
+		goplsIncomingCallResult("Setup", "Setup", caller2URI, 20),
+	})
+
+	v := newGoplsTestVerifier(t, ft)
+
+	item := CallHierarchyItem{Name: "Use", File: src, Line: 10, Col: 0}
+
+	// Must PrepareCallHierarchy first to initialize the verifier.
+	prepItems, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: src, Line: 10, Col: 0})
+	if err != nil || len(prepItems) == 0 {
+		t.Fatalf("PrepareCallHierarchy failed or returned empty: %v", err)
+	}
+
+	callers, err := v.IncomingCalls(context.Background(), item)
+	if err != nil {
+		t.Fatalf("IncomingCalls: %v", err)
+	}
+	if len(callers) != 2 {
+		t.Fatalf("expected 2 callers, got %d", len(callers))
+	}
+	if callers[0].Name != "main" {
+		t.Errorf("expected first caller=main, got %q", callers[0].Name)
+	}
+	if callers[1].Name != "Setup" {
+		t.Errorf("expected second caller=Setup, got %q", callers[1].Name)
+	}
+}
+
+func TestGoplsVerifier_OutgoingCalls_Success(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "handler.go", "package main\n")
+	calleeURI := pathToURI(filepath.Join(dir, "db.go"))
+
+	ft := newGoplsFakeTransport()
+	// initialize (id=1), prepareCallHierarchy (id=2), outgoingCalls (id=3)
+	ft.queueResponse(1, goplsInitResult)
+	ft.queueResponse(2, []interface{}{
+		goplsCallHierarchyItemResult("HandleLogin", "HandleLogin", pathToURI(src), 15),
+	})
+	ft.queueResponse(3, []interface{}{
+		goplsOutgoingCallResult("Query", "(*sql.DB).Query", calleeURI, 42),
+		goplsOutgoingCallResult("Close", "(*sql.Rows).Close", calleeURI, 88),
+	})
+
+	v := newGoplsTestVerifier(t, ft)
+
+	item := CallHierarchyItem{Name: "HandleLogin", File: src, Line: 15, Col: 0}
+
+	// Trigger initialization via PrepareCallHierarchy.
+	_, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: src, Line: 15, Col: 0})
+	if err != nil {
+		t.Fatalf("PrepareCallHierarchy: %v", err)
+	}
+
+	callees, err := v.OutgoingCalls(context.Background(), item)
+	if err != nil {
+		t.Fatalf("OutgoingCalls: %v", err)
+	}
+	if len(callees) != 2 {
+		t.Fatalf("expected 2 callees, got %d", len(callees))
+	}
+	if callees[0].Name != "Query" {
+		t.Errorf("expected first callee=Query, got %q", callees[0].Name)
+	}
+	if callees[1].Name != "Close" {
+		t.Errorf("expected second callee=Close, got %q", callees[1].Name)
+	}
+}
+
+// TestGoplsVerifier_CallHierarchyProvider_InterfaceSatisfied verifies that
+// *GoplsVerifier implements CallHierarchyProvider at compile time.
+func TestGoplsVerifier_CallHierarchyProvider_InterfaceSatisfied(t *testing.T) {
+	var _ CallHierarchyProvider = (*GoplsVerifier)(nil)
+}

@@ -124,3 +124,25 @@ func NewVerifiedEdge(from, to graph.NodeID, callee CalleeInfo, conf Confidence) 
 		Confirmed:  callee.NodeID != "" && callee.NodeID == to,
 	}
 }
+
+// ── Call Hierarchy ────────────────────────────────────────────────────────────
+
+// CallHierarchyItem represents a function or method that appears in a call
+// hierarchy result. Produced by PrepareCallHierarchy and consumed as input to
+// IncomingCalls and OutgoingCalls queries.
+//
+// Positions are zero-indexed per the LSP specification.
+type CallHierarchyItem struct {
+	// Name is the short symbol name (e.g. "Use", "Close", "handleLogin").
+	Name string
+	// Detail is the fully-qualified name when the LSP server provides it
+	// (e.g. "(*gin.Engine).Use" for Go, "Router.use" for TypeScript).
+	// Empty when the server omits this field.
+	Detail string
+	// File is the absolute path to the file containing the symbol definition.
+	File string
+	// Line is the zero-indexed line of the symbol's selection range start.
+	Line int
+	// Col is the zero-indexed character offset of the selection range start.
+	Col int
+}

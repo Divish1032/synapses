@@ -505,11 +505,14 @@ func TestManager_TsserverAndGoplsCoexist(t *testing.T) {
 
 // tsCfg drives the tsFakeTransport response behaviour.
 type tsCfg struct {
-	response      *tsDefLoc
-	responseRaw   string
-	queryErr      error
-	queryDelay    time.Duration
-	resolveNodeID NodeResolver
+	response        *tsDefLoc
+	responseRaw     string
+	queryErr        error
+	queryDelay      time.Duration
+	resolveNodeID   NodeResolver
+	chPrepareResult interface{} // result for textDocument/prepareCallHierarchy
+	chIncomingResult interface{} // result for callHierarchy/incomingCalls
+	chOutgoingResult interface{} // result for callHierarchy/outgoingCalls
 }
 
 // tsDefLoc is a single definition location returned by tsFakeTransport.
@@ -621,6 +624,21 @@ func (f *tsFakeTransport) Send(v interface{}) error {
 		}
 		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), resultRaw)
 		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
+
+	case "textDocument/prepareCallHierarchy":
+		raw := tsEncodeResult(f.cfg.chPrepareResult)
+		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), raw)
+		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
+
+	case "callHierarchy/incomingCalls":
+		raw := tsEncodeResult(f.cfg.chIncomingResult)
+		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), raw)
+		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
+
+	case "callHierarchy/outgoingCalls":
+		raw := tsEncodeResult(f.cfg.chOutgoingResult)
+		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), raw)
+		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
 	}
 	return nil
 }
@@ -647,3 +665,199 @@ func (s *tsStubVerifier) ResolveEdge(_ context.Context, from, to graph.NodeID, p
 
 func (s *tsStubVerifier) Language() Language { return LanguageTypeScript }
 func (s *tsStubVerifier) Close() error        { return nil }
+
+// ── CallHierarchy helpers ─────────────────────────────────────────────────────
+
+// tsEncodeResult marshals v to JSON, returning "null" if v is nil.
+func tsEncodeResult(v interface{}) string {
+	if v == nil {
+		return "null"
+	}
+	raw, _ := json.Marshal(v)
+	return string(raw)
+}
+
+// tsCallHierarchyItemResult builds a single CallHierarchyItem wire object.
+func tsCallHierarchyItemResult(name, detail, uri string, line int) map[string]interface{} {
+	pos := map[string]interface{}{"line": line, "character": 0}
+	rng := map[string]interface{}{"start": pos, "end": pos}
+	return map[string]interface{}{
+		"name":           name,
+		"detail":         detail,
+		"kind":           12,
+		"uri":            uri,
+		"range":          rng,
+		"selectionRange": rng,
+	}
+}
+
+// tsIncomingCallResult builds one entry of a callHierarchy/incomingCalls response.
+func tsIncomingCallResult(name, detail, uri string, line int) map[string]interface{} {
+	return map[string]interface{}{
+		"from":       tsCallHierarchyItemResult(name, detail, uri, line),
+		"fromRanges": []interface{}{},
+	}
+}
+
+// tsOutgoingCallResult builds one entry of a callHierarchy/outgoingCalls response.
+func tsOutgoingCallResult(name, detail, uri string, line int) map[string]interface{} {
+	return map[string]interface{}{
+		"to":         tsCallHierarchyItemResult(name, detail, uri, line),
+		"fromRanges": []interface{}{},
+	}
+}
+
+// ── TsserverVerifier — CallHierarchyProvider ──────────────────────────────────
+
+func TestTsserverVerifier_PrepareCallHierarchy_NonTSFile_ReturnsNil(t *testing.T) {
+	// IsTSFile check: .go files are rejected before touching the transport.
+	v := tsMakeVerifier(t, tsCfg{})
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: "/src/main.go", Line: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil items for non-TS file, got %v", items)
+	}
+}
+
+func TestTsserverVerifier_PrepareCallHierarchy_EmptyFile_ReturnsNil(t *testing.T) {
+	// Empty file guard fires before any LSP interaction.
+	ft := &tsFakeTransport{cfg: tsCfg{}}
+	v := tsMakeVerifierWithTransport(t, ft)
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil for empty file position, got %v", items)
+	}
+}
+
+func TestTsserverVerifier_PrepareCallHierarchy_Success(t *testing.T) {
+	srcFile := tsTempFile(t, "router.ts", "// src\n")
+	defURI := pathToURI(srcFile)
+
+	itemResult := []interface{}{
+		tsCallHierarchyItemResult("use", "Router.use", defURI, 7),
+	}
+	v := tsMakeVerifier(t, tsCfg{chPrepareResult: itemResult})
+
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 7, Col: 0})
+	if err != nil {
+		t.Fatalf("PrepareCallHierarchy: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Name != "use" {
+		t.Errorf("expected Name=use, got %q", items[0].Name)
+	}
+	if items[0].Detail != "Router.use" {
+		t.Errorf("expected Detail=Router.use, got %q", items[0].Detail)
+	}
+	if items[0].File != srcFile {
+		t.Errorf("expected File=%q, got %q", srcFile, items[0].File)
+	}
+	if items[0].Line != 7 {
+		t.Errorf("expected Line=7, got %d", items[0].Line)
+	}
+}
+
+func TestTsserverVerifier_PrepareCallHierarchy_NullResponse_ReturnsEmpty(t *testing.T) {
+	srcFile := tsTempFile(t, "app.ts", "// src\n")
+	v := tsMakeVerifier(t, tsCfg{chPrepareResult: nil}) // nil → "null" result
+
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 0, Col: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items for null response, got %d", len(items))
+	}
+}
+
+func TestTsserverVerifier_IncomingCalls_Success(t *testing.T) {
+	srcFile := tsTempFile(t, "service.ts", "// src\n")
+	caller1URI := pathToURI(tsTempFile(t, "main.ts", "// main\n"))
+	caller2URI := pathToURI(tsTempFile(t, "test.ts", "// test\n"))
+	defURI := pathToURI(srcFile)
+
+	prepResult := []interface{}{
+		tsCallHierarchyItemResult("handleRequest", "Service.handleRequest", defURI, 12),
+	}
+	incomingResult := []interface{}{
+		tsIncomingCallResult("main", "main", caller1URI, 3),
+		tsIncomingCallResult("runTests", "runTests", caller2URI, 8),
+	}
+	v := tsMakeVerifier(t, tsCfg{
+		chPrepareResult:  prepResult,
+		chIncomingResult: incomingResult,
+	})
+
+	// PrepareCallHierarchy must be called first to start the verifier.
+	prepItems, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 12, Col: 0})
+	if err != nil || len(prepItems) == 0 {
+		t.Fatalf("PrepareCallHierarchy failed or empty: %v", err)
+	}
+
+	item := CallHierarchyItem{Name: "handleRequest", File: srcFile, Line: 12, Col: 0}
+	callers, err := v.IncomingCalls(context.Background(), item)
+	if err != nil {
+		t.Fatalf("IncomingCalls: %v", err)
+	}
+	if len(callers) != 2 {
+		t.Fatalf("expected 2 callers, got %d", len(callers))
+	}
+	if callers[0].Name != "main" {
+		t.Errorf("expected first caller=main, got %q", callers[0].Name)
+	}
+	if callers[1].Name != "runTests" {
+		t.Errorf("expected second caller=runTests, got %q", callers[1].Name)
+	}
+}
+
+func TestTsserverVerifier_OutgoingCalls_Success(t *testing.T) {
+	srcFile := tsTempFile(t, "handler.ts", "// src\n")
+	calleeURI := pathToURI(tsTempFile(t, "db.ts", "// db\n"))
+	defURI := pathToURI(srcFile)
+
+	prepResult := []interface{}{
+		tsCallHierarchyItemResult("login", "AuthService.login", defURI, 20),
+	}
+	outgoingResult := []interface{}{
+		tsOutgoingCallResult("query", "Database.query", calleeURI, 55),
+		tsOutgoingCallResult("hashPassword", "crypto.hashPassword", calleeURI, 10),
+	}
+	v := tsMakeVerifier(t, tsCfg{
+		chPrepareResult:  prepResult,
+		chOutgoingResult: outgoingResult,
+	})
+
+	// Trigger initialization via PrepareCallHierarchy.
+	_, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 20, Col: 0})
+	if err != nil {
+		t.Fatalf("PrepareCallHierarchy: %v", err)
+	}
+
+	item := CallHierarchyItem{Name: "login", File: srcFile, Line: 20, Col: 0}
+	callees, err := v.OutgoingCalls(context.Background(), item)
+	if err != nil {
+		t.Fatalf("OutgoingCalls: %v", err)
+	}
+	if len(callees) != 2 {
+		t.Fatalf("expected 2 callees, got %d", len(callees))
+	}
+	if callees[0].Name != "query" {
+		t.Errorf("expected first callee=query, got %q", callees[0].Name)
+	}
+	if callees[1].Name != "hashPassword" {
+		t.Errorf("expected second callee=hashPassword, got %q", callees[1].Name)
+	}
+}
+
+// TestTsserverVerifier_CallHierarchyProvider_InterfaceSatisfied verifies that
+// *TsserverVerifier implements CallHierarchyProvider at compile time.
+func TestTsserverVerifier_CallHierarchyProvider_InterfaceSatisfied(t *testing.T) {
+	var _ CallHierarchyProvider = (*TsserverVerifier)(nil)
+}

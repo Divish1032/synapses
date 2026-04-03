@@ -168,6 +168,132 @@ func (ts *TsserverVerifier) Close() error {
 	return nil
 }
 
+// ── Call Hierarchy — TsserverVerifier implementation ─────────────────────────
+
+// PrepareCallHierarchy implements CallHierarchyProvider.
+// pos should be on a TypeScript function or method definition (zero-indexed).
+// Gracefully returns nil, nil when tsserver is unavailable or cannot resolve pos.
+func (ts *TsserverVerifier) PrepareCallHierarchy(ctx context.Context, pos CallPosition) ([]CallHierarchyItem, error) {
+	if ts.opts.TSServerPath == "" || pos.File == "" {
+		return nil, nil
+	}
+	if !IsTSFile(pos.File) {
+		return nil, nil
+	}
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	if err := ts.ensureStarted(); err != nil {
+		return nil, nil // graceful degradation
+	}
+	if err := ts.ensureOpen(pos.File); err != nil {
+		return nil, fmt.Errorf("ensureOpen for prepareCallHierarchy: %w", err)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, ts.opts.QueryTimeout)
+	defer cancel()
+
+	id := ts.nextID
+	ts.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "textDocument/prepareCallHierarchy",
+		Params: map[string]interface{}{
+			"textDocument": map[string]interface{}{"uri": pathToURI(pos.File)},
+			"position":     map[string]interface{}{"line": pos.Line, "character": pos.Col},
+		},
+	}
+	if err := ts.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send prepareCallHierarchy: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, ts.transport, id)
+	if err != nil {
+		ts.teardown()
+		return nil, fmt.Errorf("prepareCallHierarchy response: %w", err)
+	}
+	return parseCallHierarchyItems(raw)
+}
+
+// IncomingCalls implements CallHierarchyProvider.
+// Returns the direct callers of item. Gracefully returns nil, nil on failure.
+func (ts *TsserverVerifier) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error) {
+	if ts.opts.TSServerPath == "" {
+		return nil, nil
+	}
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	if err := ts.ensureStarted(); err != nil {
+		return nil, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, ts.opts.QueryTimeout)
+	defer cancel()
+
+	id := ts.nextID
+	ts.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "callHierarchy/incomingCalls",
+		Params:  map[string]interface{}{"item": callHierarchyItemToWire(item)},
+	}
+	if err := ts.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send incomingCalls: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, ts.transport, id)
+	if err != nil {
+		ts.teardown()
+		return nil, fmt.Errorf("incomingCalls response: %w", err)
+	}
+	return parseIncomingCalls(raw)
+}
+
+// OutgoingCalls implements CallHierarchyProvider.
+// Returns the direct callees of item. Gracefully returns nil, nil on failure.
+func (ts *TsserverVerifier) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error) {
+	if ts.opts.TSServerPath == "" {
+		return nil, nil
+	}
+
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	if err := ts.ensureStarted(); err != nil {
+		return nil, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, ts.opts.QueryTimeout)
+	defer cancel()
+
+	id := ts.nextID
+	ts.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "callHierarchy/outgoingCalls",
+		Params:  map[string]interface{}{"item": callHierarchyItemToWire(item)},
+	}
+	if err := ts.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send outgoingCalls: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, ts.transport, id)
+	if err != nil {
+		ts.teardown()
+		return nil, fmt.Errorf("outgoingCalls response: %w", err)
+	}
+	return parseOutgoingCalls(raw)
+}
+
 // ── internal ──────────────────────────────────────────────────────────────────
 
 // ensureStarted starts typescript-language-server and runs the LSP Initialize
@@ -230,6 +356,9 @@ func (ts *TsserverVerifier) initialize(ctx context.Context, tr LSPTransport) err
 					"definition": map[string]interface{}{
 						"dynamicRegistration": false,
 						"linkSupport":         false,
+					},
+					"callHierarchy": map[string]interface{}{
+						"dynamicRegistration": false,
 					},
 				},
 			},

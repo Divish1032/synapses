@@ -382,6 +382,11 @@ type GraphBenchResult struct {
 	FailedQueries   []FailedQuery     `json:"failed_queries,omitempty"`
 	RepoStatsData   []RepoStats       `json:"repo_stats,omitempty"`
 	TestResults     []interface{}     `json:"tests"`
+	// LSP comparison — populated only when --gb-compare-lsp is used and Go/TS
+	// repos are present. LSPSummary is averaged over tests with LSP data only;
+	// LSPDelta is LSPSummary minus the baseline on the same test subset.
+	LSPSummary *GraphBenchMetrics `json:"lsp_summary,omitempty"`
+	LSPDelta   *GraphBenchMetrics `json:"lsp_delta,omitempty"`
 }
 
 // FailedQuery records a test that produced an error or zero recall.
@@ -479,6 +484,23 @@ func (r *Reporter) PrintGraphBenchSummary(result *GraphBenchResult) {
 		}
 	}
 
+	// LSP comparison section.
+	if result.LSPSummary != nil {
+		fmt.Printf("\n=== LSP Call Hierarchy Comparison ===\n")
+		fmt.Printf("LSP:      Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n",
+			result.LSPSummary.Precision*100, result.LSPSummary.Recall*100, result.LSPSummary.F1*100)
+		if result.LSPDelta != nil {
+			sign := "+"
+			if result.LSPDelta.F1 < 0 {
+				sign = ""
+			}
+			fmt.Printf("Delta:    F1 %s%.1f%% | Precision %s%.1f%% | Recall %s%.1f%%\n",
+				sign, result.LSPDelta.F1*100,
+				sign, result.LSPDelta.Precision*100,
+				sign, result.LSPDelta.Recall*100)
+		}
+	}
+
 	// Print top failures by language.
 	if len(result.FailedQueries) > 0 {
 		fmt.Printf("\n=== Failed Queries (%d) ===\n", len(result.FailedQueries))
@@ -558,6 +580,27 @@ func graphBenchMarkdown(result *GraphBenchResult) string {
 				s.Label, s.Tests,
 				s.Metrics.Precision*100, s.Metrics.Recall*100, s.Metrics.F1*100)
 		}
+	}
+
+	if result.LSPSummary != nil {
+		sb.WriteString("\n## LSP Call Hierarchy Comparison\n\n")
+		sb.WriteString("| Mode | Precision | Recall | F1 |\n")
+		sb.WriteString("|------|-----------|--------|----|\n")
+		fmt.Fprintf(&sb, "| Baseline (tree-sitter) | %.1f%% | %.1f%% | %.1f%% |\n",
+			result.Summary.Precision*100, result.Summary.Recall*100, result.Summary.F1*100)
+		fmt.Fprintf(&sb, "| LSP call hierarchy | %.1f%% | %.1f%% | %.1f%% |\n",
+			result.LSPSummary.Precision*100, result.LSPSummary.Recall*100, result.LSPSummary.F1*100)
+		if result.LSPDelta != nil {
+			sign := "+"
+			if result.LSPDelta.F1 < 0 {
+				sign = ""
+			}
+			fmt.Fprintf(&sb, "| Delta | %s%.1f%% | %s%.1f%% | %s%.1f%% |\n",
+				sign, result.LSPDelta.Precision*100,
+				sign, result.LSPDelta.Recall*100,
+				sign, result.LSPDelta.F1*100)
+		}
+		sb.WriteString("\n")
 	}
 
 	if len(result.FailedQueries) > 0 {

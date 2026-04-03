@@ -237,6 +237,9 @@ func (g *GoplsVerifier) initialize(ctx context.Context, t LSPTransport) error {
 						"dynamicRegistration": false,
 						"linkSupport":         false,
 					},
+					"callHierarchy": map[string]interface{}{
+						"dynamicRegistration": false,
+					},
 				},
 			},
 			"initializationOptions": map[string]interface{}{},
@@ -329,6 +332,129 @@ func (g *GoplsVerifier) ensureOpen(path string) error {
 		},
 	}
 	return g.transport.Send(notif)
+}
+
+// ── Call Hierarchy — GoplsVerifier implementation ───────────────────────────
+
+// PrepareCallHierarchy implements CallHierarchyProvider.
+// pos should be on a Go function or method definition (zero-indexed line/col).
+// Gracefully returns nil, nil when gopls is unavailable or cannot resolve pos.
+func (g *GoplsVerifier) PrepareCallHierarchy(ctx context.Context, pos CallPosition) ([]CallHierarchyItem, error) {
+	if g.opts.GoplsPath == "" || pos.File == "" {
+		return nil, nil
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := g.ensureStarted(); err != nil {
+		return nil, nil // graceful degradation
+	}
+	if err := g.ensureOpen(pos.File); err != nil {
+		return nil, fmt.Errorf("ensureOpen for prepareCallHierarchy: %w", err)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, g.opts.QueryTimeout)
+	defer cancel()
+
+	id := g.nextID
+	g.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "textDocument/prepareCallHierarchy",
+		Params: map[string]interface{}{
+			"textDocument": map[string]interface{}{"uri": pathToURI(pos.File)},
+			"position":     map[string]interface{}{"line": pos.Line, "character": pos.Col},
+		},
+	}
+	if err := g.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send prepareCallHierarchy: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, g.transport, id)
+	if err != nil {
+		g.teardown()
+		return nil, fmt.Errorf("prepareCallHierarchy response: %w", err)
+	}
+	return parseCallHierarchyItems(raw)
+}
+
+// IncomingCalls implements CallHierarchyProvider.
+// Returns the direct callers of item. Gracefully returns nil, nil on failure.
+func (g *GoplsVerifier) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error) {
+	if g.opts.GoplsPath == "" {
+		return nil, nil
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := g.ensureStarted(); err != nil {
+		return nil, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, g.opts.QueryTimeout)
+	defer cancel()
+
+	id := g.nextID
+	g.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "callHierarchy/incomingCalls",
+		Params:  map[string]interface{}{"item": callHierarchyItemToWire(item)},
+	}
+	if err := g.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send incomingCalls: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, g.transport, id)
+	if err != nil {
+		g.teardown()
+		return nil, fmt.Errorf("incomingCalls response: %w", err)
+	}
+	return parseIncomingCalls(raw)
+}
+
+// OutgoingCalls implements CallHierarchyProvider.
+// Returns the direct callees of item. Gracefully returns nil, nil on failure.
+func (g *GoplsVerifier) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error) {
+	if g.opts.GoplsPath == "" {
+		return nil, nil
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if err := g.ensureStarted(); err != nil {
+		return nil, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, g.opts.QueryTimeout)
+	defer cancel()
+
+	id := g.nextID
+	g.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "callHierarchy/outgoingCalls",
+		Params:  map[string]interface{}{"item": callHierarchyItemToWire(item)},
+	}
+	if err := g.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send outgoingCalls: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, g.transport, id)
+	if err != nil {
+		g.teardown()
+		return nil, fmt.Errorf("outgoingCalls response: %w", err)
+	}
+	return parseOutgoingCalls(raw)
 }
 
 // ── LSP protocol helpers ──────────────────────────────────────────────────────
@@ -497,4 +623,126 @@ func uriToPath(uri string) string {
 		path = path[1:]
 	}
 	return path
+}
+
+// ── Call Hierarchy wire types and parsing (shared by gopls and tsserver) ─────
+
+// lspCallHierarchyItem is the LSP wire representation of a call hierarchy item.
+// Mirrors the CallHierarchyItem LSP type from the 3.16 specification.
+type lspCallHierarchyItem struct {
+	Name           string   `json:"name"`
+	Detail         string   `json:"detail"`
+	Kind           int      `json:"kind"` // SymbolKind — informational only, not used
+	URI            string   `json:"uri"`
+	Range          lspRange `json:"range"`
+	SelectionRange lspRange `json:"selectionRange"`
+}
+
+// lspIncomingCall is one entry in a callHierarchy/incomingCalls response.
+// "from" is the calling function; "fromRanges" are the call-site locations
+// within "from" where the target is called (ignored — we only need the caller).
+type lspIncomingCall struct {
+	From lspCallHierarchyItem `json:"from"`
+}
+
+// lspOutgoingCall is one entry in a callHierarchy/outgoingCalls response.
+// "to" is the called function; "fromRanges" are call-site locations within the
+// queried function (ignored — we only need the callee).
+type lspOutgoingCall struct {
+	To lspCallHierarchyItem `json:"to"`
+}
+
+// parseCallHierarchyItems parses the textDocument/prepareCallHierarchy result.
+// Returns an empty slice (not an error) for null or empty responses.
+func parseCallHierarchyItems(raw json.RawMessage) ([]CallHierarchyItem, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []lspCallHierarchyItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parse callHierarchy items: %w", err)
+	}
+	out := make([]CallHierarchyItem, 0, len(items))
+	for _, item := range items {
+		if item.URI == "" {
+			continue
+		}
+		out = append(out, CallHierarchyItem{
+			Name:   item.Name,
+			Detail: item.Detail,
+			File:   uriToPath(item.URI),
+			Line:   item.SelectionRange.Start.Line,
+			Col:    item.SelectionRange.Start.Character,
+		})
+	}
+	return out, nil
+}
+
+// parseIncomingCalls parses the callHierarchy/incomingCalls result.
+// Each entry's "from" field describes one calling function.
+func parseIncomingCalls(raw json.RawMessage) ([]CallHierarchyItem, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var calls []lspIncomingCall
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		return nil, fmt.Errorf("parse incomingCalls: %w", err)
+	}
+	out := make([]CallHierarchyItem, 0, len(calls))
+	for _, call := range calls {
+		if call.From.URI == "" {
+			continue
+		}
+		out = append(out, CallHierarchyItem{
+			Name:   call.From.Name,
+			Detail: call.From.Detail,
+			File:   uriToPath(call.From.URI),
+			Line:   call.From.SelectionRange.Start.Line,
+			Col:    call.From.SelectionRange.Start.Character,
+		})
+	}
+	return out, nil
+}
+
+// parseOutgoingCalls parses the callHierarchy/outgoingCalls result.
+// Each entry's "to" field describes one called function.
+func parseOutgoingCalls(raw json.RawMessage) ([]CallHierarchyItem, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var calls []lspOutgoingCall
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		return nil, fmt.Errorf("parse outgoingCalls: %w", err)
+	}
+	out := make([]CallHierarchyItem, 0, len(calls))
+	for _, call := range calls {
+		if call.To.URI == "" {
+			continue
+		}
+		out = append(out, CallHierarchyItem{
+			Name:   call.To.Name,
+			Detail: call.To.Detail,
+			File:   uriToPath(call.To.URI),
+			Line:   call.To.SelectionRange.Start.Line,
+			Col:    call.To.SelectionRange.Start.Character,
+		})
+	}
+	return out, nil
+}
+
+// callHierarchyItemToWire converts a CallHierarchyItem to the LSP wire format
+// suitable for use as the "item" parameter in incomingCalls/outgoingCalls.
+// The SymbolKind 12 (Function) is a safe default for all callable items.
+func callHierarchyItemToWire(item CallHierarchyItem) map[string]interface{} {
+	uri := pathToURI(item.File)
+	pos := map[string]interface{}{"line": item.Line, "character": item.Col}
+	rng := map[string]interface{}{"start": pos, "end": pos}
+	return map[string]interface{}{
+		"name":           item.Name,
+		"detail":         item.Detail,
+		"kind":           12, // SymbolKind.Function
+		"uri":            uri,
+		"range":          rng,
+		"selectionRange": rng,
+	}
 }
