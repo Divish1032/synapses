@@ -304,8 +304,8 @@ func TestRunFailurePatternExtraction_idempotent(t *testing.T) {
 		r := store.RejectedApproach{
 			ID:            fmt.Sprintf("rej-idem-%d", i),
 			ProjectID:     projID,
-			Approach:      "Using fasthttp for routing",
-			FailureReason: "incompatible with net/http middleware",
+			Approach:      "Using fast-router for routing", // hyphenated — extractable by regex
+			FailureReason: "incompatible with chi-middleware",
 		}
 		if _, err := st.InsertRejectedApproach(r); err != nil {
 			t.Fatalf("InsertRejectedApproach: %v", err)
@@ -315,6 +315,9 @@ func TestRunFailurePatternExtraction_idempotent(t *testing.T) {
 	n1, err := runFailurePatternExtraction(st, projID)
 	if err != nil {
 		t.Fatalf("first extraction: %v", err)
+	}
+	if n1 == 0 {
+		t.Fatal("first extraction: expected ≥1 pattern (test data must use hyphenated keywords)")
 	}
 	n2, err := runFailurePatternExtraction(st, projID)
 	if err != nil {

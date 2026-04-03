@@ -8,7 +8,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
-
 // MinOccurrencesForFailurePattern is the minimum number of rejected_approach
 // records that must share the same keyword before a FailurePattern is promoted.
 // A pattern tried and abandoned twice is a genuine signal — not a one-off.
