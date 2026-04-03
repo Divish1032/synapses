@@ -1976,7 +1976,7 @@ func matchGlob(pattern, name string) bool {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // fillTemplate replaces placeholders in tmpl with values from vars.
-// Supported placeholders: {target}, {file}, {count}, {total}.
+// Supported placeholders: {target}, {file}, {count}, {total}, {sink}.
 // Unknown placeholders are left as-is.
 func fillTemplate(tmpl string, vars map[string]string) string {
 	result := tmpl
