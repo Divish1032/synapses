@@ -634,3 +634,16 @@ source-map
 source-map-support
 serialize-error
 type-fest
+
+# ── Express middleware (commonly imported directly) ────────────────────────────
+body-parser
+cookie-parser
+compression
+http-proxy-middleware
+express-async-handler
+
+# ── File upload ────────────────────────────────────────────────────────────────
+formidable
+
+# ── Dependency injection ───────────────────────────────────────────────────────
+awilix
