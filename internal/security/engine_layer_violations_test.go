@@ -458,3 +458,83 @@ func TestCheckLayerMapping_EmptyGraph(t *testing.T) {
 		t.Errorf("expected nil for empty graph, got %v", violations)
 	}
 }
+
+// TestCheckLayerMapping_MessageTemplate verifies that fillTemplate correctly
+// substitutes {file}, {src_layer}, {dst_layer} and {skip_layer} placeholders in
+// the violation message. This is the only test that asserts v.Message content.
+func TestCheckLayerMapping_MessageTemplate(t *testing.T) {
+	g := buildLayerGraph(t,
+		"/project/internal/handler/orders.go",
+		"github.com/myapp/internal/repository",
+	)
+
+	p := layerViolationPattern(nil)
+	// Message template set by layerViolationPattern:
+	// "File {file} ({src_layer}) directly imports '{target}' ({dst_layer})."
+	violations := checkLayerMapping(g, p)
+	if len(violations) == 0 {
+		t.Fatal("expected a violation for handler→repository, got none")
+	}
+
+	msg := violations[0].Message
+	if !strings.Contains(msg, "/project/internal/handler/orders.go") {
+		t.Errorf("message should contain the file path; got: %q", msg)
+	}
+	if !strings.Contains(msg, "presentation") {
+		t.Errorf("message should contain src_layer 'presentation'; got: %q", msg)
+	}
+	if !strings.Contains(msg, "data") {
+		t.Errorf("message should contain dst_layer 'data'; got: %q", msg)
+	}
+	if !strings.Contains(msg, "github.com/myapp/internal/repository") {
+		t.Errorf("message should contain target import path; got: %q", msg)
+	}
+	// Ensure no unreplaced placeholders remain.
+	if strings.Contains(msg, "{") {
+		t.Errorf("message still contains unreplaced placeholder(s): %q", msg)
+	}
+}
+
+// TestLayerDefValidation verifies that SecurityPattern.Validate() rejects
+// LayerDef entries with an empty name or an empty keywords list.
+func TestLayerDefValidation(t *testing.T) {
+	base := SecurityPattern{
+		ID:          "test-layer",
+		Name:        "Test",
+		Language:    "*",
+		Framework:   "*",
+		PatternType: PatternTypeLayerViolation,
+		Severity:    SeverityMedium,
+		Description: "desc",
+		Message:     "msg",
+		Detection: Detection{
+			CheckType: CheckTypeLayerMapping,
+			Scope:     ScopeProject,
+		},
+	}
+
+	// Valid LayerConfig — should pass.
+	base.Detection.LayerConfig = []LayerDef{
+		{Name: "web", Keywords: []string{"handler"}},
+		{Name: "db", Keywords: []string{"repo"}},
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid LayerConfig rejected: %v", err)
+	}
+
+	// Empty name — should fail.
+	base.Detection.LayerConfig = []LayerDef{
+		{Name: "", Keywords: []string{"handler"}},
+	}
+	if err := base.Validate(); err == nil {
+		t.Error("expected error for LayerDef with empty name, got nil")
+	}
+
+	// Empty keywords — should fail.
+	base.Detection.LayerConfig = []LayerDef{
+		{Name: "web", Keywords: []string{}},
+	}
+	if err := base.Validate(); err == nil {
+		t.Error("expected error for LayerDef with empty keywords, got nil")
+	}
+}

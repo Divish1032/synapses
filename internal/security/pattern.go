@@ -110,6 +110,19 @@ const (
 	// auto-inferred from path segment keywords or supplied via LayerConfig.
 	// Requires project-scope analysis.
 	CheckTypeLayerMapping CheckType = "layer_mapping"
+
+	// CheckTypeDataFlowPath fires when a route-registering file's call graph
+	// reaches a database sink operation but no validation or sanitization function
+	// is found in the reachable call path. This is a heuristic check: confidence
+	// is MEDIUM — the finding is "may lack validation", not "definitely insecure".
+	//
+	// Algorithm: BFS through CALLS edges up to MaxCallDepth hops from all
+	// function/method nodes in the file. If any DBSinkPatterns name is reachable
+	// AND no ValidationPatterns name is reachable, a violation fires.
+	//
+	// Only fires on route-registering files (files with NodeRoute nodes, or that
+	// call functions matching RouteNodeNames). Test files are always skipped.
+	CheckTypeDataFlowPath CheckType = "data_flow_path"
 )
 
 // DetectionScope limits the breadth of analysis the engine performs for a pattern.
@@ -317,6 +330,30 @@ type Detection struct {
 	// Examples (Java): ["addService", "bindService"]
 	GRPCNodeNames []string `json:"grpc_node_names,omitempty"`
 
+	// ValidationPatterns are glob patterns for function or method names that indicate
+	// user-input validation or sanitization. When any reachable callee matches one of
+	// these patterns, no violation is fired by CheckTypeDataFlowPath.
+	//
+	// Matching is case-sensitive; include both PascalCase and camelCase variants.
+	// Used by: CheckTypeDataFlowPath
+	// Examples: ["Validate*", "validate*", "Sanitize*", "sanitize*", "Clean*", "Escape*"]
+	ValidationPatterns []string `json:"validation_patterns,omitempty"`
+
+	// DBSinkPatterns are glob patterns for function or method names that represent
+	// database write or read operations. CheckTypeDataFlowPath fires only when at
+	// least one reachable callee matches one of these patterns.
+	//
+	// Matching is case-sensitive; adjust for naming conventions of the target language.
+	// Used by: CheckTypeDataFlowPath
+	// Examples: ["*QueryRow*", "*QueryContext*", "*ExecContext*", "*Insert*", "*Save*"]
+	DBSinkPatterns []string `json:"db_sink_patterns,omitempty"`
+
+	// MaxCallDepth limits how many hops the BFS traversal follows through CALLS edges
+	// when tracing the call path from handler functions to database sinks. Defaults to 5
+	// when omitted or zero. Higher values increase recall but cost more graph traversal.
+	// Used by: CheckTypeDataFlowPath
+	MaxCallDepth int `json:"max_call_depth,omitempty"`
+
 	// Scope controls how broadly the engine analyzes the codebase for this pattern.
 	// Defaults to ScopeFile when empty.
 	Scope DetectionScope `json:"scope,omitempty"`
@@ -459,6 +496,14 @@ func (p SecurityPattern) Validate() error {
 	if err := p.Detection.CheckType.Validate(); err != nil {
 		return fmt.Errorf("security pattern %q: %w", p.ID, err)
 	}
+	for i, ld := range p.Detection.LayerConfig {
+		if ld.Name == "" {
+			return fmt.Errorf("security pattern %q: detection.layer_config[%d] missing required field: name", p.ID, i)
+		}
+		if len(ld.Keywords) == 0 {
+			return fmt.Errorf("security pattern %q: detection.layer_config[%d] (%q) has no keywords; a layer with no keywords can never be matched", p.ID, i, ld.Name)
+		}
+	}
 	return nil
 }
 
@@ -489,10 +534,10 @@ func (ct CheckType) Validate() error {
 	switch ct {
 	case CheckTypeMissingMiddleware, CheckTypeDirectImport, CheckTypeMissingAnnotation,
 		CheckTypeHardcodedSecret, CheckTypeAdminElevation, CheckTypeCrossTransportAuth,
-		CheckTypeLayerMapping:
+		CheckTypeLayerMapping, CheckTypeDataFlowPath:
 		return nil
 	default:
-		return fmt.Errorf("unknown check_type %q (valid: missing_middleware, direct_import, missing_annotation, hardcoded_secret, admin_elevation, cross_transport_auth, layer_mapping)", ct)
+		return fmt.Errorf("unknown check_type %q (valid: missing_middleware, direct_import, missing_annotation, hardcoded_secret, admin_elevation, cross_transport_auth, layer_mapping, data_flow_path)", ct)
 	}
 }
 
