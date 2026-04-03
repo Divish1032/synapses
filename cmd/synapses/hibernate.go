@@ -36,6 +36,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/lsp"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/parser"
@@ -325,6 +326,31 @@ func wakeProjectInstance(
 	srv.SetProjectRegistry(&registryAdapter{reg: reg})
 	srv.SetUpdateChecker(getPendingUpdateVersion)
 	srv.StartBackground()
+
+	// LSP Manager — mirrors daemon_serve.go wiring. Verifiers degrade to no-op
+	// when the binary is absent; maintenance goroutine closes on project context.
+	lspMgr := lsp.NewManager(lsp.Options{})
+	lspMgr.Register(lsp.NewGoplsVerifier(lsp.GoplsVerifierOptions{ProjectRoot: absPath}))
+	lspMgr.Register(lsp.NewTsserverVerifier(lsp.TsserverVerifierOptions{ProjectRoot: absPath}))
+	lspMgr.Register(lsp.NewPyrightVerifier(lsp.PyrightVerifierOptions{ProjectRoot: absPath}))
+	srv.SetLSPManager(lspMgr)
+	go func() {
+		trimTicker := time.NewTicker(time.Minute)
+		purgeTicker := time.NewTicker(10 * time.Minute)
+		defer trimTicker.Stop()
+		defer purgeTicker.Stop()
+		for {
+			select {
+			case <-trimTicker.C:
+				lspMgr.TrimIdle()
+			case <-purgeTicker.C:
+				lspMgr.PurgeExpired()
+			case <-projCtx.Done():
+				lspMgr.Close()
+				return
+			}
+		}
+	}()
 
 	loadAndSetPrompts(srv, absPath)
 

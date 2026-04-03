@@ -25,6 +25,7 @@ package mcp
 // exactly-once delivery per session per PatternID+Target pair.
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -54,6 +55,14 @@ func (s *Server) onWatcherFileChanged(filePath string) {
 
 	if len(findings) == 0 {
 		return
+	}
+
+	// Sprint 28.5: upgrade MEDIUM→HIGH / LOW→MEDIUM when LSP confirms entity identity.
+	// The watcher already runs asynchronously (via watcher.trackGo) so the LSP call
+	// does not block keystroke flow. The Manager's 10-minute result cache means
+	// repeated reparsing of the same file only hits the language server once per window.
+	if s.lspManager != nil {
+		findings = security.NewLSPEnricher(s.lspManager).Enrich(context.Background(), findings, s.graph)
 	}
 
 	// Resolve the active session for in-memory queue delivery.

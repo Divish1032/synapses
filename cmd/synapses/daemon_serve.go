@@ -69,6 +69,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/lsp"
 	mcpsrv "github.com/SynapsesOS/synapses/internal/mcp"
 	"github.com/SynapsesOS/synapses/internal/namematcher"
 	"github.com/SynapsesOS/synapses/internal/parser"
@@ -2335,6 +2336,33 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	srv.SetProjectRegistry(&registryAdapter{reg: reg})
 	srv.SetUpdateChecker(getPendingUpdateVersion)
 	srv.StartBackground()
+
+	// LSP Manager — type-system-backed confidence upgrades for security findings
+	// (Sprint 28.5). Verifiers degrade to no-op when the binary is absent so no
+	// config is required. A maintenance goroutine trims idle processes and purges
+	// stale cache entries; it closes the manager on project context cancellation.
+	lspMgr := lsp.NewManager(lsp.Options{})
+	lspMgr.Register(lsp.NewGoplsVerifier(lsp.GoplsVerifierOptions{ProjectRoot: absPath}))
+	lspMgr.Register(lsp.NewTsserverVerifier(lsp.TsserverVerifierOptions{ProjectRoot: absPath}))
+	lspMgr.Register(lsp.NewPyrightVerifier(lsp.PyrightVerifierOptions{ProjectRoot: absPath}))
+	srv.SetLSPManager(lspMgr)
+	go func() {
+		trimTicker := time.NewTicker(time.Minute)
+		purgeTicker := time.NewTicker(10 * time.Minute)
+		defer trimTicker.Stop()
+		defer purgeTicker.Stop()
+		for {
+			select {
+			case <-trimTicker.C:
+				lspMgr.TrimIdle()
+			case <-purgeTicker.C:
+				lspMgr.PurgeExpired()
+			case <-projCtx.Done():
+				lspMgr.Close()
+				return
+			}
+		}
+	}()
 
 	// Skills / prompts.
 	loadAndSetPrompts(srv, absPath)
