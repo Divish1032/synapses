@@ -897,6 +897,9 @@ func (s *Server) handleVerifyImplementation(
 	var projectSecurityFindings []security.Violation
 	if s.graph != nil && s.patternEngine != nil {
 		projectSecurityFindings = s.patternEngine.CheckProject(s.graph)
+		if s.lspManager != nil {
+			projectSecurityFindings = security.NewLSPEnricher(s.lspManager).Enrich(ctx, projectSecurityFindings, s.graph)
+		}
 		totalSecurityFindings += len(projectSecurityFindings)
 	}
 
