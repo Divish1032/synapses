@@ -461,3 +461,43 @@ func TestConventionEngine_EndSession_IncludesConventionsExtracted(t *testing.T) 
 		t.Errorf("expected conventions_extracted ≥ 1, got %v", result["conventions_extracted"])
 	}
 }
+
+// TestConventionBaseTexts_CoversAllObservationKeys verifies that every
+// observation key produced by the observation pipeline (wellKnownLibraries +
+// testing patterns + file patterns) has a corresponding entry in
+// conventionBaseTexts. If this test fails, someone added a new observation
+// key in session_observations.go without adding its convention text here.
+func TestConventionBaseTexts_CoversAllObservationKeys(t *testing.T) {
+	// Keys emitted by wellKnownLibraries (session_observations.go).
+	libraryKeys := make([]string, 0, len(wellKnownLibraries))
+	for _, lib := range wellKnownLibraries {
+		libraryKeys = append(libraryKeys, lib.key)
+	}
+
+	// Keys emitted by testing-pattern and file-pattern observation functions.
+	// Keep this list in sync with session_observations.go when new keys are added.
+	staticKeys := []string{
+		// testing patterns
+		"go_test_files_touched",
+		"ts_test_files_touched",
+		"py_test_files_touched",
+		"java_test_files_touched",
+		"rust_test_files_touched",
+		// file / architectural patterns
+		"layered_architecture_touched",
+		"handler_service_touched",
+		"handler_repository_touched",
+		"middleware_files_touched",
+	}
+
+	missing := []string{}
+	for _, key := range append(libraryKeys, staticKeys...) {
+		if _, ok := conventionBaseTexts[key]; !ok {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("conventionBaseTexts is missing entries for observation keys: %v\n"+
+			"Add a human-readable convention string for each key.", missing)
+	}
+}
