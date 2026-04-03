@@ -252,13 +252,13 @@ func TestCheckNorms_SortOrder(t *testing.T) {
 	const dir = "/project/internal/sorted"
 	g := buildTestGraph(t)
 
-	// 4 siblings: all call "HighNormFunc" (4/4=100% → HIGH with ≥3 siblings).
-	// First 2 also call "MedNormFunc" (2/4=50% → MEDIUM).
-	for i := 0; i < 4; i++ {
+	// 5 siblings: all call "HighNormFunc" (5/5=100% → HIGH with ≥3 siblings).
+	// First 3 also call "MedNormFunc" (3/5=60% > 50% → MEDIUM).
+	for i := 0; i < 5; i++ {
 		f := dir + "/sib" + string(rune('a'+i)) + ".go"
 		addFileWithImports(g, f)
 		addRouteNode(g, f, "GET", "/r"+string(rune('a'+i)))
-		if i < 2 {
+		if i < 3 {
 			addFunctionWithCalls(g, f, "Reg"+string(rune('A'+i)), "HighNormFunc", "MedNormFunc")
 		} else {
 			addFunctionWithCalls(g, f, "Reg"+string(rune('A'+i)), "HighNormFunc")
@@ -352,12 +352,13 @@ func TestCheckNorms_SeventyFivePercentBoundary(t *testing.T) {
 }
 
 // TestCheckNorms_FiftyPercentBoundary verifies that exactly 1/2 siblings (50%)
-// produces a MEDIUM violation — the minimum qualifying threshold.
+// produces NO violation — a 50/50 split is too ambiguous to constitute a norm.
+// The threshold is strictly > 0.50, so 0.50 exactly is below the bar.
 func TestCheckNorms_FiftyPercentBoundary(t *testing.T) {
 	const dir = "/project/internal/boundary50"
 	g := buildTestGraph(t)
 
-	// 2 sibling route files: only 1 calls "AuthMiddleware".
+	// 2 sibling route files: only 1 calls "AuthMiddleware" (1/2 = 50.0%).
 	with := dir + "/with.go"
 	addFileWithImports(g, with)
 	addRouteNode(g, with, "GET", "/r")
@@ -375,17 +376,10 @@ func TestCheckNorms_FiftyPercentBoundary(t *testing.T) {
 	e := NewEngine(nil)
 	violations := e.CheckNorms(g, target)
 
-	found := false
 	for _, v := range violations {
 		if strings.Contains(v.PatternID, "AuthMiddleware") {
-			found = true
-			if v.Severity != SeverityMedium {
-				t.Errorf("severity = %q, want MEDIUM (1/2=50%% exact boundary)", v.Severity)
-			}
+			t.Errorf("unexpected violation at exactly 50%% (1/2): threshold is strictly > 0.50; got %+v", v)
 		}
-	}
-	if !found {
-		t.Errorf("expected MEDIUM norm violation at exactly 50%% threshold; got %+v", violations)
 	}
 }
 
@@ -461,5 +455,130 @@ func TestCheckNorms_DifferentLanguagesIgnored(t *testing.T) {
 	e := NewEngine(nil)
 	if v := e.CheckNorms(g, target); len(v) != 0 {
 		t.Errorf("TS siblings must not influence Go norms, got %+v", v)
+	}
+}
+
+// addFunctionWithAnnotations adds a NodeFunction to the graph with the given
+// annotation string stored in Metadata["signature"]. This simulates how the
+// graph parser stores Java @PreAuthorize, Python @login_required, etc.
+func addFunctionWithAnnotations(g *graph.Graph, filePath, fnName, sigWithAnnotations string) graph.NodeID {
+	fnID := g.MakeNodeID(filePath, fnName)
+	g.AddNode(&graph.Node{
+		ID:   fnID,
+		Type: graph.NodeFunction,
+		Name: fnName,
+		File: filePath,
+		Metadata: map[string]string{
+			"signature": sigWithAnnotations,
+		},
+	})
+	return fnID
+}
+
+// TestCheckNorms_AnnotationNorm verifies that annotation-based norms fire when
+// sibling route files annotate their handlers (e.g. Java @PreAuthorize) but the
+// target route file does not.
+func TestCheckNorms_AnnotationNorm(t *testing.T) {
+	const dir = "/project/src/controller"
+
+	tests := []struct {
+		name      string
+		langExt   string
+		annotSig  string // signature string stored in Metadata["signature"]
+		annotKey  string // expected @Annotation key in PatternID
+	}{
+		{
+			name:     "Java_PreAuthorize",
+			langExt:  ".java",
+			annotSig: "@PreAuthorize(\"hasRole('ADMIN')\") public void handle()",
+			annotKey: "@PreAuthorize",
+		},
+		{
+			name:     "Python_login_required",
+			langExt:  ".py",
+			annotSig: "@login_required def handle(request):",
+			annotKey: "@login_required",
+		},
+		{
+			name:     "TypeScript_UseGuards",
+			langExt:  ".ts",
+			annotSig: "@UseGuards(AuthGuard) async handle(): Promise<void>",
+			annotKey: "@UseGuards",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := buildTestGraph(t)
+
+			// 3 sibling route files each with annotated handlers (3/3 = 100% → HIGH).
+			for i := 0; i < 3; i++ {
+				f := dir + "/sib" + string(rune('a'+i)) + tc.langExt
+				addFileWithImports(g, f)
+				addRouteNode(g, f, "GET", "/r"+string(rune('a'+i)))
+				addFunctionWithAnnotations(g, f, "Handle"+string(rune('A'+i)), tc.annotSig)
+			}
+
+			// Target route file has no annotated handlers.
+			target := dir + "/target" + tc.langExt
+			addFileWithImports(g, target)
+			addRouteNode(g, target, "GET", "/target")
+			// No function added — or add one without annotation.
+			addFunctionWithCalls(g, target, "HandleTarget") // no annotation
+
+			e := NewEngine(nil)
+			violations := e.CheckNorms(g, target)
+
+			found := false
+			for _, v := range violations {
+				if !strings.Contains(v.PatternID, tc.annotKey) {
+					continue
+				}
+				found = true
+				if v.Severity != SeverityHigh {
+					t.Errorf("severity = %q, want HIGH (3/3 siblings)", v.Severity)
+				}
+				if v.Action != "warn" {
+					t.Errorf("action = %q, want warn", v.Action)
+				}
+				if !strings.Contains(v.Evidence, "annotate") {
+					t.Errorf("evidence %q does not mention 'annotate'", v.Evidence)
+				}
+				if !strings.Contains(v.Message, "annotated") {
+					t.Errorf("message %q does not mention 'annotated'", v.Message)
+				}
+			}
+			if !found {
+				t.Errorf("no annotation norm violation for %s; violations: %+v", tc.annotKey, violations)
+			}
+		})
+	}
+}
+
+// TestCheckNorms_AnnotationNorm_TargetHas verifies that no violation fires when
+// the target file already has the annotated handler that siblings have.
+func TestCheckNorms_AnnotationNorm_TargetHas(t *testing.T) {
+	const dir = "/project/src/ctrl"
+	g := buildTestGraph(t)
+
+	// 3 siblings all with @login_required
+	for i := 0; i < 3; i++ {
+		f := dir + "/sib" + string(rune('a'+i)) + ".py"
+		addFileWithImports(g, f)
+		addRouteNode(g, f, "GET", "/r"+string(rune('a'+i)))
+		addFunctionWithAnnotations(g, f, "view"+string(rune('A'+i)), "@login_required def viewA(request):")
+	}
+
+	// Target also has @login_required — should produce no violation.
+	target := dir + "/target.py"
+	addFileWithImports(g, target)
+	addRouteNode(g, target, "GET", "/target")
+	addFunctionWithAnnotations(g, target, "viewTarget", "@login_required def viewTarget(request):")
+
+	e := NewEngine(nil)
+	for _, v := range e.CheckNorms(g, target) {
+		if strings.Contains(v.PatternID, "@login_required") {
+			t.Errorf("unexpected annotation norm violation when target already has annotation: %+v", v)
+		}
 	}
 }

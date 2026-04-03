@@ -292,9 +292,11 @@ func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
 		return nil
 	}
 
-	// Scan sibling files in the same directory and language.
-	// callFreq tracks how many sibling route files call each function name.
-	callFreq := make(map[string]int)
+	// normFreq tracks how many sibling route files exhibit each norm.
+	// Keys are either plain function names (call norms, e.g. "AuthMiddleware") or
+	// @Annotation strings (annotation norms, e.g. "@PreAuthorize"). The @ prefix
+	// distinguishes annotation norms from call norms and prevents key collisions.
+	normFreq := make(map[string]int)
 	siblingRouteCount := 0
 	siblingFilesExamined := 0
 	seen := make(map[string]bool)
@@ -325,8 +327,25 @@ func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
 			return // not a route-registering file; don't contribute to norms
 		}
 		siblingRouteCount++
+
+		// Call-based norms: functions called by any function in this route file.
 		for callee := range sib.callees {
-			callFreq[callee]++
+			normFreq[callee]++
+		}
+
+		// Annotation-based norms: @Annotation patterns in function signatures.
+		// These catch Java @PreAuthorize/@Secured/@RolesAllowed, Python @login_required,
+		// and TypeScript @UseGuards — annotations that appear in Metadata["signature"]
+		// rather than as CALLS edges.
+		for _, fn := range sib.nodes {
+			if fn.Type != graph.NodeFunction && fn.Type != graph.NodeMethod {
+				continue
+			}
+			if sig, ok := fn.Metadata["signature"]; ok {
+				for _, annot := range extractAnnotationsFromSig(sig) {
+					normFreq[annot]++
+				}
+			}
 		}
 	})
 
@@ -334,39 +353,77 @@ func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
 		return nil // not enough route files to establish a norm
 	}
 
-	// Find calls that are "universal" across sibling route files but absent in target.
+	// Build the target's annotation set from function signature metadata.
+	// Used to check annotation-based norms (complementing fc.callees for call norms).
+	targetAnnotations := make(map[string]bool)
+	for _, n := range fc.nodes {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if sig, ok := n.Metadata["signature"]; ok {
+			for _, annot := range extractAnnotationsFromSig(sig) {
+				targetAnnotations[annot] = true
+			}
+		}
+	}
+
+	// Find norms that are "universal" across sibling route files but absent in target.
+	// Exactly 50% (e.g. 2/4) is treated as below the MEDIUM threshold — a 50/50
+	// split is too ambiguous to constitute an established norm.
 	var violations []Violation
-	for callName, count := range callFreq {
+	for normKey, count := range normFreq {
 		ratio := float64(count) / float64(siblingRouteCount)
 
 		var severity Severity
 		switch {
 		case ratio >= 0.75 && siblingRouteCount >= 3:
 			severity = SeverityHigh
-		case ratio >= 0.50 && siblingRouteCount >= 2:
+		case ratio > 0.50 && siblingRouteCount >= 2:
 			severity = SeverityMedium
 		default:
-			continue // below minimum confidence threshold — not enough evidence
+			continue // below minimum confidence threshold
 		}
 
-		// Only fire if the target file is missing this call.
-		if fc.callees[callName] {
-			continue
+		// Check whether the target is missing this norm.
+		// Annotation norms (key starts with '@') use the targetAnnotations set;
+		// call norms use the fc.callees map.
+		isAnnotation := strings.HasPrefix(normKey, "@")
+		if isAnnotation {
+			if targetAnnotations[normKey] {
+				continue
+			}
+		} else {
+			if fc.callees[normKey] {
+				continue
+			}
 		}
 
-		evidence := fmt.Sprintf(
-			"%d/%d route-registering file(s) in this package call %q — this file registers routes but does not",
-			count, siblingRouteCount, callName,
-		)
-		msg := fmt.Sprintf(
-			"%s registers routes but does not call %q, which %d/%d other route-registering file(s) in this package call. "+
-				"If %q is a security middleware (auth, rate limiting, CSRF), verify this omission is intentional.",
-			filepath.Base(filePath), callName, count, siblingRouteCount, callName,
-		)
+		var evidence, msg string
+		if isAnnotation {
+			evidence = fmt.Sprintf(
+				"%d/%d route-registering file(s) in this package annotate handlers with %q — this file registers routes but does not",
+				count, siblingRouteCount, normKey,
+			)
+			msg = fmt.Sprintf(
+				"%s registers routes but no handler is annotated with %q, which appears in %d/%d other route-registering file(s). "+
+					"If %q is a security annotation (auth, role enforcement), verify this omission is intentional.",
+				filepath.Base(filePath), normKey, count, siblingRouteCount, normKey,
+			)
+		} else {
+			evidence = fmt.Sprintf(
+				"%d/%d route-registering file(s) in this package call %q — this file registers routes but does not",
+				count, siblingRouteCount, normKey,
+			)
+			msg = fmt.Sprintf(
+				"%s registers routes but does not call %q, which %d/%d other route-registering file(s) in this package call. "+
+					"If %q is a security middleware (auth, rate limiting, CSRF), verify this omission is intentional.",
+				filepath.Base(filePath), normKey, count, siblingRouteCount, normKey,
+			)
+		}
 
 		violations = append(violations, Violation{
-			PatternID:   "norm:" + callName,
-			PatternName: fmt.Sprintf("Observed norm — %q called by %d/%d route file(s)", callName, count, siblingRouteCount),
+			PatternID:   "norm:" + normKey,
+			PatternName: fmt.Sprintf("Observed norm — %q in %d/%d route file(s)", normKey, count, siblingRouteCount),
 			Severity:    severity,
 			File:        filePath,
 			Target:      filepath.Base(filePath),
@@ -1946,6 +2003,30 @@ func isTestFile(filePath string) bool {
 		strings.Contains(filePath, "/tests/") ||
 		strings.Contains(filePath, "/fixtures/") ||
 		strings.Contains(filePath, "/mocks/")
+}
+
+// extractAnnotationsFromSig parses a function signature string and returns any
+// @Annotation tokens it contains. This covers:
+//   - Java: @PreAuthorize("..."), @Secured, @RolesAllowed(...)
+//   - Python: @login_required, @permission_required(...)
+//   - TypeScript/NestJS: @UseGuards(...), @Roles(...)
+//
+// Trailing punctuation (parentheses, commas, semicolons) is stripped so that
+// "@PreAuthorize(" → "@PreAuthorize". Tokens shorter than 2 characters after
+// the '@' are ignored. Returns nil if no annotations are present.
+func extractAnnotationsFromSig(sig string) []string {
+	var found []string
+	for _, word := range strings.Fields(sig) {
+		if !strings.HasPrefix(word, "@") || len(word) < 2 {
+			continue
+		}
+		name := word
+		if i := strings.IndexAny(name, ".(,;)"); i > 1 {
+			name = name[:i]
+		}
+		found = append(found, name)
+	}
+	return found
 }
 
 // nilIfEmpty returns nil when violations is empty, otherwise returns violations.
