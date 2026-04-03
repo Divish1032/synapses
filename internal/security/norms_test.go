@@ -174,7 +174,7 @@ func TestDiscoverNorms_RouteCallNorm_BelowThreshold(t *testing.T) {
 	}
 }
 
-// TestDiscoverNorms_ShortNameFiltered verifies that callee names shorter than 5
+// TestDiscoverNorms_ShortNameFiltered verifies that callee names shorter than 4
 // characters (e.g. "Get", "Use", "Set") are not surfaced as norms.
 func TestDiscoverNorms_ShortNameFiltered(t *testing.T) {
 	g := buildTestGraph(t)
@@ -195,7 +195,7 @@ func TestDiscoverNorms_ShortNameFiltered(t *testing.T) {
 		}
 	}
 
-	// AuthMiddleware (14 chars) should still appear — it's above the 5-char threshold.
+	// AuthMiddleware (14 chars) should still appear — it's above the 4-char threshold.
 	found := false
 	for _, n := range norms {
 		if n.Category == "route_call_norm" && strings.Contains(n.Evidence, "AuthMiddleware") {

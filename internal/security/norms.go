@@ -24,9 +24,7 @@ package security
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -119,9 +117,10 @@ func (e *Engine) DiscoverNorms(g *graph.Graph) []DiscoveredNorm {
 // Results are grouped by language to avoid cross-language noise (a Python auth
 // decorator is not a norm for Go route files in a polyglot monorepo).
 //
-// Callee name filter: names shorter than 5 characters are excluded. These are
+// Callee name filter: names shorter than 4 characters are excluded. These are
 // overwhelmingly stdlib or trivial helpers ("Get", "Use", "New", "Set") that
-// appear in every file and carry no architectural signal.
+// appear in every file and carry no architectural signal. 4-char names like
+// "Auth" and "CSRF" are intentionally allowed through.
 //
 // Performance: uses FindByType(NodeRoute) to locate route files first — O(N_routes)
 // instead of O(N_all_nodes × buildFileContext), which matters in large projects.
@@ -158,8 +157,8 @@ func discoverRouteCallNorms(g *graph.Graph) []DiscoveredNorm {
 		lang := languageFromPath(filePath)
 		callees := make(map[string]bool, len(fc.callees))
 		for name := range fc.callees {
-			if len(name) < 5 {
-				continue // too short — generic stdlib/helper noise
+			if len(name) < 4 {
+				continue // too short — generic stdlib/helper noise ("Get", "Use", "New")
 			}
 			callees[name] = true
 		}
@@ -401,8 +400,3 @@ func FormatDiscoveredNorm(n DiscoveredNorm) string {
 	return base
 }
 
-// normKey returns a stable dedup key for a DiscoveredNorm.
-// Used internally when callers need to deduplicate across calls.
-func normKey(n DiscoveredNorm) string {
-	return n.Category + "::" + strings.ToLower(filepath.ToSlash(n.Description))
-}
