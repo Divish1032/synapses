@@ -101,7 +101,7 @@
       "framework": "flask",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A file using Flask registers HTTP routes but does not apply any authentication. Flask's route registration is decorator-based: @app.route('/path'), @app.get('/path') (Flask 2.0+), or @blueprint.route('/path'). Authentication is typically applied via Flask-Login (@login_required), flask-jwt-extended (@jwt_required), or custom decorators. Before-request hooks (before_request) can also enforce auth globally for a blueprint. This check fires when a file registers routes but calls no recognised auth function.",
+      "description": "A file using Flask registers HTTP routes but does not apply any authentication. Flask's route registration is decorator-based: @app.route('/path'), @app.get('/path') (Flask 2.0+), or @blueprint.route('/path'). Authentication is typically applied via Flask-Login (@login_required), flask-jwt-extended (@jwt_required), or custom decorators. A before_request hook can enforce auth globally for a blueprint — but ONLY if the hook itself calls an auth function (authenticate(), verify_token(), etc.). The hook name alone is not a signal: before_request is equally used for logging and request parsing. This pattern checks for the auth function called within the hook, not the hook registration itself.",
       "detection": {
         "check_type": "missing_middleware",
         "framework_identifiers": ["flask"],
@@ -112,7 +112,6 @@
           "requires_auth*", "require_auth*",
           "Auth*", "authenticate*",
           "verify_token*", "decode_token*", "validate_token*",
-          "before_request*",
           "HTTPTokenAuth*", "HTTPBasicAuth*", "http_auth*"
         ],
         "route_node_names": [

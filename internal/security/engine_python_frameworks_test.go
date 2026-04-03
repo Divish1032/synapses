@@ -469,6 +469,45 @@ func TestPythonFrameworks_Flask_MissingAuth_FrameworkGate_Django_NoViolation(t *
 	}
 }
 
+func TestPythonFrameworks_Flask_BeforeRequestLogging_StillFires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Flask file with a before_request hook for logging only — routes are still unprotected.
+	// before_request alone must NOT suppress the violation; what matters is what the hook calls.
+	addFileWithImports(g, "/project/app/routes.py", "flask")
+	addFunctionWithCalls(g, "/project/app/routes.py", "setup", "route", "get", "before_request", "logging")
+
+	violations := e.CheckFile(g, "/project/app/routes.py", nil)
+	found := findViolation(violations, "python-flask-missing-auth")
+	if found == nil {
+		t.Error("before_request for logging should not suppress missing-auth: the hook itself is not auth enforcement")
+	}
+}
+
+func TestPythonFrameworks_Flask_BeforeRequestWithAuthenticate_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Flask file where before_request hook calls authenticate() — auth IS enforced.
+	// The auth function called inside the hook appears in CALLS edges and suppresses correctly.
+	addFileWithImports(g, "/project/app/routes.py", "flask")
+	addFunctionWithCalls(g, "/project/app/routes.py", "setup", "route", "get", "before_request", "authenticate")
+
+	violations := e.CheckFile(g, "/project/app/routes.py", nil)
+	if findViolation(violations, "python-flask-missing-auth") != nil {
+		t.Error("before_request hook calling authenticate() is valid auth enforcement — should not fire")
+	}
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Python direct DB import
 // ──────────────────────────────────────────────────────────────────────────────
