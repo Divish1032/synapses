@@ -145,7 +145,7 @@ func languageForFile(file string) string {
 		return "typescript"
 	case ".js", ".jsx", ".mjs", ".cjs":
 		return "typescript" // tsserver handles JS files when allowJs is set
-	case ".py":
+	case ".py", ".pyi":
 		return "python"
 	default:
 		return ""

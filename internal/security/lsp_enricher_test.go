@@ -281,6 +281,7 @@ func TestLanguageForFile(t *testing.T) {
 		{"index.js", "typescript"},
 		{"main.mjs", "typescript"},
 		{"auth.py", "python"},
+		{"types.pyi", "python"},
 		{"Cargo.rs", ""},
 		{"build.gradle", ""},
 		{"", ""},
