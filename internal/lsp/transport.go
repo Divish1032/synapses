@@ -93,6 +93,36 @@ func newTsserverTransport(_ context.Context, tsserverPath, root string) (LSPTran
 	}, nil
 }
 
+// newPyrightTransport starts pyright-langserver at pyrightPath in the given root
+// directory. The binary must accept the --stdio flag (standard for LSP servers).
+// The Content-Length framing is identical to gopls/tsserver, so the same
+// goplsTransport struct is reused — only the command differs.
+func newPyrightTransport(_ context.Context, pyrightPath, root string) (LSPTransport, error) {
+	cmd := exec.Command(pyrightPath, "--stdio")
+	cmd.Dir = root
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("pyright stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		stdin.Close()
+		return nil, fmt.Errorf("pyright stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		stdin.Close()
+		return nil, fmt.Errorf("pyright start: %w", err)
+	}
+
+	return &goplsTransport{
+		cmd:    cmd,
+		stdin:  stdin,
+		reader: bufio.NewReaderSize(stdout, 64*1024),
+	}, nil
+}
+
 // Send marshals v and writes it with LSP Content-Length framing.
 // Format: "Content-Length: N\r\n\r\n{json bytes}".
 func (t *goplsTransport) Send(v interface{}) error {
