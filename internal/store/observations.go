@@ -171,6 +171,44 @@ func (s *Store) GetObservationKeyCounts(projectID, category string) (map[string]
 	return counts, rows.Err()
 }
 
+// GetObservationKeyMaxValue returns a map of key → maximum integer value stored
+// across all observations for that key in a project+category. The Value field
+// carries file-count evidence set by the session observation pipeline (e.g.,
+// "14" meaning 14 distinct files imported the library in that session).
+//
+// Returns the per-key maximum across all sessions — a conservative lower bound
+// on how widespread the pattern was in the project's most active session.
+// Keys with non-numeric or empty Value are excluded from the result.
+//
+// Returns nil (not an error) when knowledgeDB is unavailable.
+func (s *Store) GetObservationKeyMaxValue(projectID, category string) (map[string]int, error) {
+	if s.knowledgeDB == nil {
+		return nil, nil
+	}
+	rows, err := s.knowledgeDB.Query(
+		`SELECT key, MAX(CAST(value AS INTEGER)) AS max_val
+		 FROM session_observations
+		 WHERE project_id = ? AND category = ?
+		   AND value != '' AND CAST(value AS INTEGER) > 0
+		 GROUP BY key`,
+		projectID, category,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get observation key max value: %w", err)
+	}
+	defer rows.Close()
+
+	maxVals := make(map[string]int)
+	for rows.Next() {
+		var key string
+		var maxVal int
+		if err := rows.Scan(&key, &maxVal); err == nil && maxVal > 0 {
+			maxVals[key] = maxVal
+		}
+	}
+	return maxVals, rows.Err()
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 type observationScanner interface {

@@ -80,15 +80,22 @@ var conventionBaseTexts = map[string]string{
 }
 
 // conventionText returns the natural-language convention string for a given
-// observation category+key with sessionCount confirmation sessions appended.
-// Returns "" for any key not found in conventionBaseTexts — the caller must
-// skip the convention in that case.
-func conventionText(_, key string, sessionCount int) string {
+// observation category+key. When fileCount > 0, it includes file-level evidence
+// so the agent understands how universal the pattern is across the codebase
+// (e.g., "detected in 14+ files" signals a dominant pattern vs "1 file" which
+// suggests it's rare). Returns "" for any key not found in conventionBaseTexts.
+func conventionText(_, key string, fileCount, sessionCount int) string {
 	base, ok := conventionBaseTexts[key]
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("%s (observed across %d sessions).", base, sessionCount)
+	if fileCount > 0 {
+		// "14+" is intentionally conservative: fileCount is the max seen in a
+		// single session's touched files (capped at maxLibraryFileScan=20), not
+		// the total distinct project files. The "+" signals a lower bound.
+		return fmt.Sprintf("%s (detected in %d+ files, confirmed across %d sessions).", base, fileCount, sessionCount)
+	}
+	return fmt.Sprintf("%s (confirmed across %d sessions).", base, sessionCount)
 }
 
 // conventionConfidence maps a session count to a confidence score.
@@ -136,11 +143,18 @@ func runConventionExtraction(st *store.Store, projectID string) (int, error) {
 		if err != nil {
 			return total, fmt.Errorf("convention extraction: get key counts (%s): %w", cat, err)
 		}
+
+		// Fetch per-key file counts stored in the Value field by the session
+		// observation pipeline. A missing or empty result means this category
+		// doesn't track file counts (testing/file-pattern observations don't) —
+		// in that case fileCount falls back to 0 and the text omits the file clause.
+		fileCounts, _ := st.GetObservationKeyMaxValue(projectID, cat)
+
 		for key, count := range counts {
 			if count < MinSessionsForConvention {
 				continue
 			}
-			text := conventionText(cat, key, count)
+			text := conventionText(cat, key, fileCounts[key], count)
 			if text == "" {
 				// Unknown key — no convention mapped for it yet. Skip silently.
 				continue

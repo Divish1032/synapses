@@ -283,9 +283,12 @@ const maxLibraryFileScan = 20
 func libraryUsageObservations(base store.SessionObservation, files []string, g *graph.Graph) []store.SessionObservation {
 	base.Category = store.ObsCategoryLibraryUsage
 
-	// Collect all IMPORTS edges from the touched files.
-	// Use a set to avoid counting the same library twice across files.
-	detected := make(map[string]bool)
+	// fileCounts maps library key → number of distinct touched files that import it.
+	// This count is stored in Value so the convention extraction engine can include
+	// file-level evidence in the convention text: "detected in 14+ files, confirmed
+	// across 8 sessions." It gives the agent a sense of how universal the pattern is
+	// (14/14 files vs 1/47 files) — information that session count alone cannot convey.
+	fileCounts := make(map[string]int)
 
 	scanFiles := files
 	if len(scanFiles) > maxLibraryFileScan {
@@ -293,6 +296,11 @@ func libraryUsageObservations(base store.SessionObservation, files []string, g *
 	}
 
 	for _, f := range scanFiles {
+		// perFile tracks which libraries THIS file imports so each file counts
+		// at most once per library (a file can have multiple matching import edges
+		// if the import path substring appears more than once, e.g. both
+		// "github.com/testify/assert" and "github.com/testify/require").
+		perFile := make(map[string]bool)
 		edges := g.OutEdgesForFile(f)
 		for _, e := range edges {
 			if e.Type != graph.EdgeImports {
@@ -303,18 +311,22 @@ func libraryUsageObservations(base store.SessionObservation, files []string, g *
 			importPath := strings.ToLower(string(e.To))
 			for _, lib := range wellKnownLibraries {
 				if strings.Contains(importPath, lib.contains) {
-					detected[lib.key] = true
+					perFile[lib.key] = true
 					break
 				}
 			}
 		}
+		for key := range perFile {
+			fileCounts[key]++
+		}
 	}
 
 	var obs []store.SessionObservation
-	for key := range detected {
-		// Single-session library detection has medium confidence; 29.2 will raise
-		// it once the pattern repeats across multiple sessions.
-		obs = append(obs, ob(base, key, "", 0.6))
+	for key, count := range fileCounts {
+		// Store file count as the Value so convention extraction can include it
+		// in the formatted text. Single-session detection has medium confidence;
+		// 29.2 raises it once the pattern repeats across multiple sessions.
+		obs = append(obs, ob(base, key, strconv.Itoa(count), 0.6))
 	}
 	return obs
 }

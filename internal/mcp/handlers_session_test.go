@@ -2641,8 +2641,8 @@ func TestSessionInit_LearnedConventions_CappedAtThree(t *testing.T) {
 		if !ok {
 			continue
 		}
-		// All learned conventions contain "(observed across N sessions)."
-		if strings.Contains(s, "observed across") {
+		// All learned conventions contain "(confirmed across N sessions)."
+		if strings.Contains(s, "confirmed across") {
 			learnedCount++
 		}
 	}

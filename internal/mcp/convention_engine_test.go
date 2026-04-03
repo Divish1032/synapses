@@ -38,9 +38,10 @@ func TestConventionText_KnownKeys(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
-			text := conventionText(tc.category, tc.key, tc.sessionCount)
+			// fileCount=0 exercises the "no file evidence" path.
+			text := conventionText(tc.category, tc.key, 0, tc.sessionCount)
 			if text == "" {
-				t.Errorf("conventionText(%q, %q, %d) = empty", tc.category, tc.key, tc.sessionCount)
+				t.Errorf("conventionText(%q, %q, 0, %d) = empty", tc.category, tc.key, tc.sessionCount)
 				return
 			}
 			if !strings.Contains(text, tc.wantContain) {
@@ -56,7 +57,7 @@ func TestConventionText_KnownKeys(t *testing.T) {
 
 // TestConventionText_UnknownKey verifies that an unknown key returns empty string.
 func TestConventionText_UnknownKey(t *testing.T) {
-	text := conventionText(store.ObsCategoryLibraryUsage, "uses_totally_unknown_library_xyz", 5)
+	text := conventionText(store.ObsCategoryLibraryUsage, "uses_totally_unknown_library_xyz", 0, 5)
 	if text != "" {
 		t.Errorf("expected empty for unknown key, got %q", text)
 	}
@@ -65,11 +66,38 @@ func TestConventionText_UnknownKey(t *testing.T) {
 // TestConventionText_IncludesSessionCount verifies the session count is rendered.
 func TestConventionText_IncludesSessionCount(t *testing.T) {
 	for _, n := range []int{3, 5, 7, 10} {
-		text := conventionText(store.ObsCategoryLibraryUsage, "uses_testify", n)
+		text := conventionText(store.ObsCategoryLibraryUsage, "uses_testify", 0, n)
 		countStr := fmt.Sprintf("%d", n)
 		if !strings.Contains(text, countStr) {
 			t.Errorf("session count %d not found in text %q", n, text)
 		}
+	}
+}
+
+// TestConventionText_IncludesFileCount verifies that when fileCount > 0, the
+// format includes file-level evidence: "detected in N+ files".
+func TestConventionText_IncludesFileCount(t *testing.T) {
+	text := conventionText(store.ObsCategoryLibraryUsage, "uses_testify", 14, 8)
+	if !strings.Contains(text, "14+") {
+		t.Errorf("expected '14+' in text, got %q", text)
+	}
+	if !strings.Contains(text, "8 sessions") {
+		t.Errorf("expected '8 sessions' in text, got %q", text)
+	}
+	if !strings.Contains(text, "files") {
+		t.Errorf("expected 'files' in text, got %q", text)
+	}
+}
+
+// TestConventionText_ZeroFileCountOmitsFileCause verifies that fileCount=0
+// produces the session-only format (no file mention).
+func TestConventionText_ZeroFileCountOmitsFileCause(t *testing.T) {
+	text := conventionText(store.ObsCategoryTestingPattern, "go_test_files_touched", 0, 5)
+	if strings.Contains(text, "files,") {
+		t.Errorf("zero fileCount should not mention file count, got %q", text)
+	}
+	if !strings.Contains(text, "sessions") {
+		t.Errorf("expected sessions in text, got %q", text)
 	}
 }
 
