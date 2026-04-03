@@ -126,9 +126,16 @@ func (s *Server) getWatcherSecurityFindings() []watcherSecurityFindingHint {
 
 	out := make([]watcherSecurityFindingHint, 0, len(episodes))
 	for _, ep := range episodes {
+		// Decision is stored as "PatternName: Target" by persistWatcherFindingEpisode.
+		// Split to populate both fields separately so the agent sees structured data.
+		patternName, target := ep.Decision, ""
+		if idx := strings.Index(ep.Decision, ": "); idx >= 0 {
+			patternName = ep.Decision[:idx]
+			target = ep.Decision[idx+2:]
+		}
 		out = append(out, watcherSecurityFindingHint{
-			PatternName: ep.Decision,
-			Target:      "", // Decision contains "PatternName: Target" — surfaced as-is
+			PatternName: patternName,
+			Target:      target,
 			Message:     ep.Rationale,
 			At:          ep.CreatedAt,
 		})

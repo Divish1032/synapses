@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -12,6 +13,14 @@ import (
 	"github.com/SynapsesOS/synapses/internal/security"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
+
+// ctxWithSession registers a Synapses session on srv and returns a context
+// carrying mcpSessionID, so handlers can resolve the per-session synapses UUID
+// needed for dedup logic (CheckAndMarkEpisoded). Used by episode dedup tests.
+func ctxWithSession(srv *Server, mcpSessionID, synapseSessionID string) context.Context {
+	srv.registerSynapseSession(mcpSessionID, synapseSessionID, "test-agent", "")
+	return WithSessionID(context.Background(), mcpSessionID)
+}
 
 // ── pathWithinRoot unit tests ─────────────────────────────────────────────────
 
@@ -868,6 +877,71 @@ const apiKey = "AKIA1234567890ABCDEF"
 				}
 			}
 		}
+	}
+}
+
+// TestVerifyImplementation_EpisodeDedup verifies that repeated calls to
+// handleVerifyImplementation for the same CRITICAL finding within a single
+// session write exactly one episode — not one per call.
+//
+// This exercises the Sprint 27.10 fix: CheckAndMarkEpisoded gates episode writes
+// so persistent CheckProject / per-file findings don't accumulate duplicates.
+func TestVerifyImplementation_EpisodeDedup(t *testing.T) {
+	root := t.TempDir()
+	goFile := filepath.Join(root, "handler.go")
+	goSrc := []byte("package main\n\nconst apiKey = \"AKIA1234567890ABCDEF\"\n")
+	if err := os.WriteFile(goFile, goSrc, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	st, err := store.Open(filepath.Join(root, "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	g := graph.New("test-repo")
+	g.SetRoot(root)
+	fileID := g.MakeNodeID(goFile, goFile)
+	g.AddNode(&graph.Node{ID: fileID, Type: graph.NodeFile, Name: goFile, File: goFile})
+
+	cfg, cfgErr := config.Load(t.TempDir())
+	if cfgErr != nil {
+		t.Fatalf("config.Load: %v", cfgErr)
+	}
+	srv := New(g, cfg, st)
+	srv.patternEngine = security.DefaultEngine()
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	// Wire a real session so getSynapseSessionID resolves a non-empty sessID,
+	// activating the CheckAndMarkEpisoded dedup gate.
+	sessCtx := ctxWithSession(srv, "mcp-sess-dedup", "syn-sess-dedup")
+
+	filesJSON, _ := json.Marshal([]string{goFile})
+	req := callTool(map[string]any{"files_written": string(filesJSON)})
+
+	// First call.
+	res1, err1 := srv.handleVerifyImplementation(sessCtx, req)
+	m1 := mustResult(t, res1, err1)
+	totalFindings1, _ := m1["total_security_findings"].(float64)
+	if totalFindings1 == 0 {
+		t.Skip("pattern engine produced no findings — skipping episode dedup test")
+	}
+
+	// Second call — same session, same file, same findings.
+	res2, err2 := srv.handleVerifyImplementation(sessCtx, req)
+	mustResult(t, res2, err2)
+
+	// Only one episode should have been written per distinct PatternID+Target.
+	// With dedup broken, each call would add another episode.
+	episodes, epErr := st.GetEpisodes("", "", "security_critical_finding", nil, 100, 0)
+	if epErr != nil {
+		t.Fatalf("GetEpisodes: %v", epErr)
+	}
+	if int(totalFindings1) > 0 && len(episodes) > int(totalFindings1) {
+		t.Errorf("dedup failure: %d findings produced %d episodes across 2 calls (expected ≤ %d)",
+			int(totalFindings1), len(episodes), int(totalFindings1))
 	}
 }
 

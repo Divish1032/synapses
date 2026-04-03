@@ -224,6 +224,13 @@ func TestWatcherSecurity_PersistEpisode(t *testing.T) {
 	if findings[0].Message != "AWS key found in source" {
 		t.Errorf("unexpected message: %q", findings[0].Message)
 	}
+	// PatternName and Target must be split from Decision.
+	if findings[0].PatternName != "Hardcoded Secret" {
+		t.Errorf("unexpected pattern_name: %q (should be split from Decision)", findings[0].PatternName)
+	}
+	if findings[0].Target != "apiKey" {
+		t.Errorf("unexpected target: %q (should be split from Decision)", findings[0].Target)
+	}
 	if findings[0].At == 0 {
 		t.Error("expected non-zero At timestamp")
 	}
@@ -333,5 +340,12 @@ func TestGetWatcherSecurityFindings_DirectStore(t *testing.T) {
 	}
 	if got[0].Message != "AWS key detected" {
 		t.Errorf("unexpected message: %q", got[0].Message)
+	}
+	// PatternName and Target must be parsed out of Decision "HardcodedSecret: target".
+	if got[0].PatternName != "HardcodedSecret" {
+		t.Errorf("unexpected pattern_name: %q", got[0].PatternName)
+	}
+	if got[0].Target != "target" {
+		t.Errorf("unexpected target: %q", got[0].Target)
 	}
 }
