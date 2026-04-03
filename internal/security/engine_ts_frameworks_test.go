@@ -33,6 +33,7 @@ func TestTSFrameworks_LoadBuiltin_ContainsAllPatterns(t *testing.T) {
 		"ts-koa-missing-rate-limit",
 		"ts-koa-missing-csrf",
 		"ts-nextjs-api-missing-auth",
+		"ts-nextjs-missing-rate-limit",
 		"ts-direct-db-import",
 		// JavaScript patterns
 		"js-express-missing-auth",
@@ -45,6 +46,7 @@ func TestTSFrameworks_LoadBuiltin_ContainsAllPatterns(t *testing.T) {
 		"js-koa-missing-rate-limit",
 		"js-koa-missing-csrf",
 		"js-nextjs-api-missing-auth",
+		"js-nextjs-missing-rate-limit",
 		"js-direct-db-import",
 	}
 
@@ -1012,6 +1014,184 @@ func TestTSFrameworks_JS_Nextjs_MinimalHandler_NoImports_Fires(t *testing.T) {
 	}
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Next.js rate limiting — TypeScript
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestTSFrameworks_TS_Nextjs_MissingRateLimit_Fires_AppRouter(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// App Router route.ts with no rate limiting call.
+	addFileWithImports(g, "/project/app/api/users/route.ts") // no imports
+	addFunctionWithCalls(g, "/project/app/api/users/route.ts", "GET", "NextResponse")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.ts", nil)
+	found := findViolation(violations, "ts-nextjs-missing-rate-limit")
+	if found == nil {
+		t.Fatal("expected ts-nextjs-missing-rate-limit violation for App Router route.ts, got none")
+	}
+	if found.Severity != SeverityHigh {
+		t.Errorf("severity = %s, want HIGH", found.Severity)
+	}
+}
+
+func TestTSFrameworks_TS_Nextjs_MissingRateLimit_Fires_PagesRouter(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Pages Router pages/api handler.
+	addFileWithImports(g, "/project/pages/api/users.ts", "next")
+	addFunctionWithCalls(g, "/project/pages/api/users.ts", "handler", "res")
+
+	violations := e.CheckFile(g, "/project/pages/api/users.ts", nil)
+	if findViolation(violations, "ts-nextjs-missing-rate-limit") == nil {
+		t.Fatal("expected ts-nextjs-missing-rate-limit for Pages Router handler, got none")
+	}
+}
+
+func TestTSFrameworks_TS_Nextjs_MissingRateLimit_NoFire_UpstashRatelimit(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Route with @upstash/ratelimit — primary suppression target per ROADMAP.
+	addFileWithImports(g, "/project/app/api/users/route.ts", "@upstash/ratelimit")
+	addFunctionWithCalls(g, "/project/app/api/users/route.ts", "GET", "upstashRatelimit", "NextResponse")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.ts", nil)
+	if findViolation(violations, "ts-nextjs-missing-rate-limit") != nil {
+		t.Error("expected no violation: upstashRatelimit matches upstashRatelimit* pattern")
+	}
+}
+
+func TestTSFrameworks_TS_Nextjs_MissingRateLimit_NoFire_RateLimitCall(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Route calling rateLimit — generic pattern.
+	addFileWithImports(g, "/project/app/api/search/route.ts")
+	addFunctionWithCalls(g, "/project/app/api/search/route.ts", "GET", "rateLimit", "NextResponse")
+
+	violations := e.CheckFile(g, "/project/app/api/search/route.ts", nil)
+	if findViolation(violations, "ts-nextjs-missing-rate-limit") != nil {
+		t.Error("expected no violation: rateLimit matches rateLimit* pattern")
+	}
+}
+
+func TestTSFrameworks_TS_Nextjs_MissingRateLimit_NoFire_NonRouteFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// routes.ts (plural) must not match — handler_file_patterns is */route.ts (singular).
+	addFileWithImports(g, "/project/src/routes.ts")
+	addFunctionWithCalls(g, "/project/src/routes.ts", "handler", "get")
+
+	violations := e.CheckFile(g, "/project/src/routes.ts", nil)
+	if findViolation(violations, "ts-nextjs-missing-rate-limit") != nil {
+		t.Error("ts-nextjs-missing-rate-limit fired on routes.ts (plural) — handler_file_patterns must not match")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Next.js rate limiting — JavaScript
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestTSFrameworks_JS_Nextjs_MissingRateLimit_Fires_AppRouter(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/app/api/users/route.js") // no imports
+	addFunctionWithCalls(g, "/project/app/api/users/route.js", "GET", "Response")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.js", nil)
+	found := findViolation(violations, "js-nextjs-missing-rate-limit")
+	if found == nil {
+		t.Fatal("expected js-nextjs-missing-rate-limit for App Router route.js, got none")
+	}
+	if found.Severity != SeverityHigh {
+		t.Errorf("severity = %s, want HIGH", found.Severity)
+	}
+}
+
+func TestTSFrameworks_JS_Nextjs_MissingRateLimit_Fires_PagesRouter(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/pages/api/users.js", "next")
+	addFunctionWithCalls(g, "/project/pages/api/users.js", "handler", "res")
+
+	violations := e.CheckFile(g, "/project/pages/api/users.js", nil)
+	if findViolation(violations, "js-nextjs-missing-rate-limit") == nil {
+		t.Fatal("expected js-nextjs-missing-rate-limit for Pages Router .js handler, got none")
+	}
+}
+
+func TestTSFrameworks_JS_Nextjs_MissingRateLimit_NoFire_WithRateLimit(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/app/api/users/route.js")
+	addFunctionWithCalls(g, "/project/app/api/users/route.js", "GET", "withRateLimit", "Response")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.js", nil)
+	if findViolation(violations, "js-nextjs-missing-rate-limit") != nil {
+		t.Error("expected no violation: withRateLimit matches withRateLimit* pattern")
+	}
+}
+
+func TestTSFrameworks_JS_Nextjs_MissingRateLimit_LanguageDiscrimination(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// .ts file: js-nextjs-missing-rate-limit must not fire.
+	addFileWithImports(g, "/project/app/api/data/route.ts")
+	addFunctionWithCalls(g, "/project/app/api/data/route.ts", "GET", "NextResponse")
+
+	violations := e.CheckFile(g, "/project/app/api/data/route.ts", nil)
+	if findViolation(violations, "js-nextjs-missing-rate-limit") != nil {
+		t.Error("js-nextjs-missing-rate-limit fired on .ts file — language discrimination failure")
+	}
+	if findViolation(violations, "ts-nextjs-missing-rate-limit") == nil {
+		t.Error("ts-nextjs-missing-rate-limit should fire on .ts route file")
+	}
+}
+
 func TestTSFrameworks_JS_DirectDB_Fires_JsFile(t *testing.T) {
 	ps, err := LoadBuiltin()
 	if err != nil {
@@ -1154,9 +1334,11 @@ func TestTSFrameworks_PatternMetadata_RateLimitPatterns(t *testing.T) {
 		"ts-express-missing-rate-limit",
 		"ts-fastify-missing-rate-limit",
 		"ts-koa-missing-rate-limit",
+		"ts-nextjs-missing-rate-limit",
 		"js-express-missing-rate-limit",
 		"js-fastify-missing-rate-limit",
 		"js-koa-missing-rate-limit",
+		"js-nextjs-missing-rate-limit",
 	}
 
 	for _, id := range rateLimitPatterns {

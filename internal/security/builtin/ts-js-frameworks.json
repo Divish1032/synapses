@@ -274,6 +274,35 @@
       "tags": ["owasp-a01", "auth", "next.js", "production-critical"]
     },
     {
+      "id": "ts-nextjs-missing-rate-limit",
+      "name": "Next.js API route handler without rate limiting (TypeScript)",
+      "language": "typescript",
+      "framework": "next.js",
+      "pattern_type": "rate_limiting",
+      "severity": "HIGH",
+      "description": "A Next.js API route handler (TypeScript) does not apply rate limiting. App Router route.ts files and Pages Router pages/api/*.ts handlers are exposed to the internet and are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion without rate limiting. The primary pattern is per-route rate limiting via @upstash/ratelimit: import { Ratelimit } from '@upstash/ratelimit' and call ratelimit.limit() in the handler. Alternative libraries: next-rate-limit, express-rate-limit (via custom wrappers), or infrastructure-level limiting (Cloudflare, AWS WAF). Note: if rate limiting is enforced globally at the infrastructure layer for Vercel-deployed projects or via a CDN/load balancer, this per-route finding can be suppressed. Note: no framework_identifiers gate is used — the route.ts and pages/api/*.ts file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
+      "detection": {
+        "check_type": "missing_annotation",
+        "framework_identifiers": [],
+        "annotation_patterns": [
+          "rateLimit*", "RateLimit*",
+          "rateLimiter*", "RateLimiter*",
+          "Throttle*", "throttle*",
+          "upstashRatelimit*", "createRatelimit*",
+          "withRateLimit*",
+          "limiter*", "Limiter*",
+          "createRateLimiter*"
+        ],
+        "handler_file_patterns": [
+          "*/route.ts",
+          "pages/api/*.ts"
+        ],
+        "scope": "file"
+      },
+      "message": "Next.js API route {file} does not apply rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Suppress if rate limiting is enforced at the infrastructure layer (Vercel, Cloudflare, AWS WAF, or similar).",
+      "tags": ["owasp-a04", "rate-limiting", "next.js", "availability"]
+    },
+    {
       "id": "ts-direct-db-import",
       "name": "TypeScript route or controller directly imports database package",
       "language": "typescript",
@@ -577,6 +606,35 @@
       },
       "message": "Next.js API route {file} does not call any authentication function. Use getServerSession(), auth(), currentUser(), or a custom authenticate() to verify caller identity. Suppress if auth is enforced globally via middleware.js.",
       "tags": ["owasp-a01", "auth", "next.js", "production-critical"]
+    },
+    {
+      "id": "js-nextjs-missing-rate-limit",
+      "name": "Next.js API route handler without rate limiting (JavaScript)",
+      "language": "javascript",
+      "framework": "next.js",
+      "pattern_type": "rate_limiting",
+      "severity": "HIGH",
+      "description": "A Next.js API route handler (JavaScript) does not apply rate limiting. App Router route.js files and Pages Router pages/api/*.js handlers are exposed to the internet and are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion without rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Note: if rate limiting is enforced at the infrastructure layer for Vercel-deployed projects or via a CDN/load balancer, this per-route finding can be suppressed. Note: no framework_identifiers gate is used — the route.js and pages/api/*.js file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient.",
+      "detection": {
+        "check_type": "missing_annotation",
+        "framework_identifiers": [],
+        "annotation_patterns": [
+          "rateLimit*", "RateLimit*",
+          "rateLimiter*", "RateLimiter*",
+          "Throttle*", "throttle*",
+          "upstashRatelimit*", "createRatelimit*",
+          "withRateLimit*",
+          "limiter*", "Limiter*",
+          "createRateLimiter*"
+        ],
+        "handler_file_patterns": [
+          "*/route.js",
+          "pages/api/*.js"
+        ],
+        "scope": "file"
+      },
+      "message": "Next.js API route {file} does not apply rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Suppress if rate limiting is enforced at the infrastructure layer (Vercel, Cloudflare, AWS WAF, or similar).",
+      "tags": ["owasp-a04", "rate-limiting", "next.js", "availability"]
     },
     {
       "id": "js-direct-db-import",
