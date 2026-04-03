@@ -27,8 +27,9 @@ type endSessionResult struct {
 	MemoriesSaved       int                    `json:"memories_saved"`
 	SessionSummary      *sessionSummary        `json:"session_summary,omitempty"`
 	MemoriesExpired     int64                  `json:"memories_expired"`
-	ObservationsSaved    int                    `json:"observations_saved,omitempty"`
-	ConventionsExtracted int                    `json:"conventions_extracted,omitempty"`
+	ObservationsSaved       int                    `json:"observations_saved,omitempty"`
+	ConventionsExtracted    int                    `json:"conventions_extracted,omitempty"`
+	FailurePatternsExtracted int                   `json:"failure_patterns_extracted,omitempty"`
 	Retrospective        *store.ToolCallSummary `json:"retrospective,omitempty"`
 	EffectivenessReport *EffectivenessReport   `json:"effectiveness_report,omitempty"`
 }
@@ -515,6 +516,18 @@ func (s *Server) handleEndSession(
 		logutil.Warn("synapses: convention extraction: %v\n", err)
 	} else {
 		result.ConventionsExtracted = n
+	}
+
+	// ── Sprint 29.4: Failure avoidance pattern extraction ──
+	// Mine project-wide rejected_approach records for recurring keyword patterns
+	// (library names, hyphenated package names). Promotes patterns seen in ≥
+	// MinOccurrencesForFailurePattern records to ExtractedFailurePattern rows.
+	// Delivered at session_init in _briefing.failure_avoidance. Tier 1 — no
+	// agent action required.
+	if n, err := runFailurePatternExtraction(s.store, s.projectID); err != nil {
+		logutil.Warn("synapses: failure pattern extraction: %v\n", err)
+	} else {
+		result.FailurePatternsExtracted = n
 	}
 
 	// ── D4: Archivist session memory synthesis ──

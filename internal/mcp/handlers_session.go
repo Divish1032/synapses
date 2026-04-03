@@ -1894,6 +1894,33 @@ func (s *Server) handleSessionInit(
 			briefing["drift_alerts"] = msg
 		}
 
+		// (2b) Failure avoidance: patterns repeatedly tried and abandoned (Sprint 29.4).
+		// Warns agents about approaches that have failed ≥2 times in this project so
+		// they don't re-attempt them. Capped at 3 to keep the briefing concise.
+		if s.store != nil && s.projectID != "" {
+			if patterns, err := s.store.GetProjectFailurePatterns(s.projectID, 0.6); err == nil && len(patterns) > 0 {
+				const maxFailureWarnings = 3
+				const maxWarningRunes = 160
+				var warnings []string
+				for _, fp := range patterns {
+					if len(warnings) >= maxFailureWarnings {
+						break
+					}
+					if fp.Text == "" {
+						continue
+					}
+					text := fp.Text
+					if rs := []rune(text); len(rs) > maxWarningRunes {
+						text = string(rs[:maxWarningRunes]) + "…"
+					}
+					warnings = append(warnings, text)
+				}
+				if len(warnings) > 0 {
+					briefing["failure_avoidance"] = warnings
+				}
+			}
+		}
+
 		// (4) Security rules: NL descriptions of structural (non-agent) rules.
 		// Collected alongside agentConstraints above; capped at 5.
 		if briefingSecurityRules == nil {

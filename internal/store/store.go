@@ -1055,6 +1055,25 @@ func Open(path string) (*Store, error) {
 			updated_at    INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_project_conf ON extracted_conventions(project_id, confidence DESC)`,
+		// Sprint 29.4: Failure avoidance system — materialized failure patterns promoted
+		// from cross-session rejected_approaches. A pattern is created when the same
+		// keyword (library name, package name) appears in 2+ rejected_approach records.
+		// Upserted at end_session; delivered in _briefing.failure_avoidance at session_init.
+		// ID is deterministic: project_id || '::' || keyword.
+		`CREATE TABLE IF NOT EXISTS extracted_failure_patterns (
+			id               TEXT PRIMARY KEY,
+			project_id       TEXT NOT NULL,
+			keyword          TEXT NOT NULL,
+			pattern_type     TEXT NOT NULL DEFAULT '',
+			occurrence_count INTEGER NOT NULL DEFAULT 0,
+			sample_approach  TEXT NOT NULL DEFAULT '',
+			sample_reason    TEXT NOT NULL DEFAULT '',
+			confidence       REAL NOT NULL DEFAULT 0.0,
+			text             TEXT NOT NULL DEFAULT '',
+			created_at       INTEGER NOT NULL DEFAULT 0,
+			updated_at       INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fp_project_conf ON extracted_failure_patterns(project_id, confidence DESC)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
