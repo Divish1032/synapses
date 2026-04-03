@@ -602,7 +602,7 @@ func categorizeFindingChanges(before, after []security.Violation) (newOnes, exis
 // This is the write-side complement to validate_plan: validate_plan checks
 // *before* writing, verify_implementation checks *after*.
 func (s *Server) handleVerifyImplementation(
-	_ context.Context,
+	ctx context.Context,
 	req mcp.CallToolRequest,
 ) (*mcp.CallToolResult, error) {
 	filesRaw := stringArg(req, "files_written")
@@ -1114,17 +1114,29 @@ doneSecurityStatus:
 
 	// Sprint 27.3: auto-record episode when CRITICAL or HIGH security findings are
 	// introduced, so future sessions know about persistent security issues.
+	// Sprint 27.10: deduplicate episodes — only write for findings not yet episoded
+	// this session (persistent CheckProject findings fired on every call previously).
 	if s.store != nil {
+		sessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
 		var critHighFindings []string
+		// Collect per-file findings that haven't been episoded this session.
+		// CheckAndMarkEpisoded is atomic — prevents TOCTOU duplicates under concurrency.
 		for _, r := range reports {
 			for _, f := range r.SecurityFindingsNew {
 				if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+					if !s.findingQueue.CheckAndMarkEpisoded(sessID, f.PatternID, f.Target) {
+						continue
+					}
 					critHighFindings = append(critHighFindings, fmt.Sprintf("%s in %s", f.PatternName, r.File))
 				}
 			}
 		}
+		// Collect project-scope findings that haven't been episoded this session.
 		for _, f := range projectSecurityFindings {
 			if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+				if !s.findingQueue.CheckAndMarkEpisoded(sessID, f.PatternID, f.Target) {
+					continue
+				}
 				critHighFindings = append(critHighFindings, fmt.Sprintf("%s (project-scope)", f.PatternName))
 			}
 		}

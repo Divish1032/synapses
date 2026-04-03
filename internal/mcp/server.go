@@ -135,6 +135,7 @@ type Server struct {
 	sdlcDetect         *sdlcDetector          // Sprint 27.1: auto-detects SDLC phase from tool-call patterns
 	toolTracker        *sessionToolTracker    // Sprint 27.3: per-session tool call counts for suggestion suppression
 	goalReinforcer     *goalReinforcer        // Sprint 25.6: per-session response counter for goal+convention reminders
+	findingQueue       *findingQueue          // Sprint 27.10: queued security findings for piggyback delivery
 	patternEngine      *security.Engine       // Sprint 26.7: security pattern matching engine
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
@@ -606,6 +607,7 @@ func New(g *graph.Graph, cfg *config.Config, st *store.Store) *Server {
 		toolDescs:        make(map[string]string),
 		sdlcDetect:       newSDLCDetector(),
 		toolTracker:      newSessionToolTracker(),
+		findingQueue:     newFindingQueue(),
 		patternEngine:    security.DefaultEngineWithRegistry(),
 	}
 	s.lifecycleCtx, s.lifecycleCancel = context.WithCancel(context.Background())
@@ -1581,6 +1583,10 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 				injectAlerts(result, alerts)
 			}
 		}
+
+		// Sprint 27.10: Piggyback queued security findings onto any tool response.
+		// Delivers exactly once (dequeue removes findings from the queue).
+		injectPendingFindings(result, s.findingQueue, sessionID)
 
 		// Recall-to-action correlation: check if this tool call touches
 		// entities/files from a recent recall. Fire-and-forget to Pulse.
