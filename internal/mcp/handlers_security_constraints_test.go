@@ -814,10 +814,13 @@ func TestGetContext_PatternEngine_ConstraintIncludesSeverityAndName(t *testing.T
 	result, err := srv.handleGetContext(ctx, req)
 	m := mustResult(t, result, err)
 
-	enrichMap := m["enrichment"].(map[string]any)
+	enrichMap, ok := m["enrichment"].(map[string]any)
+	if !ok {
+		t.Fatalf("enrichment key missing or wrong type in response: %v", m)
+	}
 	constraints, ok := enrichMap["security_constraints"].([]any)
 	if !ok || len(constraints) == 0 {
-		t.Skip("no pattern violations for this graph — skipping format check")
+		t.Fatal("no pattern violations for this graph — makeChiRouteGraph always produces violations; check engine wiring")
 	}
 
 	// At least one constraint from the pattern engine should follow the format:
