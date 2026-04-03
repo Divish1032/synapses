@@ -108,6 +108,14 @@ func run(args []string) error {
 		printUsage()
 		return nil
 
+	// ── Hook / session tools (Tier 2 — invoke from Claude Code hooks) ───
+	case "hooks":
+		return cmdHooks(args[1:])
+	case "validate":
+		return cmdValidate(args[1:])
+	case "end-session":
+		return cmdEndSession(args[1:])
+
 	// ── Subcommand groups ────────────────────────────────────────────────
 	case "dev":
 		return cmdDev(args[1:])
@@ -1515,12 +1523,23 @@ func writeClaudeSettings(repoRoot string) error {
 	}
 
 	// ── Clean up stale hooks from previous versions ──────────────────────
-	// The Glob|Grep hard block and low-value PostToolUse confirmations were
+	// The Glob|Grep hard block and low-value PostToolUse echo nudges were
 	// removed — clean them from already-connected projects on re-connect.
 	removeHookEntry(hooks, "PreToolUse", "Glob|Grep")
 	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate_plan") // legacy cleanup
 	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__validate")      // cleanup if validate hook was auto-added
 	removeHookEntry(hooks, "PostToolUse", "mcp__synapses__create_plan")
+
+	// synapsesBin resolves the canonical Synapses binary path.
+	// Prefer the installed location (~/.synapses/bin/synapses) so:
+	//   1. The path contains "/.synapses/" — recognised by isSynapsesHookEntry for
+	//      clean uninstall without removing user hooks.
+	//   2. The hook works even when the user's shell PATH doesn't include it.
+	synapsesBin := filepath.Join(synapsesDataDir("bin"), "synapses")
+	if _, statErr := os.Stat(synapsesBin); statErr != nil {
+		// Installed binary not found (dev build, CI, etc.) — fall back to PATH.
+		synapsesBin = "synapses"
+	}
 
 	// ── SessionStart: cat the daemon-written context file instead of a static echo.
 	// The context file contains project identity, pending tasks, and tool cheat sheet.
@@ -1543,11 +1562,23 @@ func writeClaudeSettings(repoRoot string) error {
 		"command": sessionStartCmd,
 	})
 
-	// ── PostToolUse: nudge validate(phase=post) after any file write/edit.
+	// ── PostToolUse: run security validation after every file write/edit.
+	// synapses validate reads the written file path from stdin (Claude Code
+	// sends the tool input as JSON), calls the daemon's verify_implementation
+	// tool, and prints any security findings to stdout — injected into Claude's
+	// context before the next response. Exits 0 always so it never blocks Claude.
 	upsertHookEntry(hooks, "PostToolUse", "Write|Edit", map[string]interface{}{
-		"type": "command",
-		"command": "echo '[Synapses] Files written. Now call validate(phase=\"post\", files_written=[\"<path>\"]) " +
-			"to check your changes against architecture rules before continuing.'",
+		"type":    "command",
+		"command": fmt.Sprintf("%s validate --scope post_write --path %q", synapsesBin, repoRoot),
+	})
+
+	// ── Stop: persist session state when the agent session ends.
+	// synapses end-session calls the daemon's end_session tool, which saves the
+	// session summary, work log, and exploration state for the next session.
+	// Uses matcher "stop" — a fixed identifier so upsert dedup works correctly.
+	upsertHookEntry(hooks, "Stop", "stop", map[string]interface{}{
+		"type":    "command",
+		"command": fmt.Sprintf("%s end-session --auto-summary --path %q", synapsesBin, repoRoot),
 	})
 
 	// ── Pre-allow all Synapses MCP tools so users are never prompted ─────
@@ -1998,6 +2029,11 @@ COMMANDS:
 SUBCOMMANDS:
   dev       link|unlink|status               Developer binary management
   daemon    serve|install|uninstall|logs      Low-level daemon control
+  hooks     install|remove [--path <dir>]     Manage Claude Code hook configs
+
+HOOK COMMANDS (invoke from Claude Code hooks):
+  validate      [--scope post_write] [--path <dir>]  Post-write security scan
+  end-session   [--auto-summary] [--path <dir>]       Persist session state
 
 OTHER:
   version, completion <bash|zsh|fish>, help
