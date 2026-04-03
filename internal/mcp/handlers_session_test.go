@@ -2425,3 +2425,147 @@ func TestHandleSessionInit_Briefing_RejectedApproaches(t *testing.T) {
 		}
 	}
 }
+
+// ── Sprint 29.3: Convention delivery in session_init ──────────────────────────
+
+// TestSessionInit_LearnedConventions_InBriefing verifies end-to-end that
+// conventions extracted by runConventionExtraction (Sprint 29.2) appear in
+// _briefing.conventions when session_init is called on the same project.
+//
+// This is the Tier-1 auto-capture path: no agent action required. Conventions
+// are built from cross-session observations, promoted via extraction, and
+// delivered automatically at session start.
+func TestSessionInit_LearnedConventions_InBriefing(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-session-init-conv"
+
+	// Insert MinSessionsForConvention distinct sessions all observing
+	// uses_testify so runConventionExtraction promotes it to a convention.
+	for i := 0; i < MinSessionsForConvention; i++ {
+		_, err := st.InsertSessionObservation(store.SessionObservation{
+			SessionID:  fmt.Sprintf("obs-sess-%d", i),
+			ProjectID:  projID,
+			AgentID:    "agent-a",
+			Category:   store.ObsCategoryLibraryUsage,
+			Key:        "uses_testify",
+			Confidence: 0.6,
+		})
+		if err != nil {
+			t.Fatalf("InsertSessionObservation: %v", err)
+		}
+	}
+
+	promoted, err := runConventionExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runConventionExtraction: %v", err)
+	}
+	if promoted == 0 {
+		t.Fatal("runConventionExtraction promoted 0 conventions; expected at least 1")
+	}
+
+	// Build a server for this project. SetProjectID is required so the
+	// session_init briefing queries conventions for the correct project.
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	srv := New(g, cfg, st)
+	srv.SetProjectID(projID)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "conv-delivery-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be a slice, got %T", briefing["conventions"])
+	}
+
+	// The extracted convention for "uses_testify" must appear as a string
+	// in the conventions list. The text is rendered by conventionText() and
+	// contains "testify" and the session count.
+	found := false
+	for _, c := range convs {
+		s, ok := c.(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(s, "testify") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("_briefing.conventions did not include learned testify convention; got: %v", convs)
+	}
+}
+
+// TestSessionInit_LearnedConventions_BelowThresholdNotDelivered verifies that
+// observations that have not yet reached MinSessionsForConvention are NOT
+// delivered in _briefing.conventions. Only promoted conventions appear.
+func TestSessionInit_LearnedConventions_BelowThresholdNotDelivered(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-session-init-below-threshold"
+
+	// Insert only (MinSessionsForConvention - 1) sessions — below the threshold.
+	for i := 0; i < MinSessionsForConvention-1; i++ {
+		_, err := st.InsertSessionObservation(store.SessionObservation{
+			SessionID:  fmt.Sprintf("below-sess-%d", i),
+			ProjectID:  projID,
+			AgentID:    "agent-b",
+			Category:   store.ObsCategoryLibraryUsage,
+			Key:        "uses_gomock",
+			Confidence: 0.6,
+		})
+		if err != nil {
+			t.Fatalf("InsertSessionObservation: %v", err)
+		}
+	}
+
+	// Extraction runs but promotes nothing (count < MinSessionsForConvention).
+	promoted, err := runConventionExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runConventionExtraction: %v", err)
+	}
+	if promoted != 0 {
+		t.Fatalf("expected 0 conventions promoted below threshold, got %d", promoted)
+	}
+
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	srv := New(g, cfg, st)
+	srv.SetProjectID(projID)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "below-threshold-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	convs, _ := briefing["conventions"].([]any)
+	for _, c := range convs {
+		if s, ok := c.(string); ok && strings.Contains(s, "gomock") {
+			t.Errorf("below-threshold convention appeared in session_init: %q", s)
+		}
+	}
+}
