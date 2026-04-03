@@ -68,6 +68,7 @@ func (s *Server) handleValidateDispatch(
 	// Guard: phases that require a code graph must not be called in knowledge mode.
 	// handleValidatePlan has its own nil-graph guard, but handleVerifyImplementation,
 	// handleGetViolations, and handlePlanContext do not — they would panic.
+	// handleValidatePreWrite has its own nil-graph guard (returns advisory).
 	switch phase {
 	case "post", "list", "full":
 		if s.graph == nil {
@@ -81,6 +82,10 @@ func (s *Server) handleValidateDispatch(
 	switch phase {
 	case "pre":
 		result, err = s.handleValidatePlan(ctx, req)
+	case "pre_write":
+		// Sprint 27.2: mid-write validation — natural-language description of proposed
+		// changes checked against security patterns, architectural rules, and observed norms.
+		result, err = s.handleValidatePreWrite(ctx, req)
 	case "post":
 		result, err = s.handleVerifyImplementation(ctx, req)
 	case "list":
@@ -102,7 +107,7 @@ func (s *Server) handleValidateDispatch(
 		result, err = s.handleGetADRs(ctx, req)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf(
-			"unknown validate phase: %q (valid: pre, post, list, full, safety, upsert_rule, delete_rule, candidates, upsert_adr, list_adrs)", phase)), nil
+			"unknown validate phase: %q (valid: pre, pre_write, post, list, full, safety, upsert_rule, delete_rule, candidates, upsert_adr, list_adrs)", phase)), nil
 	}
 	if err == nil && result != nil {
 		// Sprint 27.3: inject reactive suggestions into validate results.

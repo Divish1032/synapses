@@ -1805,10 +1805,11 @@ func (s *Server) registerTools() {
 		mcp.NewTool(
 			"validate",
 			mcp.WithDescription(
-				"CALL before writing code (phase=pre) and after writing code (phase=post) to catch violations early. "+
-					"Without phase=pre, you may write code that breaks rules you didn't know existed. "+
+				"CALL before writing code (phase=pre or phase=pre_write) and after writing code (phase=post) to catch violations early. "+
+					"Without a pre-write check, you may write code that breaks security patterns or architectural rules you didn't know existed. "+
 					"Without phase=post, violations in written files go undetected until CI. "+
-					"phase='pre' (default): check proposed changes against rules before writing. "+
+					"phase='pre' (default): check proposed call-graph changes against architectural rules before writing. "+
+					"phase='pre_write': describe what you are ABOUT TO WRITE in natural language — Synapses checks it against security patterns, architectural rules, and observed norms BEFORE any code exists. Use this when starting a new handler, endpoint, or service. "+
 					"phase='post': audit written files for new violations. "+
 					"phase='list': active violations. "+
 					"phase='full': compound gate — scope + safety + rules in one call. "+
@@ -1817,7 +1818,7 @@ func (s *Server) registerTools() {
 					"Decision records: phase='upsert_adr' / 'list_adrs'.",
 			),
 			mcp.WithString("phase",
-				mcp.Description("'pre' (default), 'post', 'list', 'full', 'safety', "+
+				mcp.Description("'pre' (default), 'pre_write', 'post', 'list', 'full', 'safety', "+
 					"'upsert_rule', 'delete_rule', 'candidates', 'upsert_adr', 'list_adrs'."),
 			),
 			// phase=pre params
@@ -1832,6 +1833,17 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithBoolean("skip_logic_checks",
 				mcp.Description("Skip heuristic logic checks. Phase=pre only. Default false."),
+			),
+			// phase=pre_write params
+			mcp.WithString("description",
+				mcp.Description("Natural language description of what you are about to write. "+
+					"Required for phase=pre_write (or provide files). "+
+					"Example: \"adding a POST /api/users handler to handlers/users.go\"."),
+			),
+			mcp.WithString("files",
+				mcp.Description("JSON array of target file paths for phase=pre_write. "+
+					"Optional when description mentions file paths. "+
+					"Example: '[\"handlers/users.go\"]'."),
 			),
 			// phase=post params
 			mcp.WithString("files_written",

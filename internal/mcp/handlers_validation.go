@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -245,10 +247,13 @@ func (s *Server) handleValidatePlan(
 			ToolName:       "validate_plan",
 			Status:         status,
 			ViolationCount: len(violations),
-			SafetyStatus:   safetyStatus,
-			RuleIDs:        string(ruleIDsJSON),
-			AgentID:        agentIDForPulse,
-			ProjectID:      projID,
+			// SecurityFindingCount is not set here: the pulse event fires before
+			// the security scan executes in handleValidatePlan. Security findings
+			// are included in the tool response but not in this pulse event.
+			SafetyStatus: safetyStatus,
+			RuleIDs:      string(ruleIDsJSON),
+			AgentID:      agentIDForPulse,
+			ProjectID:    projID,
 		})
 	}
 
@@ -449,6 +454,58 @@ func (s *Server) handleValidatePlan(
 	return jsonResult(result)
 }
 
+// gitShowHEADContent returns the content of a file as it exists in the most
+// recent git commit (HEAD). Returns (nil, false) when the file is new (not yet
+// committed), git is unavailable, or the operation times out. Callers treat
+// false as "no baseline available — all findings are new."
+func gitShowHEADContent(repoRoot, relPath string) ([]byte, bool) {
+	if repoRoot == "" || relPath == "" {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "-C", repoRoot, "show", "HEAD:"+relPath).Output()
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// categorizeFindingChanges partitions current (after-write) security findings
+// against a baseline (before-write) set. Returns:
+//   - newOnes:  findings present now but absent in the baseline (agent introduced them)
+//   - existing: findings present in both baseline and now (pre-existed, not fixed)
+//   - fixed:    findings present in the baseline but absent now (agent fixed them)
+//
+// Keyed on (PatternID, Target) so two findings of the same pattern on the same
+// target are treated as the same violation regardless of message wording.
+func categorizeFindingChanges(before, after []security.Violation) (newOnes, existing, fixed []security.Violation) {
+	type key struct{ patternID, target string }
+
+	beforeSet := make(map[key]security.Violation, len(before))
+	for _, v := range before {
+		beforeSet[key{v.PatternID, v.Target}] = v
+	}
+
+	afterSet := make(map[key]bool, len(after))
+	for _, v := range after {
+		k := key{v.PatternID, v.Target}
+		afterSet[k] = true
+		if _, inBefore := beforeSet[k]; inBefore {
+			existing = append(existing, v)
+		} else {
+			newOnes = append(newOnes, v)
+		}
+	}
+
+	for k, v := range beforeSet {
+		if !afterSet[k] {
+			fixed = append(fixed, v)
+		}
+	}
+	return
+}
+
 // handleVerifyImplementation checks the actual graph state of written files
 // against architectural rules and (optionally) a task's expectations.
 // This is the write-side complement to validate_plan: validate_plan checks
@@ -494,14 +551,17 @@ func (s *Server) handleVerifyImplementation(
 
 	// Per-file analysis.
 	type fileReport struct {
-		File             string                   `json:"file"`
-		InGraph          bool                     `json:"in_graph"`
-		NodeCount        int                      `json:"node_count"`
-		Entities         []string                 `json:"entities,omitempty"`
-		Violations       []config.Violation       `json:"violations,omitempty"`
-		SecurityFindings []security.Violation     `json:"security_findings,omitempty"`
-		SignatureImpact  []signatureImpactEntry   `json:"signature_impact,omitempty"`
-		FreshnessWarning string                   `json:"freshness_warning,omitempty"`
+		File                     string                 `json:"file"`
+		InGraph                  bool                   `json:"in_graph"`
+		NodeCount                int                    `json:"node_count"`
+		Entities                 []string               `json:"entities,omitempty"`
+		Violations               []config.Violation     `json:"violations,omitempty"`
+		SecurityFindings         []security.Violation   `json:"security_findings,omitempty"`          // all current findings
+		SecurityFindingsNew      []security.Violation   `json:"security_findings_new,omitempty"`      // Sprint 27.3: introduced by this change
+		SecurityFindingsExisting []security.Violation   `json:"security_findings_existing,omitempty"` // Sprint 27.3: pre-existed, not fixed
+		SecurityFindingsFixed    []security.Violation   `json:"security_findings_fixed,omitempty"`    // Sprint 27.3: resolved by this change
+		SignatureImpact          []signatureImpactEntry `json:"signature_impact,omitempty"`
+		FreshnessWarning         string                 `json:"freshness_warning,omitempty"`
 	}
 
 	var reports []fileReport
@@ -690,16 +750,56 @@ func (s *Server) handleVerifyImplementation(
 		}
 
 		// Sprint 26.7: security pattern findings (CheckFile) + Sprint 26.11: unknown import detection (CheckImports).
+		// Sprint 27.3: before/after comparison to attribute findings as new, existing, or fixed.
 		if s.graph != nil && s.patternEngine != nil {
-			findings := s.patternEngine.CheckFile(s.graph, absFile, fileContent)
-			findings = append(findings, s.patternEngine.CheckImports(s.graph, absFile)...)
-			if len(findings) > 0 {
-				r.SecurityFindings = findings
-				totalSecurityFindings += len(findings)
+			afterFindings := s.patternEngine.CheckFile(s.graph, absFile, fileContent)
+			afterFindings = append(afterFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
+			r.SecurityFindings = afterFindings
+			totalSecurityFindings += len(afterFindings)
+
+			// Attempt to load the pre-write content from git HEAD to classify
+			// findings as new (introduced), existing (pre-existed), or fixed.
+			// relPath is the project-relative path needed by git.
+			var relPath string
+			if repoRoot != "" {
+				if rel, err := filepath.Rel(repoRoot, absFile); err == nil {
+					relPath = rel
+				}
+			}
+			if priorContent, ok := gitShowHEADContent(repoRoot, relPath); ok {
+				beforeFindings := s.patternEngine.CheckFile(s.graph, absFile, priorContent)
+				// CheckImports is graph-derived (not content-derived), so its
+				// results are the same before and after; include to avoid
+				// mis-classifying import findings as "new."
+				beforeFindings = append(beforeFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
+				newOnes, existing, fixed := categorizeFindingChanges(beforeFindings, afterFindings)
+				if len(newOnes) > 0 {
+					r.SecurityFindingsNew = newOnes
+				}
+				if len(existing) > 0 {
+					r.SecurityFindingsExisting = existing
+				}
+				if len(fixed) > 0 {
+					r.SecurityFindingsFixed = fixed
+				}
+			} else {
+				// No baseline available (new file or non-git repo): all current
+				// findings are attributed as "new."
+				if len(afterFindings) > 0 {
+					r.SecurityFindingsNew = afterFindings
+				}
 			}
 		}
 
 		reports = append(reports, r)
+	}
+
+	// Sprint 27.3: project-scope security patterns (e.g. cross-transport auth consistency).
+	// Run once after all per-file checks — these patterns require the full project graph.
+	var projectSecurityFindings []security.Violation
+	if s.graph != nil && s.patternEngine != nil {
+		projectSecurityFindings = s.patternEngine.CheckProject(s.graph)
+		totalSecurityFindings += len(projectSecurityFindings)
 	}
 
 	// Task-level verification: compare actual graph entities against task's linked_nodes
@@ -805,11 +905,13 @@ func (s *Server) handleVerifyImplementation(
 	if totalViolations > 0 {
 		status = "violations_found"
 	}
-	// Escalate status when CRITICAL or HIGH security findings exist.
-	// An agent that reads only the top-level status must not get a false "pass"
-	// while there are blocking security issues. Sprint 27.4 adds full severity-tier
-	// enforcement; this ensures the status field is honest now.
+	// Escalate status when CRITICAL or HIGH security findings exist — including
+	// project-scope findings from CheckProject (Sprint 27.3). An agent that reads
+	// only the top-level status must not get a false "pass" while there are
+	// blocking security issues. Sprint 27.4 adds full severity-tier enforcement;
+	// this ensures the status field is honest now.
 	if totalSecurityFindings > 0 && (status == "pass" || status == "pending_indexing") {
+		// Check per-file findings.
 		for _, r := range reports {
 			for _, f := range r.SecurityFindings {
 				if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
@@ -818,19 +920,29 @@ func (s *Server) handleVerifyImplementation(
 				}
 			}
 		}
+		// Check project-scope findings.
+		for _, f := range projectSecurityFindings {
+			if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+				status = "security_findings_found"
+				break
+			}
+		}
 	}
 doneSecurityStatus:
 
 	// P3-5: emit validation outcome event.
+	// Sprint 27.3: include SecurityFindingCount so pulse analytics can distinguish
+	// architectural violations from security pattern violations.
 	if pc := s.getPulseClient(); pc != nil {
 		agentIDForPulse := stringArg(req, "agent_id")
 		projID := s.projectID
 		pc.RecordValidationEvent(pulse.ValidationEvent{
-			ToolName:       "verify_implementation",
-			Status:         status,
-			ViolationCount: totalViolations,
-			AgentID:        agentIDForPulse,
-			ProjectID:      projID,
+			ToolName:             "verify_implementation",
+			Status:               status,
+			ViolationCount:       totalViolations,
+			SecurityFindingCount: totalSecurityFindings,
+			AgentID:              agentIDForPulse,
+			ProjectID:            projID,
 		})
 	}
 
@@ -851,6 +963,9 @@ doneSecurityStatus:
 		"impact_warnings":         totalImpactWarnings,
 		"total_security_findings": totalSecurityFindings,
 		"files":                   reports,
+	}
+	if len(projectSecurityFindings) > 0 {
+		result["project_security_findings"] = projectSecurityFindings
 	}
 	if taskVerification != nil {
 		result["task_verification"] = taskVerification
@@ -886,16 +1001,44 @@ doneSecurityStatus:
 		})
 	}
 
-	// _summary: one-line digest for quick scanning.
-	// Format: "{F} files verified, {V} violations, {I} impact warnings."
-	{
-		status := "pass"
-		if totalViolations > 0 {
-			status = "violations_found"
+	// Sprint 27.3: auto-record episode when CRITICAL or HIGH security findings are
+	// introduced, so future sessions know about persistent security issues.
+	if s.store != nil {
+		var critHighFindings []string
+		for _, r := range reports {
+			for _, f := range r.SecurityFindingsNew {
+				if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+					critHighFindings = append(critHighFindings, fmt.Sprintf("%s in %s", f.PatternName, r.File))
+				}
+			}
 		}
-		result["_summary"] = fmt.Sprintf("%s: %d file(s), %d violation(s), %d security finding(s), %d impact warning(s)",
-			status, len(files), totalViolations, totalSecurityFindings, totalImpactWarnings)
+		for _, f := range projectSecurityFindings {
+			if f.Severity == security.SeverityCritical || f.Severity == security.SeverityHigh {
+				critHighFindings = append(critHighFindings, fmt.Sprintf("%s (project-scope)", f.PatternName))
+			}
+		}
+		if len(critHighFindings) > 0 {
+			ep := store.Episode{
+				EpisodeType: "failure",
+				Outcome:     "failure",
+				Trigger:     "verify_implementation found new CRITICAL/HIGH security findings",
+				Decision:    fmt.Sprintf("Security findings introduced: %s", strings.Join(critHighFindings, "; ")),
+				Rationale:   "Code was written that violates security patterns. Fix findings before merging.",
+				Tags:        `["auto","verify_implementation","security"]`,
+				Importance:  0.9,
+			}
+			s.goBackground(func() {
+				if _, err := s.store.RememberEpisode(ep); err != nil {
+					log.Printf("mcp: auto-record security episode: %v", err)
+				}
+			})
+		}
 	}
+
+	// _summary: one-line digest for quick scanning. Use the outer status which
+	// already accounts for all escalation paths (violations, security, indexing).
+	result["_summary"] = fmt.Sprintf("%s: %d file(s), %d violation(s), %d security finding(s), %d impact warning(s)",
+		status, len(files), totalViolations, totalSecurityFindings, totalImpactWarnings)
 
 	return jsonResult(result)
 }
@@ -1257,6 +1400,284 @@ func parsePathPattern(s string) []graph.EdgeType {
 		return nil
 	}
 	return out
+}
+
+// ── validate(phase="pre_write") ─────────────────────────────────────────────
+
+// filePathInTextRe matches source file paths embedded in natural-language text.
+// Covers Go, TypeScript/JavaScript, Python, Java, Rust, C/C++, and other common
+// extensions. The match must be preceded by a word boundary or path separator.
+var filePathInTextRe = regexp.MustCompile(
+	`(?:^|[\s('"])` +
+		`(` +
+		`[\w./\-]+` +
+		`\.(?:go|ts|tsx|js|jsx|mjs|cjs|py|java|rs|rb|php|cs|cpp|c|h|swift|kt|scala)` +
+		`)` +
+		`(?:[\s,'":)\]]|$)`,
+)
+
+// extractFilePathsFromText scans a natural-language string for source file path
+// patterns and returns up to 20 unique matches. Paths must end in a recognised
+// source-file extension to avoid false positives on common English words.
+func extractFilePathsFromText(text string) []string {
+	matches := filePathInTextRe.FindAllStringSubmatch(text, 40)
+	seen := make(map[string]bool)
+	var out []string
+	for _, m := range matches {
+		if len(m) < 2 {
+			continue
+		}
+		p := m[1]
+		if !seen[p] && len(out) < 20 {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// preWriteFileResult holds the per-file analysis produced by handleValidatePreWrite.
+type preWriteFileResult struct {
+	File               string               `json:"file"`
+	IsNew              bool                 `json:"is_new"`
+	SecurityFindings   []security.Violation `json:"security_findings,omitempty"`
+	ArchRuleViolations []config.Violation   `json:"arch_rule_violations,omitempty"`
+	Norms              []string             `json:"norms,omitempty"`
+}
+
+// handleValidatePreWrite implements validate(phase="pre_write").
+//
+// The agent describes a proposed change in natural language (e.g. "adding a
+// POST /api/users handler to handlers/users.go"). Synapses analyses the target
+// area — existing or sibling files — and returns security constraints, norms,
+// and architectural rule findings BEFORE any code is written.
+//
+// Differences from phase="pre":
+//   - "pre" accepts a structured JSON changes array and checks proposed call-graph
+//     edges against architectural rules (overlay-graph approach).
+//   - "pre_write" accepts a natural-language description plus optional file paths.
+//     For existing files it runs the pattern engine directly. For new files it
+//     scans sibling files in the same directory to infer what security patterns
+//     the new file must satisfy.
+//
+// Security timing: Pre-Write (agent calls before writing any code).
+func (s *Server) handleValidatePreWrite(
+	ctx context.Context,
+	req mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	description := stringArg(req, "description")
+	filesRaw := stringArg(req, "files")
+
+	// At least one input is required.
+	if description == "" && filesRaw == "" {
+		return mcp.NewToolResultError(
+			`description or files is required ` +
+				`(e.g., description="adding a POST /api/users handler to handlers/users.go", ` +
+				`files='["handlers/users.go"]')`), nil
+	}
+
+	// Parse explicit file list.
+	var targetFiles []string
+	if filesRaw != "" {
+		if err := json.Unmarshal([]byte(filesRaw), &targetFiles); err != nil {
+			return mcp.NewToolResultError(
+				fmt.Sprintf("invalid files JSON: %v", stripInternalPaths(err.Error()))), nil
+		}
+	}
+	// Fall back to extracting paths from the natural-language description.
+	if len(targetFiles) == 0 && description != "" {
+		targetFiles = extractFilePathsFromText(description)
+	}
+
+	// No graph: return an advisory without file analysis.
+	if s.graph == nil {
+		result := map[string]interface{}{
+			"status":               "unprotected",
+			"description_received": description,
+			"message": "Graph not loaded — start the daemon with a valid project path " +
+				"to enable pre-write security analysis.",
+		}
+		if len(targetFiles) > 0 {
+			result["files_requested"] = targetFiles
+		}
+		result["_summary"] = "pre_write: graph unavailable. No security analysis performed."
+		return jsonResult(result)
+	}
+
+	repoRoot := s.graph.Root()
+
+	const (
+		maxPreWriteFiles    = 10 // max target files analysed per call
+		maxSiblingFiles     = 10 // max sibling files scanned for new-file inference
+	)
+
+	fileResults := make([]preWriteFileResult, 0, len(targetFiles))
+	var allSecFindings []security.Violation
+	var allArchViolations []config.Violation
+	normSet := make(map[string]bool)
+
+	analyzed := 0
+	for _, f := range targetFiles {
+		if analyzed >= maxPreWriteFiles {
+			break
+		}
+
+		// Resolve to absolute path for all filesystem and security operations.
+		absFile := f
+		if repoRoot != "" && !filepath.IsAbs(absFile) {
+			absFile = filepath.Join(repoRoot, absFile)
+		}
+		if !pathWithinRoot(repoRoot, absFile) {
+			continue // silently skip traversal attempts
+		}
+		analyzed++
+
+		fr := preWriteFileResult{File: f}
+
+		_, statErr := os.Stat(absFile)
+		isNew := statErr != nil
+		fr.IsNew = isNew
+
+		if !isNew {
+			// ── Existing file: analyse it directly ──────────────────────────
+			src, _ := os.ReadFile(absFile)
+
+			if s.patternEngine != nil {
+				findings := s.patternEngine.CheckFile(s.graph, absFile, src)
+				findings = append(findings, s.patternEngine.CheckImports(s.graph, absFile)...)
+				fr.SecurityFindings = findings
+				allSecFindings = append(allSecFindings, findings...)
+			}
+
+			for _, n := range observeFileNorms(s.graph, f) {
+				fr.Norms = append(fr.Norms, n)
+				normSet[n] = true
+			}
+
+			s.rulesMu.RLock()
+			if s.config != nil {
+				archViol := s.config.CheckViolationsForFile(s.graph, f)
+				fr.ArchRuleViolations = archViol
+				allArchViolations = append(allArchViolations, archViol...)
+			}
+			s.rulesMu.RUnlock()
+		} else {
+			// ── New file: scan siblings to infer expected patterns ───────────
+			dir := filepath.Dir(absFile)
+			if !pathWithinRoot(repoRoot, dir) {
+				fileResults = append(fileResults, fr)
+				continue
+			}
+
+			// Glob sibling files with the same extension.
+			ext := strings.ToLower(filepath.Ext(f))
+			globPattern := filepath.Join(dir, "*"+ext)
+			if ext == "" {
+				globPattern = filepath.Join(dir, "*")
+			}
+			siblings, _ := filepath.Glob(globPattern)
+
+			seenPatternID := make(map[string]bool)
+			sibCount := 0
+			for _, sib := range siblings {
+				if sibCount >= maxSiblingFiles {
+					break
+				}
+				if !pathWithinRoot(repoRoot, sib) {
+					continue
+				}
+				sibCount++
+
+				// Relative path for graph lookups (graph stores relative paths).
+				relSib := sib
+				if repoRoot != "" {
+					if rel, err := filepath.Rel(repoRoot, sib); err == nil {
+						relSib = rel
+					}
+				}
+
+				if s.patternEngine != nil {
+					sibSrc, _ := os.ReadFile(sib)
+					for _, v := range s.patternEngine.CheckFile(s.graph, sib, sibSrc) {
+						if seenPatternID[v.PatternID] {
+							continue
+						}
+						seenPatternID[v.PatternID] = true
+						// Reframe as a prospective constraint for the new file:
+						// "pattern fires on sibling → new file must comply too."
+						constraint := v
+						constraint.Target = fmt.Sprintf("(new file — sibling pattern from %s)",
+							filepath.Base(v.File))
+						constraint.File = f
+						fr.SecurityFindings = append(fr.SecurityFindings, constraint)
+						allSecFindings = append(allSecFindings, constraint)
+					}
+				}
+
+				for _, n := range observeFileNorms(s.graph, relSib) {
+					if !normSet[n] {
+						normSet[n] = true
+						fr.Norms = append(fr.Norms, n)
+					}
+				}
+			}
+		}
+
+		fileResults = append(fileResults, fr)
+	}
+
+	// Derive top-level status from findings.
+	status := "clear"
+	critCount, highCount := 0, 0
+	for _, v := range allSecFindings {
+		switch v.Severity {
+		case security.SeverityCritical:
+			critCount++
+		case security.SeverityHigh:
+			highCount++
+		}
+	}
+	if critCount > 0 || highCount > 0 {
+		status = "requires_attention"
+	} else if len(allSecFindings) > 0 || len(allArchViolations) > 0 {
+		status = "findings_found"
+	} else if s.patternEngine == nil && (s.config == nil || len(s.config.Rules) == 0) {
+		status = "unprotected"
+	}
+
+	// Deduplicated global norms list.
+	var allNorms []string
+	for n := range normSet {
+		allNorms = append(allNorms, n)
+	}
+	sort.Strings(allNorms)
+
+	result := map[string]interface{}{
+		"status":               status,
+		"description_received": description,
+		"files_analyzed":       fileResults,
+	}
+	if len(allSecFindings) > 0 {
+		result["security_findings"] = allSecFindings
+	}
+	if len(allArchViolations) > 0 {
+		result["arch_violations"] = allArchViolations
+	}
+	if len(allNorms) > 0 {
+		result["norms"] = allNorms
+	}
+	if len(targetFiles) == 0 {
+		result["hint"] = "No target files could be identified from the description. " +
+			"Provide files=[\"path/to/file.go\"] for targeted security analysis."
+	}
+
+	result["_summary"] = fmt.Sprintf(
+		"pre_write: %d file(s) analyzed, %d security finding(s) (%d CRITICAL, %d HIGH), "+
+			"%d arch rule violation(s). Status: %s.",
+		len(fileResults), len(allSecFindings), critCount, highCount,
+		len(allArchViolations), status)
+
+	return jsonResult(result)
 }
 
 // ── Tool Catalog for discover_tools ─────────────────────────────────────────
