@@ -23,6 +23,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
 	"github.com/SynapsesOS/synapses/internal/pulse"
+	"github.com/SynapsesOS/synapses/internal/security"
 	"github.com/SynapsesOS/synapses/internal/store"
 )
 
@@ -1902,6 +1903,21 @@ func (s *Server) handleSessionInit(
 		// that have not yet been addressed. Queried from the last 24 h of episodes.
 		if watcherFindings := s.getWatcherSecurityFindings(); len(watcherFindings) > 0 {
 			briefing["watcher_security_findings"] = watcherFindings
+		}
+
+		// Sprint 29.5: discovered architectural norms.
+		// Scans the project graph for implicit structural conventions (e.g. "all 12
+		// route files call AuthMiddleware", "no handler imports repo layer directly").
+		// High-adherence norms include a "promote to enforced rule?" suggestion.
+		// Computed fresh each session — O(N_nodes) graph scan, no persistence needed.
+		if s.patternEngine != nil && s.graph != nil {
+			if rawNorms := s.patternEngine.DiscoverNorms(s.graph); len(rawNorms) > 0 {
+				normTexts := make([]string, 0, len(rawNorms))
+				for _, n := range rawNorms {
+					normTexts = append(normTexts, security.FormatDiscoveredNorm(n))
+				}
+				briefing["discovered_norms"] = normTexts
+			}
 		}
 
 		// (5) Recent decisions and rejected approaches.
