@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +58,100 @@ func TestTsserverVerifier_CloseIdempotent(t *testing.T) {
 	}
 	if err := v.Close(); err != nil {
 		t.Errorf("second Close() returned error: %v", err)
+	}
+}
+
+func TestTsserverVerifier_LaunchProcessError_ReturnsConfidenceNone(t *testing.T) {
+	// When LaunchProcess fails (e.g. binary not executable), ensureStarted returns
+	// an error and ResolveEdge must return ConfidenceNone without propagating the
+	// error — same graceful degradation as the TSServerPath-empty path.
+	srcFile := tsTempFile(t, "file.ts", "// src\n")
+	opts := TsserverVerifierOptions{
+		ProjectRoot:    t.TempDir(),
+		TSServerPath:   "/nonexistent/typescript-language-server",
+		QueryTimeout:   DefaultQueryTimeout,
+		StartupTimeout: DefaultStartupTimeout,
+		LaunchProcess: func(_ context.Context, _, _ string) (LSPTransport, error) {
+			return nil, errors.New("simulated launch failure")
+		},
+	}
+	v := &TsserverVerifier{opts: opts.withDefaults()}
+
+	edge, err := v.ResolveEdge(context.Background(), "from", "to",
+		CallPosition{File: srcFile, Line: 1, Col: 0})
+	if err != nil {
+		t.Fatalf("expected no error on launch failure, got: %v", err)
+	}
+	if edge.Confidence != ConfidenceNone {
+		t.Errorf("expected ConfidenceNone on launch failure, got %v", edge.Confidence)
+	}
+}
+
+func TestTsserverVerifier_CloseAndRestart(t *testing.T) {
+	// After Close(), the next ResolveEdge must transparently re-initialize
+	// typescript-language-server and return a valid result.
+	var (
+		mu         sync.Mutex
+		transports []*tsFakeTransport
+	)
+
+	root := t.TempDir()
+	buildTransport := func() *tsFakeTransport {
+		ft := &tsFakeTransport{
+			cfg:  tsCfg{response: &tsDefLoc{uri: "file:///def.ts", line: 7}},
+			root: root,
+		}
+		mu.Lock()
+		transports = append(transports, ft)
+		mu.Unlock()
+		return ft
+	}
+
+	opts := TsserverVerifierOptions{
+		ProjectRoot:    root,
+		TSServerPath:   "fake-tsserver",
+		QueryTimeout:   DefaultQueryTimeout,
+		StartupTimeout: DefaultStartupTimeout,
+		LaunchProcess: func(_ context.Context, _, _ string) (LSPTransport, error) {
+			return buildTransport(), nil
+		},
+	}
+	v := &TsserverVerifier{opts: opts.withDefaults()}
+
+	srcFile := tsTempFile(t, "src.ts", "// src\n")
+	pos := CallPosition{File: srcFile, Line: 1, Col: 0}
+
+	// First query: starts transport #1.
+	edge1, err := v.ResolveEdge(context.Background(), "f", "t", pos)
+	if err != nil {
+		t.Fatalf("first ResolveEdge error: %v", err)
+	}
+	if edge1.Confidence != ConfidenceHigh {
+		t.Errorf("first query: expected ConfidenceHigh, got %v", edge1.Confidence)
+	}
+
+	// Close shuts down transport #1.
+	if err := v.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if v.transport != nil {
+		t.Error("transport should be nil after Close")
+	}
+
+	// Second query: must restart (transport #2) and succeed.
+	edge2, err := v.ResolveEdge(context.Background(), "f", "t", pos)
+	if err != nil {
+		t.Fatalf("second ResolveEdge error: %v", err)
+	}
+	if edge2.Confidence != ConfidenceHigh {
+		t.Errorf("second query after restart: expected ConfidenceHigh, got %v", edge2.Confidence)
+	}
+
+	mu.Lock()
+	n := len(transports)
+	mu.Unlock()
+	if n != 2 {
+		t.Errorf("expected 2 transport instances (one per start), got %d", n)
 	}
 }
 

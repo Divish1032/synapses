@@ -2,7 +2,7 @@ package lsp
 
 // Internal test package — access to unexported identifiers is intentional.
 // Tests run without the gopls binary by injecting a goplsFakeTransport.
-// Note: tsserver_test.go (also package lsp) defines fakeTransport/writeTempFile;
+// Note: tsserver_test.go (also package lsp) defines tsFakeTransport/tsTempFile;
 // all gopls-specific helpers use the "gopls" prefix to avoid collisions.
 
 import (
