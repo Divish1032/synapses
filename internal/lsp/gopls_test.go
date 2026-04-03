@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,19 @@ type goplsFakeTransport struct {
 }
 
 func newGoplsFakeTransport() *goplsFakeTransport { return &goplsFakeTransport{} }
+
+// queueErrorResponse enqueues a JSON-RPC error response (gopls-level error,
+// distinct from a transport error). Used to test the lspError path.
+func (f *goplsFakeTransport) queueErrorResponse(id int64, code int, msg string) {
+	env, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   map[string]interface{}{"code": code, "message": msg},
+	})
+	f.mu.Lock()
+	f.queue = append(f.queue, env)
+	f.mu.Unlock()
+}
 
 // queueResponse enqueues a JSON-RPC response with the given id and result.
 func (f *goplsFakeTransport) queueResponse(id int64, result interface{}) {
@@ -687,4 +701,88 @@ func TestParseLocations_LocationLinkArray(t *testing.T) {
 	if locs[0].URI != "file:///c.go" {
 		t.Errorf("URI = %q, want file:///c.go", locs[0].URI)
 	}
+}
+
+// ── GoplsVerifier — LaunchProcess failure → ConfidenceNone ───────────────────
+
+func TestGoplsVerifier_LaunchProcessFailure_ConfidenceNone(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "main.go", "package main\n")
+
+	v := NewGoplsVerifier(GoplsVerifierOptions{
+		ProjectRoot:    dir,
+		GoplsPath:      "/fake/gopls",
+		QueryTimeout:   2 * time.Second,
+		StartupTimeout: 2 * time.Second,
+		LaunchProcess: func(_ context.Context, _, _ string) (LSPTransport, error) {
+			return nil, fmt.Errorf("binary not found")
+		},
+	})
+
+	edge, err := v.ResolveEdge(context.Background(), "from", "to",
+		CallPosition{File: src, Line: 0, Col: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if edge.Confidence != ConfidenceNone {
+		t.Errorf("expected ConfidenceNone when LaunchProcess fails, got %v", edge.Confidence)
+	}
+}
+
+// ── GoplsVerifier — JSON-RPC error from gopls (lspError path) ────────────────
+
+func TestGoplsVerifier_LSPErrorResponse_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "main.go", "package main\n")
+
+	ft := newGoplsFakeTransport()
+	ft.queueResponse(1, goplsInitResult)
+	// Simulate gopls returning a JSON-RPC error for the definition request.
+	ft.queueErrorResponse(2, -32601, "method not found")
+
+	v := newGoplsTestVerifier(t, ft)
+
+	_, err := v.ResolveEdge(context.Background(), "from", "to",
+		CallPosition{File: src, Line: 0, Col: 0})
+	if err == nil {
+		t.Fatal("expected error from JSON-RPC error response, got nil")
+	}
+	if !containsSubstr(err.Error(), "LSP error") && !containsSubstr(err.Error(), "method not found") {
+		t.Errorf("error message should reference LSP error, got: %v", err)
+	}
+}
+
+// ── GoplsVerifier — initialize recv error → ensureStarted fails ──────────────
+
+func TestGoplsVerifier_InitializeRecvError_ConfidenceNone(t *testing.T) {
+	dir := t.TempDir()
+	src := writeGoFile(t, dir, "main.go", "package main\n")
+
+	// No queued response and recvErr set immediately → initialize Recv fails.
+	ft := newGoplsFakeTransport()
+	ft.recvErr = fmt.Errorf("connection reset")
+
+	v := NewGoplsVerifier(GoplsVerifierOptions{
+		ProjectRoot:    dir,
+		GoplsPath:      "/fake/gopls",
+		QueryTimeout:   2 * time.Second,
+		StartupTimeout: 2 * time.Second,
+		LaunchProcess: func(_ context.Context, _, _ string) (LSPTransport, error) {
+			return ft, nil
+		},
+	})
+
+	// ensureStarted should fail (initialize fails); ResolveEdge returns ConfidenceNone.
+	edge, err := v.ResolveEdge(context.Background(), "from", "to",
+		CallPosition{File: src, Line: 0, Col: 0})
+	if err != nil {
+		t.Fatalf("unexpected error (ensureStarted failure is non-fatal): %v", err)
+	}
+	if edge.Confidence != ConfidenceNone {
+		t.Errorf("expected ConfidenceNone when initialize fails, got %v", edge.Confidence)
+	}
+}
+
+func containsSubstr(s, sub string) bool {
+	return strings.Contains(s, sub)
 }
