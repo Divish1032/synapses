@@ -28,7 +28,7 @@ import (
 // SymbolVerifier confirms whether a code entity exists at a given source position
 // using type-system information. Implemented by *lsp.Manager via VerifySymbol.
 //
-// lang is the language string ("go", "typescript"). file is an absolute path.
+// lang is the language string ("go", "typescript", "python"). file is an absolute path.
 // line and col are zero-indexed (LSP specification).
 //
 // Returns (true, nil) when the type system confirms the symbol's definition is at

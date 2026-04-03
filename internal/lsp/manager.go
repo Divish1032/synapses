@@ -233,10 +233,10 @@ func (m *Manager) toCache(pos CallPosition, edge *VerifiedEdge) {
 // tree-sitter matches) to HIGH when LSP confirms the entity identity via the type
 // system, and to upgrade LOW-confidence findings (heuristic BFS) to MEDIUM.
 //
-// lang is the language string ("go", "typescript"). file is an absolute path.
-// line and col are zero-indexed (LSP specification). A col of 0 is safe for
-// most definitions — gopls and tsserver resolve function names from the start of
-// the function keyword line.
+// lang is the language string ("go", "typescript", "python"). file is an
+// absolute path. line and col are zero-indexed (LSP specification). A col of 0
+// is safe for most definitions — gopls, tsserver, and pyright-langserver
+// resolve function names from the start of the function keyword line.
 //
 // Returns (true, nil) when LSP resolves the symbol and the definition points to
 // the same file and line as queried. Returns (false, nil) when LSP resolves to a
