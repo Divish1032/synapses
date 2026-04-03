@@ -84,9 +84,9 @@
           "requires_auth*", "require_auth*"
         ],
         "handler_file_patterns": [
-          "*/views.py", "*views.py", "*_views.py",
+          "*/views.py", "*_views.py",
           "*/views/*.py",
-          "*/viewsets.py", "*viewsets.py", "*_viewsets.py",
+          "*/viewsets.py", "*_viewsets.py",
           "*/viewsets/*.py"
         ],
         "scope": "file"
@@ -111,7 +111,6 @@
           "token_required*",
           "requires_auth*", "require_auth*",
           "Auth*", "authenticate*",
-          "current_user*",
           "verify_token*", "decode_token*", "validate_token*",
           "before_request*",
           "HTTPTokenAuth*", "HTTPBasicAuth*", "http_auth*"

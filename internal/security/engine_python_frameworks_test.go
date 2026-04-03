@@ -636,3 +636,156 @@ func TestPythonFrameworks_Flask_RegisterBlueprint_NotARouteIndicator(t *testing.
 		t.Error("register_blueprint alone should not trigger missing-auth (app factory files aggregate blueprints, not define routes)")
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Regression: *views.py must not match reviews.py (false positive guard)
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestPythonFrameworks_Django_ReviewsPy_NotAViewFile(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// A Django reviews.py file — should NOT match the views.py handler_file_pattern.
+	// Before the fix, *views.py would match reviews.py via suffix matching.
+	addFileWithImports(g, "/project/app/reviews.py", "django")
+	addFunctionWithCalls(g, "/project/app/reviews.py", "ReviewListView", "render")
+
+	violations := e.CheckFile(g, "/project/app/reviews.py", nil)
+	if findViolation(violations, "python-django-missing-auth") != nil {
+		t.Error("false positive: python-django-missing-auth fired on reviews.py — it ends in 'views.py' but is not a view file")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Regression: current_user alone must NOT suppress Flask auth violation
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestPythonFrameworks_Flask_CurrentUserAlone_DoesNotSuppressAuth(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Flask route that accesses current_user to conditionally display info,
+	// but has no actual auth enforcement (@login_required, jwt_required, etc.).
+	// Accessing the current_user proxy does not protect the route.
+	addFileWithImports(g, "/project/app/public.py", "flask")
+	addFunctionWithCalls(g, "/project/app/public.py", "home", "route", "get", "current_user")
+
+	violations := e.CheckFile(g, "/project/app/public.py", nil)
+	found := findViolation(violations, "python-flask-missing-auth")
+	if found == nil {
+		t.Error("current_user access alone should not suppress missing-auth: accessing the proxy does not enforce authentication")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Additional coverage: FastAPI Security scopes
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestPythonFrameworks_FastAPI_MissingAuth_WithSecurity_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// FastAPI Security() is used for OAuth2 scopes: Security(get_current_user, scopes=["read"])
+	addFileWithImports(g, "/project/api/scoped.py", "fastapi")
+	addFunctionWithCalls(g, "/project/api/scoped.py", "read_items", "get", "Security")
+
+	violations := e.CheckFile(g, "/project/api/scoped.py", nil)
+	if findViolation(violations, "python-fastapi-missing-auth") != nil {
+		t.Error("expected no violation when Security() is used for OAuth2 scopes")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Additional coverage: Django decorators and file patterns
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestPythonFrameworks_Django_MissingAuth_WithUserPassesTest_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	addFileWithImports(g, "/project/app/views.py", "django")
+	addFunctionWithCalls(g, "/project/app/views.py", "staff_view", "user_passes_test", "render")
+
+	violations := e.CheckFile(g, "/project/app/views.py", nil)
+	if findViolation(violations, "python-django-missing-auth") != nil {
+		t.Error("expected no violation when user_passes_test is called")
+	}
+}
+
+func TestPythonFrameworks_Django_MissingAuth_WithLoginRequiredMixin_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Django CBV using LoginRequiredMixin as base class.
+	// The Python parser may represent class inheritance as CALLS edges to the mixin name.
+	// If it does, LoginRequiredMixin* in annotation_patterns will suppress the violation.
+	addFileWithImports(g, "/project/app/views.py", "django")
+	addFunctionWithCalls(g, "/project/app/views.py", "UserDetailView", "LoginRequiredMixin", "DetailView")
+
+	violations := e.CheckFile(g, "/project/app/views.py", nil)
+	if findViolation(violations, "python-django-missing-auth") != nil {
+		t.Error("expected no violation when LoginRequiredMixin is referenced (CBV auth pattern)")
+	}
+}
+
+func TestPythonFrameworks_Django_MissingAuth_ViewsetsFile_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Django REST Framework viewsets.py with no auth — should fire.
+	addFileWithImports(g, "/project/api/viewsets.py", "django")
+	addFunctionWithCalls(g, "/project/api/viewsets.py", "UserViewSet", "list", "retrieve")
+
+	violations := e.CheckFile(g, "/project/api/viewsets.py", nil)
+	found := findViolation(violations, "python-django-missing-auth")
+	if found == nil {
+		t.Fatal("expected python-django-missing-auth violation for viewsets.py file")
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Additional coverage: Flask add_url_rule as route indicator
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestPythonFrameworks_Flask_MissingAuth_AddUrlRule_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Flask programmatic route registration via add_url_rule — no auth.
+	addFileWithImports(g, "/project/app/routes.py", "flask")
+	addFunctionWithCalls(g, "/project/app/routes.py", "register_routes", "add_url_rule")
+
+	violations := e.CheckFile(g, "/project/app/routes.py", nil)
+	found := findViolation(violations, "python-flask-missing-auth")
+	if found == nil {
+		t.Fatal("expected python-flask-missing-auth violation when add_url_rule is used without auth")
+	}
+}
