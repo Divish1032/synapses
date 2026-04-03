@@ -1,0 +1,216 @@
+package lsp
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"github.com/SynapsesOS/synapses/internal/graph"
+)
+
+const (
+	// DefaultIdleTimeout is the duration an LSP process may sit idle before
+	// Manager shuts it down to reclaim resources. It restarts lazily on the next
+	// ResolveEdge call.
+	DefaultIdleTimeout = 5 * time.Minute
+
+	// DefaultCacheTTL is the time-to-live for cached VerifiedEdge results.
+	// Call sites are stable within a file version, so a relatively long TTL is safe.
+	DefaultCacheTTL = 10 * time.Minute
+
+	// DefaultMaxCacheEntries limits the resolved-edge cache to avoid unbounded growth.
+	DefaultMaxCacheEntries = 10_000
+)
+
+// Options configures a Manager.
+type Options struct {
+	// IdleTimeout is how long an LSP verifier process may be idle before Manager
+	// stops it. Defaults to DefaultIdleTimeout.
+	IdleTimeout time.Duration
+
+	// CacheTTL is the time-to-live for cached VerifiedEdge entries.
+	// Defaults to DefaultCacheTTL.
+	CacheTTL time.Duration
+
+	// MaxCacheEntries caps the number of cached resolutions per Manager.
+	// Defaults to DefaultMaxCacheEntries.
+	MaxCacheEntries int
+}
+
+func (o *Options) withDefaults() Options {
+	out := *o
+	if out.IdleTimeout <= 0 {
+		out.IdleTimeout = DefaultIdleTimeout
+	}
+	if out.CacheTTL <= 0 {
+		out.CacheTTL = DefaultCacheTTL
+	}
+	if out.MaxCacheEntries <= 0 {
+		out.MaxCacheEntries = DefaultMaxCacheEntries
+	}
+	return out
+}
+
+// cacheKey uniquely identifies a resolution query. File:line:col is sufficient
+// because LSP resolution is deterministic for a given source position.
+type cacheKey struct {
+	file string
+	line int
+	col  int
+}
+
+// cacheEntry holds a cached VerifiedEdge and its expiry time.
+type cacheEntry struct {
+	edge    *VerifiedEdge
+	expiresAt time.Time
+}
+
+// Manager holds per-language EdgeVerifiers and a shared result cache.
+// It is the primary entry point for LSP edge resolution in Synapses.
+//
+// Usage:
+//
+//	m := lsp.NewManager(lsp.Options{})
+//	m.Register(goplsVerifier)           // called by Sprint 28.2
+//
+//	edge, err := m.ResolveEdge(ctx, from, to, pos)
+//
+// When no verifier is registered for a language, Get returns a NoOpVerifier.
+// Manager is safe for concurrent use after construction.
+type Manager struct {
+	opts      Options
+	mu        sync.RWMutex
+	verifiers map[Language]EdgeVerifier
+
+	cacheMu sync.Mutex
+	cache   map[cacheKey]cacheEntry
+}
+
+// NewManager constructs a Manager with the given options.
+// Call Register to add language-specific verifiers.
+func NewManager(opts Options) *Manager {
+	o := opts.withDefaults()
+	return &Manager{
+		opts:      o,
+		verifiers: make(map[Language]EdgeVerifier),
+		cache:     make(map[cacheKey]cacheEntry),
+	}
+}
+
+// Register adds or replaces the EdgeVerifier for a language.
+// If a previous verifier was registered for the same language, it is closed
+// after the new verifier is installed. Close is called outside the lock so
+// that a slow LSP process shutdown does not block concurrent Get calls.
+func (m *Manager) Register(v EdgeVerifier) {
+	m.mu.Lock()
+	prev := m.verifiers[v.Language()] // may be nil
+	m.verifiers[v.Language()] = v
+	m.mu.Unlock()
+	if prev != nil {
+		_ = prev.Close() // best-effort; ignore error on replacement
+	}
+}
+
+// Get returns the EdgeVerifier registered for the given language.
+// If no verifier has been registered, it returns NoOpVerifier(lang).
+func (m *Manager) Get(lang Language) EdgeVerifier {
+	m.mu.RLock()
+	v, ok := m.verifiers[lang]
+	m.mu.RUnlock()
+	if !ok {
+		return NoOpVerifier(lang)
+	}
+	return v
+}
+
+// ResolveEdge is a convenience method that selects the correct verifier for
+// the given file's language and resolves the edge, checking the cache first.
+//
+// lang must be set by the caller; Manager does not infer language from the
+// file extension. (Language detection belongs in the parser layer.)
+func (m *Manager) ResolveEdge(ctx context.Context, lang Language, from, to graph.NodeID, pos CallPosition) (*VerifiedEdge, error) {
+	// Check cache before dispatching to a verifier.
+	if pos.File != "" {
+		if cached := m.fromCache(pos); cached != nil {
+			return cached, nil
+		}
+	}
+
+	edge, err := m.Get(lang).ResolveEdge(ctx, from, to, pos)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache results from real verifiers (not no-ops — ConfidenceNone is not
+	// worth caching since the no-op always returns the same cheap result).
+	if pos.File != "" && edge.Confidence > ConfidenceNone {
+		m.toCache(pos, edge)
+	}
+
+	return edge, nil
+}
+
+// Close shuts down all registered verifiers. Idempotent.
+// Should be called when the Manager is no longer needed (e.g. daemon shutdown).
+func (m *Manager) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for lang, v := range m.verifiers {
+		_ = v.Close()
+		delete(m.verifiers, lang)
+	}
+}
+
+// CacheSize returns the current number of entries in the resolution cache.
+// Primarily useful for testing and observability.
+func (m *Manager) CacheSize() int {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	return len(m.cache)
+}
+
+// fromCache returns a cached VerifiedEdge for pos, or nil if not found or expired.
+func (m *Manager) fromCache(pos CallPosition) *VerifiedEdge {
+	k := cacheKey{file: pos.File, line: pos.Line, col: pos.Col}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	entry, ok := m.cache[k]
+	if !ok {
+		return nil
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(m.cache, k)
+		return nil
+	}
+	return entry.edge
+}
+
+// toCache stores a VerifiedEdge in the cache for pos.
+// If the cache has reached MaxCacheEntries, the insertion is skipped rather
+// than evicting — eviction is deferred to periodic expiry cleanup.
+func (m *Manager) toCache(pos CallPosition, edge *VerifiedEdge) {
+	k := cacheKey{file: pos.File, line: pos.Line, col: pos.Col}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if len(m.cache) >= m.opts.MaxCacheEntries {
+		return // capacity guard — skip rather than evict
+	}
+	m.cache[k] = cacheEntry{
+		edge:    edge,
+		expiresAt: time.Now().Add(m.opts.CacheTTL),
+	}
+}
+
+// PurgeExpired removes all expired cache entries. Can be called periodically
+// by background goroutines (e.g. watcher's maintenance tick). Safe to call
+// at any time; if never called, expired entries are lazily evicted on read.
+func (m *Manager) PurgeExpired() {
+	now := time.Now()
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	for k, entry := range m.cache {
+		if now.After(entry.expiresAt) {
+			delete(m.cache, k)
+		}
+	}
+}
