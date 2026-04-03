@@ -8,7 +8,9 @@
 #   An import is "known" when any registry entry is a dot-bounded prefix of the import.
 #   E.g., "com.fasterxml.jackson" matches "com.fasterxml.jackson.databind.ObjectMapper".
 #
-# Standard library (java.*, javax.*, sun.*, com.sun.*, jdk.*) is always known — NOT listed here.
+# Standard library (java.*, sun.*, com.sun.*, jdk.*) is always known — NOT listed here.
+# javax.*: only JDK-included sub-packages are stdlib (crypto, net, swing, xml, etc.).
+# Java EE javax.* (persistence, servlet, ws.rs, mail, etc.) require Maven artifacts — listed below.
 # jakarta.* is the Jakarta EE namespace (NOT stdlib) — included below.
 #
 # Slopsquatting examples this registry catches:
@@ -194,8 +196,7 @@ org.slf4j
 # ── Logback ──────────────────────────────────────────────────────────────────
 ch.qos.logback
 
-# ── Log4j (legacy) ───────────────────────────────────────────────────────────
-org.apache.log4j
+# ── Log4j (legacy root prefix) ───────────────────────────────────────────────
 log4j
 
 # ── JUnit ────────────────────────────────────────────────────────────────────
@@ -262,9 +263,6 @@ org.bouncycastle
 io.jsonwebtoken
 com.auth0
 com.nimbusds
-
-# ── JJWT ────────────────────────────────────────────────────────────────────
-io.jsonwebtoken
 
 # ── Database / JDBC drivers ──────────────────────────────────────────────────
 org.postgresql
@@ -439,9 +437,6 @@ io.jaegertracing
 # ── Thrift ───────────────────────────────────────────────────────────────────
 org.apache.thrift
 
-# ── Protocol Buffers ─────────────────────────────────────────────────────────
-com.google.protobuf
-
 # ── FlatBuffers ───────────────────────────────────────────────────────────────
 com.google.flatbuffers
 
@@ -452,15 +447,11 @@ com.esotericsoftware
 # ── Hessian ───────────────────────────────────────────────────────────────────
 com.caucho
 
-# ── Apache Thrift ─────────────────────────────────────────────────────────────
-org.apache.thrift
-
 # ── Dropwizard ───────────────────────────────────────────────────────────────
 io.dropwizard
 
 # ── Play Framework ───────────────────────────────────────────────────────────
 play
-akka
 
 # ── Akka ─────────────────────────────────────────────────────────────────────
 akka
@@ -509,9 +500,6 @@ org.joda
 # ── ThreeTen (JSR 310 backport) ───────────────────────────────────────────────
 org.threeten
 
-# ── Guice (Google DI) ────────────────────────────────────────────────────────
-com.google.inject
-
 # ── Dagger ───────────────────────────────────────────────────────────────────
 dagger
 
@@ -536,9 +524,6 @@ org.activiti
 
 # ── Keycloak ─────────────────────────────────────────────────────────────────
 org.keycloak
-
-# ── Shiro ────────────────────────────────────────────────────────────────────
-org.apache.shiro
 
 # ── Spring Security OAuth ────────────────────────────────────────────────────
 org.springframework.security.oauth2
@@ -718,9 +703,6 @@ javax.inject
 org.javamoney
 javax.money
 
-# ── CDI (standalone) ─────────────────────────────────────────────────────────
-org.jboss.arquillian
-
 # ── Arquillian ───────────────────────────────────────────────────────────────
 org.jboss.arquillian
 
@@ -748,9 +730,6 @@ org.eclipse.microprofile
 # ── JOOQ extras ──────────────────────────────────────────────────────────────
 org.jooq.meta
 org.jooq.codegen
-
-# ── Apache Camel ─────────────────────────────────────────────────────────────
-org.apache.camel
 
 # ── Hawtio ───────────────────────────────────────────────────────────────────
 io.hawt
