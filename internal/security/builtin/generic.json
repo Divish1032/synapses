@@ -1,6 +1,21 @@
 {
   "patterns": [
     {
+      "id": "generic-layer-violation",
+      "name": "Architectural layer violation — presentation layer directly accesses data layer",
+      "language": "*",
+      "framework": "*",
+      "pattern_type": "layer_violation",
+      "severity": "MEDIUM",
+      "description": "A file in the presentation layer (handler, api, controller, route) directly imports a package from the data layer (repo, repository, dal), skipping the service layer. This creates tight coupling between HTTP handling and data storage, breaking testability and violating the separation of concerns principle.",
+      "detection": {
+        "check_type": "layer_mapping",
+        "scope": "project"
+      },
+      "message": "File {file} is in the {src_layer} layer but directly imports '{target}' which is in the {dst_layer} layer. Route all data access through the {skip_layer} layer to preserve separation of concerns and testability.",
+      "tags": ["architecture", "layer-violation", "separation-of-concerns", "testability"]
+    },
+    {
       "id": "generic-admin-elevation",
       "name": "Admin route or handler missing elevated authorization",
       "language": "*",

@@ -103,6 +103,13 @@ const (
 	// transport types (HTTP) but not others (WebSocket, gRPC) in the same project.
 	// Requires project-scope analysis.
 	CheckTypeCrossTransportAuth CheckType = "cross_transport_auth"
+
+	// CheckTypeLayerMapping fires when a file in one architectural layer (e.g.
+	// presentation) directly imports a package from a non-adjacent layer (e.g.
+	// data), skipping the intermediate layer (e.g. service). Layers are
+	// auto-inferred from path segment keywords or supplied via LayerConfig.
+	// Requires project-scope analysis.
+	CheckTypeLayerMapping CheckType = "layer_mapping"
 )
 
 // DetectionScope limits the breadth of analysis the engine performs for a pattern.
@@ -256,6 +263,19 @@ type Detection struct {
 	// Examples: ["*/admin/*", "*/admin.go", "*_admin.go", "*/management/*"]
 	AdminPackagePaths []string `json:"admin_package_paths,omitempty"`
 
+	// LayerConfig defines the ordered architectural layer hierarchy for layer_mapping
+	// checks. Index 0 is the outermost layer (presentation); the last index is the
+	// innermost layer (data). Files in layer N are permitted to import layer N+1
+	// (adjacent), but NOT layer N+2 or deeper (skip violation).
+	//
+	// When LayerConfig is empty, the engine uses the built-in 3-tier defaults:
+	//   [presentation → service → data]
+	// with conservative path-segment keywords chosen to minimise false positives
+	// against external library import paths.
+	//
+	// Used by: CheckTypeLayerMapping
+	LayerConfig []LayerDef `json:"layer_config,omitempty"`
+
 	// GlobalSuppressionIdentifiers are import paths that, if found in ANY file in the
 	// project, indicate that a project-level auth mechanism is in place. When any
 	// project file imports one of these identifiers, violations from this pattern are
@@ -300,6 +320,23 @@ type Detection struct {
 	// Scope controls how broadly the engine analyzes the codebase for this pattern.
 	// Defaults to ScopeFile when empty.
 	Scope DetectionScope `json:"scope,omitempty"`
+}
+
+// LayerDef defines a single architectural layer for use with CheckTypeLayerMapping.
+// Each layer has a human-readable name and a set of path-segment keywords used to
+// identify files and import paths that belong to this layer.
+//
+// Keywords are matched case-insensitively against individual slash-delimited path
+// segments. "repository" matches ".../internal/repository/..." but NOT
+// ".../internal/repo-utils/..." (exact segment, not substring).
+type LayerDef struct {
+	// Name is the human-readable layer name, e.g. "presentation", "service", "data".
+	Name string `json:"name"`
+
+	// Keywords are the path-segment keywords that identify this layer.
+	// Examples: ["handler", "handlers", "api", "controller"] for the presentation layer.
+	// Each keyword is matched case-insensitively against individual path segments.
+	Keywords []string `json:"keywords"`
 }
 
 // SecurityPattern is the declarative specification for a single security check.
@@ -451,10 +488,11 @@ func (s Severity) Validate() error {
 func (ct CheckType) Validate() error {
 	switch ct {
 	case CheckTypeMissingMiddleware, CheckTypeDirectImport, CheckTypeMissingAnnotation,
-		CheckTypeHardcodedSecret, CheckTypeAdminElevation, CheckTypeCrossTransportAuth:
+		CheckTypeHardcodedSecret, CheckTypeAdminElevation, CheckTypeCrossTransportAuth,
+		CheckTypeLayerMapping:
 		return nil
 	default:
-		return fmt.Errorf("unknown check_type %q (valid: missing_middleware, direct_import, missing_annotation, hardcoded_secret, admin_elevation, cross_transport_auth)", ct)
+		return fmt.Errorf("unknown check_type %q (valid: missing_middleware, direct_import, missing_annotation, hardcoded_secret, admin_elevation, cross_transport_auth, layer_mapping)", ct)
 	}
 }
 
