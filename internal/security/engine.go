@@ -209,6 +209,8 @@ func (e *Engine) CheckFile(g *graph.Graph, filePath string, content []byte) []Vi
 			}
 		case CheckTypeAdminElevation:
 			found = checkAdminElevation(fc, p)
+		case CheckTypeDataFlowPath:
+			found = checkDataFlowPath(fc, p, g)
 		case CheckTypeCrossTransportAuth:
 			// Project-scope check: skipped per-file.
 			// Use CheckProject for cross-transport analysis.
@@ -2018,6 +2020,176 @@ func extractAnnotationsFromSig(sig string) []string {
 		found = append(found, name)
 	}
 	return found
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Data flow path checking (Sprint 27.7)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// reachableCallees performs a breadth-first search through CALLS edges starting
+// from all NodeFunction and NodeMethod nodes in fileNodes. It returns a set of
+// every reachable function/method name within maxDepth hops.
+//
+// Traversal is bounded by two guards:
+//   - maxDepth: maximum edge hops from the starting nodes.
+//   - maxBFSNodes (500): total nodes dequeued, preventing O(n) traversal on very
+//     large graphs where a handler's call tree fans out widely.
+//
+// The returned map keys are node Name values (not qualified paths). For Go this is
+// the bare function or method name; for TS/JS/Java/Rust similarly. Callers should
+// use glob matching to handle naming convention differences.
+func reachableCallees(g *graph.Graph, fileNodes []*graph.Node, maxDepth int) map[string]bool {
+	const maxBFSNodes = 500
+
+	reachable := make(map[string]bool)
+	visited := make(map[graph.NodeID]bool)
+
+	type qitem struct {
+		id    graph.NodeID
+		depth int
+	}
+
+	var queue []qitem
+	for _, n := range fileNodes {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		if visited[n.ID] {
+			continue
+		}
+		visited[n.ID] = true
+		queue = append(queue, qitem{n.ID, 0})
+	}
+
+	nodesDequeued := 0
+	for len(queue) > 0 && nodesDequeued < maxBFSNodes {
+		curr := queue[0]
+		queue = queue[1:]
+		nodesDequeued++
+
+		if curr.depth >= maxDepth {
+			continue
+		}
+
+		for _, e := range g.OutEdges(curr.id) {
+			if e.Type != graph.EdgeCalls {
+				continue
+			}
+			callee := g.GetNode(e.To)
+			if callee == nil {
+				continue
+			}
+			if callee.Name != "" {
+				reachable[callee.Name] = true
+			}
+			if !visited[e.To] {
+				visited[e.To] = true
+				queue = append(queue, qitem{e.To, curr.depth + 1})
+			}
+		}
+	}
+
+	return reachable
+}
+
+// checkDataFlowPath fires when a route-registering file's call graph reaches a
+// database sink operation (name matching DBSinkPatterns) but no validation or
+// sanitization function (name matching ValidationPatterns) is found anywhere in
+// the same reachable call path.
+//
+// This is a HEURISTIC check with MEDIUM confidence: the finding reads "may lack
+// validation", not "definitely insecure". False positives are expected when:
+//   - a validation function has a non-matching name
+//   - DB sink patterns over-match non-DB operations (e.g. "FindRoute")
+//
+// The check is limited to route-registering files (files with NodeRoute nodes,
+// or that call functions matching RouteNodeNames). Test files are skipped.
+func checkDataFlowPath(fc *fileContext, p SecurityPattern, g *graph.Graph) []Violation {
+	if isTestFile(fc.filePath) {
+		return nil
+	}
+
+	// Only run on files that register routes.
+	if len(fc.routes) == 0 && !fc.hasRouteRegistrations(p.Detection.RouteNodeNames) {
+		return nil
+	}
+
+	if len(p.Detection.DBSinkPatterns) == 0 {
+		return nil
+	}
+	// Without ValidationPatterns, the check cannot determine whether validation
+	// exists — producing a violation would be noise. Skip rather than over-fire.
+	if len(p.Detection.ValidationPatterns) == 0 {
+		return nil
+	}
+
+	// Determine BFS depth.
+	maxDepth := p.Detection.MaxCallDepth
+	if maxDepth <= 0 {
+		maxDepth = 5
+	}
+
+	// BFS from all functions/methods in this file.
+	reachable := reachableCallees(g, fc.nodes, maxDepth)
+
+	// Step 1: collect all reachable callee names in sorted order for deterministic
+	// output. Determinism matters for evidence messages in repeated runs.
+	sortedCallees := make([]string, 0, len(reachable))
+	for callee := range reachable {
+		sortedCallees = append(sortedCallees, callee)
+	}
+	sort.Strings(sortedCallees)
+
+	// Step 2: find the first (lexicographically) DB sink in the reachable set.
+	dbSinkFound := ""
+	for _, callee := range sortedCallees {
+		for _, pat := range p.Detection.DBSinkPatterns {
+			if matchGlob(pat, callee) {
+				dbSinkFound = callee
+				break
+			}
+		}
+		if dbSinkFound != "" {
+			break
+		}
+	}
+	if dbSinkFound == "" {
+		return nil // No DB operations reachable — not applicable.
+	}
+
+	// Step 3: check whether any validation/sanitization function is reachable.
+	// If found anywhere in the call tree, suppress the violation.
+	for _, callee := range sortedCallees {
+		for _, pat := range p.Detection.ValidationPatterns {
+			if matchGlob(pat, callee) {
+				return nil
+			}
+		}
+	}
+
+	// Fire a MEDIUM-confidence finding.
+	target := filepath.Base(fc.filePath)
+	msg := fillTemplate(p.Message, map[string]string{
+		"file":   fc.filePath,
+		"target": target,
+		"sink":   dbSinkFound,
+	})
+	evidence := fmt.Sprintf(
+		"%s handles user input via routes and calls database operations (e.g., %q) but no "+
+			"validation or sanitization function (Validate*, Sanitize*, Clean*, Escape*) was "+
+			"found in the reachable call path (depth %d). Medium confidence — verify manually.",
+		filepath.Base(fc.filePath), dbSinkFound, maxDepth,
+	)
+	return []Violation{{
+		PatternID:   p.ID,
+		PatternName: p.Name,
+		Severity:    p.Severity,
+		File:        fc.filePath,
+		Target:      target,
+		Message:     msg,
+		Evidence:    evidence,
+		Tags:        p.Tags,
+	}}
 }
 
 // nilIfEmpty returns nil when violations is empty, otherwise returns violations.

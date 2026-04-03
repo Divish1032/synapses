@@ -1,0 +1,182 @@
+{
+  "patterns": [
+    {
+      "id": "go-data-flow-missing-validation",
+      "name": "Go route handler calls database without input validation",
+      "language": "go",
+      "framework": "*",
+      "pattern_type": "input_validation",
+      "severity": "MEDIUM",
+      "description": "A route-registering file's call graph reaches a database operation but no validation or sanitization function is found in the reachable call path. This is a heuristic check — medium confidence. The handler may be accepting user input without validating it before use in a SQL query or ORM call, creating an injection risk (OWASP A03).",
+      "detection": {
+        "check_type": "data_flow_path",
+        "validation_patterns": [
+          "Validate*", "validate*",
+          "Sanitize*", "sanitize*",
+          "Clean*", "clean*",
+          "Escape*", "escape*"
+        ],
+        "db_sink_patterns": [
+          "*QueryRow*", "*QueryContext*", "*ExecContext*",
+          "*Insert*", "*Update*", "*Delete*", "*Save*",
+          "*FindBy*", "*FindOne*", "*FindAll*",
+          "*Fetch*", "*Exec"
+        ],
+        "max_call_depth": 5,
+        "scope": "file"
+      },
+      "message": "Route handler in {file} calls database operations (e.g., {sink}) but no validation or sanitization function (Validate*, Sanitize*, Clean*, Escape*) was found in the call path. Medium confidence — verify that user input is validated before reaching the database layer.",
+      "tags": ["owasp-a03", "input-validation", "injection"]
+    },
+    {
+      "id": "ts-data-flow-missing-validation",
+      "name": "TypeScript route handler calls database without input validation",
+      "language": "typescript",
+      "framework": "*",
+      "pattern_type": "input_validation",
+      "severity": "MEDIUM",
+      "description": "A route-registering TypeScript file's call graph reaches a database operation but no validation or sanitization function is found in the reachable call path. The handler may be passing unvalidated user input to Prisma, TypeORM, Knex, or a raw SQL client, creating an injection risk (OWASP A03).",
+      "detection": {
+        "check_type": "data_flow_path",
+        "validation_patterns": [
+          "Validate*", "validate*",
+          "Sanitize*", "sanitize*",
+          "Clean*", "clean*",
+          "Escape*", "escape*",
+          "parse*", "Parse*",
+          "safeParse*"
+        ],
+        "db_sink_patterns": [
+          "*findMany*", "*findFirst*", "*findUnique*", "*findOne*",
+          "*create*", "*update*", "*delete*", "*upsert*",
+          "*insert*", "*save*", "*remove*",
+          "*query*", "*execute*", "*raw*",
+          "*QueryRow*", "*QueryContext*", "*ExecContext*"
+        ],
+        "max_call_depth": 5,
+        "scope": "file"
+      },
+      "message": "Route handler in {file} calls database operations (e.g., {sink}) but no validation or sanitization function was found in the call path. Medium confidence — verify that user input is validated (e.g., Zod parse, class-validator, or manual sanitization) before reaching the database layer.",
+      "tags": ["owasp-a03", "input-validation", "injection"]
+    },
+    {
+      "id": "js-data-flow-missing-validation",
+      "name": "JavaScript route handler calls database without input validation",
+      "language": "javascript",
+      "framework": "*",
+      "pattern_type": "input_validation",
+      "severity": "MEDIUM",
+      "description": "A route-registering JavaScript file's call graph reaches a database operation but no validation or sanitization function is found in the reachable call path. The handler may be passing unvalidated user input to a database client, creating an injection risk (OWASP A03).",
+      "detection": {
+        "check_type": "data_flow_path",
+        "validation_patterns": [
+          "validate*", "Validate*",
+          "sanitize*", "Sanitize*",
+          "clean*", "Clean*",
+          "escape*", "Escape*",
+          "parse*", "Parse*"
+        ],
+        "db_sink_patterns": [
+          "*findMany*", "*findFirst*", "*findUnique*", "*findOne*",
+          "*create*", "*update*", "*delete*", "*upsert*",
+          "*insert*", "*save*", "*remove*",
+          "*query*", "*execute*", "*raw*"
+        ],
+        "max_call_depth": 5,
+        "scope": "file"
+      },
+      "message": "Route handler in {file} calls database operations (e.g., {sink}) but no validation or sanitization function was found in the call path. Medium confidence — verify that user input is validated before reaching the database layer.",
+      "tags": ["owasp-a03", "input-validation", "injection"]
+    },
+    {
+      "id": "python-data-flow-missing-validation",
+      "name": "Python route handler calls database without input validation",
+      "language": "python",
+      "framework": "*",
+      "pattern_type": "input_validation",
+      "severity": "MEDIUM",
+      "description": "A route-registering Python file's call graph reaches a database operation but no validation or sanitization function is found in the reachable call path. The handler may be passing unvalidated user input to SQLAlchemy, Django ORM, or a raw cursor, creating an injection risk (OWASP A03).",
+      "detection": {
+        "check_type": "data_flow_path",
+        "validation_patterns": [
+          "validate*", "Validate*",
+          "sanitize*", "Sanitize*",
+          "clean*", "Clean*",
+          "escape*", "escape_string*",
+          "clean_data*", "full_clean*"
+        ],
+        "db_sink_patterns": [
+          "execute*", "executemany*",
+          "fetchone*", "fetchall*", "fetchmany*",
+          "*insert*", "*update*", "*delete*", "*save*",
+          "*filter*", "*create*", "*bulk_create*",
+          "*add*", "*commit*"
+        ],
+        "max_call_depth": 5,
+        "scope": "file"
+      },
+      "message": "Route handler in {file} calls database operations (e.g., {sink}) but no validation or sanitization function was found in the call path. Medium confidence — verify that user input is validated (e.g., Pydantic model, Django form, or explicit sanitization) before reaching the database layer.",
+      "tags": ["owasp-a03", "input-validation", "injection"]
+    },
+    {
+      "id": "java-data-flow-missing-validation",
+      "name": "Java controller calls database without input validation",
+      "language": "java",
+      "framework": "*",
+      "pattern_type": "input_validation",
+      "severity": "MEDIUM",
+      "description": "A route-registering Java file's call graph reaches a database operation but no validation or sanitization function is found in the reachable call path. The controller may be passing unvalidated user input to JPA, Hibernate, JDBC, or Spring Data, creating an injection risk (OWASP A03).",
+      "detection": {
+        "check_type": "data_flow_path",
+        "validation_patterns": [
+          "validate*", "Validate*",
+          "sanitize*", "Sanitize*",
+          "clean*", "Clean*",
+          "escape*", "Escape*",
+          "isValid*"
+        ],
+        "db_sink_patterns": [
+          "save*", "saveAll*", "saveAndFlush*",
+          "findById*", "findAll*", "findBy*", "findOne*",
+          "delete*", "deleteById*", "deleteAll*",
+          "executeQuery*", "executeUpdate*",
+          "update*", "merge*", "persist*",
+          "createQuery*", "createNativeQuery*"
+        ],
+        "max_call_depth": 5,
+        "scope": "file"
+      },
+      "message": "Controller in {file} calls database operations (e.g., {sink}) but no validation or sanitization function was found in the call path. Medium confidence — verify that user input is validated (e.g., @Valid, @Validated, manual validation) before reaching the repository or persistence layer.",
+      "tags": ["owasp-a03", "input-validation", "injection"]
+    },
+    {
+      "id": "rust-data-flow-missing-validation",
+      "name": "Rust route handler calls database without input validation",
+      "language": "rust",
+      "framework": "*",
+      "pattern_type": "input_validation",
+      "severity": "MEDIUM",
+      "description": "A route-registering Rust file's call graph reaches a database operation but no validation or sanitization function is found in the reachable call path. The handler may be passing unvalidated user input to SQLx, Diesel, or sea-orm, creating an injection risk (OWASP A03).",
+      "detection": {
+        "check_type": "data_flow_path",
+        "validation_patterns": [
+          "validate*", "Validate*",
+          "sanitize*", "Sanitize*",
+          "clean*", "Clean*",
+          "escape*", "Escape*"
+        ],
+        "db_sink_patterns": [
+          "execute*", "fetch_one*", "fetch_all*", "fetch_optional*",
+          "query_as*", "query_scalar*",
+          "insert*", "update*", "delete*", "save*",
+          "find_by_id*", "find_all*",
+          "create*", "batch_insert*"
+        ],
+        "max_call_depth": 5,
+        "scope": "file"
+      },
+      "message": "Route handler in {file} calls database operations (e.g., {sink}) but no validation or sanitization function was found in the call path. Medium confidence — verify that user input is validated (e.g., Validator crate, manual checks) before reaching the database layer.",
+      "tags": ["owasp-a03", "input-validation", "injection"]
+    }
+  ]
+}
