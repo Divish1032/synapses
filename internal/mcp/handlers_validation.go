@@ -1549,14 +1549,23 @@ func (s *Server) handleValidatePreWrite(
 				allSecFindings = append(allSecFindings, findings...)
 			}
 
-			for _, n := range observeFileNorms(s.graph, f) {
+			// Graph lookups (observeFileNorms, CheckViolationsForFile) require
+			// relative paths — the graph stores project-relative paths, not absolute.
+			relFile := f
+			if repoRoot != "" && filepath.IsAbs(f) {
+				if rel, err := filepath.Rel(repoRoot, f); err == nil {
+					relFile = rel
+				}
+			}
+
+			for _, n := range observeFileNorms(s.graph, relFile) {
 				fr.Norms = append(fr.Norms, n)
 				normSet[n] = true
 			}
 
 			s.rulesMu.RLock()
 			if s.config != nil {
-				archViol := s.config.CheckViolationsForFile(s.graph, f)
+				archViol := s.config.CheckViolationsForFile(s.graph, relFile)
 				fr.ArchRuleViolations = archViol
 				allArchViolations = append(allArchViolations, archViol...)
 			}

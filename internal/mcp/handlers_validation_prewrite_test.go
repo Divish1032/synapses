@@ -330,6 +330,49 @@ func TestValidatePreWrite_DispatchRoute(t *testing.T) {
 	}
 }
 
+// TestValidatePreWrite_AbsolutePathGraphLookup verifies that when an absolute
+// path is provided in files, graph-based lookups (norms, arch rules) still
+// use a project-relative path internally. The key correctness property is that
+// the handler does not panic or return an error — it should return a valid
+// result with is_new=false for an existing file.
+func TestValidatePreWrite_AbsolutePathGraphLookup(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "api", "routes.go")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("package api\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	g := makeChiRouteGraph(t, root, filePath)
+	st := openMCPTestStore(t)
+	cfg, cfgErr := config.Load(t.TempDir())
+	if cfgErr != nil {
+		t.Fatalf("config.Load: %v", cfgErr)
+	}
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	// Pass absolute path — graph stores relative paths, so relFile must be derived.
+	filesJSON, _ := json.Marshal([]string{filePath})
+	res, callErr := srv.handleValidatePreWrite(ctx, callTool(map[string]any{
+		"description": "adding a route to routes.go",
+		"files":       string(filesJSON),
+	}))
+	m := mustResult(t, res, callErr)
+
+	fa, ok := m["files_analyzed"].([]any)
+	if !ok || len(fa) == 0 {
+		t.Fatal("expected files_analyzed list for absolute path input")
+	}
+	fr := fa[0].(map[string]any)
+	if got := fr["is_new"]; got != false {
+		t.Errorf("existing file with absolute path should have is_new=false, got %v", got)
+	}
+}
+
 // TestValidatePreWrite_UnknownPhaseError verifies the error message is updated
 // to include "pre_write" in the list of valid phases.
 func TestValidatePreWrite_UnknownPhaseError(t *testing.T) {
