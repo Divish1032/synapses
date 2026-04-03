@@ -1330,7 +1330,7 @@ func (s *Server) handleGetContext(
 				}
 				if failurePatternMatchesEntity(fp, entityLower) {
 					text := fp.Text
-					if age := relativeAge(fp.UpdatedAt); age != "" {
+					if age := relativeAge(fp.LastRecordCreatedAt); age != "" {
 						text += " (" + age + ")"
 					}
 					dc.FailureWarnings = append(dc.FailureWarnings, text)

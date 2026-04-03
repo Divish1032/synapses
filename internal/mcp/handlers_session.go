@@ -1914,7 +1914,7 @@ func (s *Server) handleSessionInit(
 					// still relevant. "last seen 2 days ago" carries more weight
 					// than "last seen 8 months ago". Computed at delivery time to
 					// avoid staleness in the stored Text field.
-					if age := relativeAge(fp.UpdatedAt); age != "" {
+					if age := relativeAge(fp.LastRecordCreatedAt); age != "" {
 						text += " (" + age + ")"
 					}
 					if rs := []rune(text); len(rs) > maxWarningRunes {

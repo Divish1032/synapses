@@ -18,9 +18,9 @@ import (
 // ── failurePatternText ────────────────────────────────────────────────────────
 
 // TestFailurePatternText_withReason verifies the NL text format for a library
-// pattern when a reason is present.
+// pattern when a single reason is present.
 func TestFailurePatternText_withReason(t *testing.T) {
-	text := failurePatternText("jwt-go", "library", 3, "incompatible with existing middleware")
+	text := failurePatternText("jwt-go", "library", 3, []string{"incompatible with existing middleware"})
 	if !strings.Contains(text, "jwt-go") {
 		t.Errorf("text %q does not contain keyword", text)
 	}
@@ -39,9 +39,9 @@ func TestFailurePatternText_withReason(t *testing.T) {
 	}
 }
 
-// TestFailurePatternText_withoutReason verifies graceful handling of empty reason.
+// TestFailurePatternText_withoutReason verifies graceful handling of nil/empty reasons.
 func TestFailurePatternText_withoutReason(t *testing.T) {
-	text := failurePatternText("chi-router", "package", 2, "")
+	text := failurePatternText("chi-router", "package", 2, nil)
 	if text == "" {
 		t.Error("expected non-empty text")
 	}
@@ -53,13 +53,32 @@ func TestFailurePatternText_withoutReason(t *testing.T) {
 	}
 }
 
+// TestFailurePatternText_multipleReasons verifies that multiple distinct failure
+// reasons are joined with "; " and enclosed in brackets.
+func TestFailurePatternText_multipleReasons(t *testing.T) {
+	reasons := []string{"incompatible API", "causes memory leak"}
+	text := failurePatternText("fasthttp", "library", 4, reasons)
+	if !strings.Contains(text, "[") || !strings.Contains(text, "]") {
+		t.Errorf("multi-reason text %q should be bracketed", text)
+	}
+	if !strings.Contains(text, "incompatible API") {
+		t.Errorf("text %q missing first reason", text)
+	}
+	if !strings.Contains(text, "causes memory leak") {
+		t.Errorf("text %q missing second reason", text)
+	}
+	if !strings.Contains(text, "; ") {
+		t.Errorf("multi-reason text %q should join with '; '", text)
+	}
+}
+
 // TestFailurePatternText_singularPlural verifies "time" vs "times" grammar.
 func TestFailurePatternText_singularPlural(t *testing.T) {
-	one := failurePatternText("pkg", "package", 1, "error")
+	one := failurePatternText("pkg", "package", 1, []string{"error"})
 	if !strings.Contains(one, "1 time ") || strings.Contains(one, "1 times") {
 		t.Errorf("count 1 should use 'time', got %q", one)
 	}
-	two := failurePatternText("pkg", "package", 2, "error")
+	two := failurePatternText("pkg", "package", 2, []string{"error"})
 	if !strings.Contains(two, "2 times") {
 		t.Errorf("count 2 should use 'times', got %q", two)
 	}
@@ -68,7 +87,7 @@ func TestFailurePatternText_singularPlural(t *testing.T) {
 // TestFailurePatternText_errorPatternPhrasing verifies that error_pattern
 // entries use "caused N approach(es) to fail" instead of "was tried and abandoned".
 func TestFailurePatternText_errorPatternPhrasing(t *testing.T) {
-	text := failurePatternText("nil-pointer-dereference", "error_pattern", 3, "accessing nil user struct")
+	text := failurePatternText("nil-pointer-dereference", "error_pattern", 3, []string{"accessing nil user struct"})
 	if strings.Contains(text, "tried") || strings.Contains(text, "abandoned") {
 		t.Errorf("error_pattern text should not say 'tried/abandoned', got %q", text)
 	}
@@ -88,7 +107,7 @@ func TestFailurePatternText_errorPatternPhrasing(t *testing.T) {
 
 // TestFailurePatternText_errorPatternNoReason verifies error_pattern with empty reason.
 func TestFailurePatternText_errorPatternNoReason(t *testing.T) {
-	text := failurePatternText("connection-refused", "error_pattern", 2, "")
+	text := failurePatternText("connection-refused", "error_pattern", 2, nil)
 	if text == "" {
 		t.Error("expected non-empty text")
 	}

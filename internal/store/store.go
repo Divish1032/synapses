@@ -1074,6 +1074,9 @@ func Open(path string) (*Store, error) {
 			updated_at       INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fp_project_conf ON extracted_failure_patterns(project_id, confidence DESC)`,
+		// Sprint 29.4 post-audit: add last_record_created_at for accurate recency.
+		// ALTER TABLE is idempotent via isDupColumnErr.
+		`ALTER TABLE extracted_failure_patterns ADD COLUMN last_record_created_at INTEGER NOT NULL DEFAULT 0`,
 		// Sprint 29.6: User preference tracking — materialized user preferences
 		// promoted from manual project-tier memories by the user preference engine.
 		// A preference is created when the same normalized phrase appears in ≥ 2

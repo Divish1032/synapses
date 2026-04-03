@@ -265,17 +265,33 @@ func runFailurePatternExtraction(st *store.Store, projectID string) (int, error)
 		sampleApproach := truncate(sample.Approach, 200)
 		sampleReason := truncate(sample.FailureReason, 200)
 
-		text := failurePatternText(keyword, m.patternType, count, sampleReason)
+		// Collect all unique failure reasons across contributing records.
+		// Agents benefit from seeing the full spread of failure modes, not
+		// just one sample — especially when a keyword appears 3-5 times with
+		// different root causes.
+		reasonsSeen := make(map[string]bool)
+		var allReasons []string
+		for _, rec := range m.records {
+			r := strings.TrimSpace(rec.FailureReason)
+			if r == "" || reasonsSeen[r] {
+				continue
+			}
+			reasonsSeen[r] = true
+			allReasons = append(allReasons, r)
+		}
+
+		text := failurePatternText(keyword, m.patternType, count, allReasons)
 		fp := store.FailurePattern{
-			ID:              store.FailurePatternID(projectID, keyword),
-			ProjectID:       projectID,
-			Keyword:         keyword,
-			PatternType:     m.patternType,
-			OccurrenceCount: count,
-			SampleApproach:  sampleApproach,
-			SampleReason:    sampleReason,
-			Confidence:      failurePatternConfidence(count),
-			Text:            text,
+			ID:                  store.FailurePatternID(projectID, keyword),
+			ProjectID:           projectID,
+			Keyword:             keyword,
+			PatternType:         m.patternType,
+			OccurrenceCount:     count,
+			SampleApproach:      sampleApproach,
+			SampleReason:        sampleReason,
+			Confidence:          failurePatternConfidence(count),
+			Text:                text,
+			LastRecordCreatedAt: sample.CreatedAt,
 		}
 		if err := st.UpsertFailurePattern(fp); err != nil {
 			return total, fmt.Errorf("failure pattern extraction: upsert %q: %w", keyword, err)
@@ -365,29 +381,49 @@ func classifyLibraryType(tok string) string {
 // pattern. The phrasing is adapted to the pattern type so each category reads
 // naturally:
 //
-//   - library / package / function: "'jwt-go' was tried 3 times and abandoned: reason."
+//   - library / package / function: "'jwt-go' was tried 3 times and abandoned: [reason A; reason B]."
 //   - error_pattern:                "'nil-pointer-dereference' caused 3 approaches to fail: reason."
-func failurePatternText(keyword, patternType string, count int, reason string) string {
+//
+// reasons is the full set of distinct failure reasons across all contributing
+// records. Multiple reasons are joined with "; " so agents see the full spread
+// of failure modes rather than a single sample.
+func failurePatternText(keyword, patternType string, count int, reasons []string) string {
 	times := "times"
 	if count == 1 {
 		times = "time"
 	}
-	r := strings.TrimRight(strings.TrimSpace(reason), ".")
+
+	// Build reason string: trim trailing punctuation, join multiples.
+	var reasonStr string
+	if len(reasons) == 1 {
+		reasonStr = strings.TrimRight(strings.TrimSpace(reasons[0]), ".")
+	} else if len(reasons) > 1 {
+		parts := make([]string, 0, len(reasons))
+		for _, r := range reasons {
+			r = strings.TrimRight(strings.TrimSpace(r), ".")
+			if r != "" {
+				parts = append(parts, r)
+			}
+		}
+		if len(parts) > 0 {
+			reasonStr = "[" + strings.Join(parts, "; ") + "]"
+		}
+	}
 
 	if patternType == "error_pattern" {
 		// "Was tried and abandoned" is semantically wrong for runtime errors —
 		// agents don't try nil pointer dereferences, they encounter them.
-		if r == "" {
+		if reasonStr == "" {
 			return fmt.Sprintf("'%s' caused %d %s to fail.", keyword, count, times)
 		}
-		return fmt.Sprintf("'%s' caused %d approach(es) to fail: %s.", keyword, count, r)
+		return fmt.Sprintf("'%s' caused %d approach(es) to fail: %s.", keyword, count, reasonStr)
 	}
 
 	// library, package, function — all represent something the agent actively tried.
-	if r == "" {
+	if reasonStr == "" {
 		return fmt.Sprintf("'%s' was tried %d %s and abandoned.", keyword, count, times)
 	}
-	return fmt.Sprintf("'%s' was tried %d %s and abandoned: %s.", keyword, count, times, r)
+	return fmt.Sprintf("'%s' was tried %d %s and abandoned: %s.", keyword, count, times, reasonStr)
 }
 
 // failurePatternConfidence maps occurrence count to a confidence score.

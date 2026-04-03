@@ -1132,6 +1132,48 @@ func (s *Server) handleRecall(
 		}
 	}
 
+	// Sprint 29.4: surface failure patterns relevant to the search query.
+	// When an agent recalls knowledge about a topic, if that topic has a
+	// documented failure history, surface it proactively. Patterns are matched
+	// by tokenising the query and checking against each pattern's keyword.
+	// Capped at 3 to avoid noise when the query matches many broad keywords.
+	if s.store != nil && s.projectID != "" && query != "" {
+		if patterns, err := s.store.GetProjectFailurePatterns(s.projectID, 0.6); err == nil && len(patterns) > 0 {
+			queryLower := strings.ToLower(query)
+			queryTokens := strings.FieldsFunc(queryLower, func(r rune) bool {
+				return r == ' ' || r == '/' || r == '.' || r == '-' || r == '_'
+			})
+			const maxRecallWarnings = 3
+			var fpWarnings []string
+			for _, fp := range patterns {
+				if len(fpWarnings) >= maxRecallWarnings {
+					break
+				}
+				// Match against full query (contains) or any individual token (exact).
+				kw := fp.Keyword
+				matched := strings.Contains(queryLower, kw)
+				if !matched {
+					for _, tok := range queryTokens {
+						if tok == kw {
+							matched = true
+							break
+						}
+					}
+				}
+				if matched {
+					text := fp.Text
+					if age := relativeAge(fp.LastRecordCreatedAt); age != "" {
+						text += " (" + age + ")"
+					}
+					fpWarnings = append(fpWarnings, text)
+				}
+			}
+			if len(fpWarnings) > 0 {
+				resp["failure_patterns"] = fpWarnings
+			}
+		}
+	}
+
 	// Record recall footprint for recall-to-action quality correlation.
 	fpSessID := s.getSynapseSessionID(SessionIDFromContext(ctx))
 	if fpSessID != "" && (len(memories) > 0 || len(episodes) > 0) {

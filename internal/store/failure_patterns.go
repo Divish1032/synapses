@@ -17,17 +17,18 @@ import (
 // warnings — natural language only, no code snippets.
 type FailurePattern struct {
 	// ID is the deterministic primary key: projectID + "::" + keyword.
-	ID              string  `json:"id"`
-	ProjectID       string  `json:"project_id"`
-	Keyword         string  `json:"keyword"`          // extracted keyword (e.g., "jwt-go", "fasthttp")
-	PatternType     string  `json:"pattern_type"`     // "library" | "package"
-	OccurrenceCount int     `json:"occurrence_count"` // number of rejected_approach records matching
-	SampleApproach  string  `json:"sample_approach"`  // most recent approach text (for NL generation)
-	SampleReason    string  `json:"sample_reason"`    // most recent failure_reason (for NL generation)
-	Confidence      float64 `json:"confidence"`       // 0.0–1.0; grows with occurrence_count
-	Text            string  `json:"text"`             // rendered natural-language warning
-	CreatedAt       int64   `json:"created_at"`       // Unix seconds — set on first insert
-	UpdatedAt       int64   `json:"updated_at"`       // Unix seconds — set on every upsert
+	ID                   string  `json:"id"`
+	ProjectID            string  `json:"project_id"`
+	Keyword              string  `json:"keyword"`                    // extracted keyword (e.g., "jwt-go", "fasthttp")
+	PatternType          string  `json:"pattern_type"`               // "library" | "package" | "function" | "error_pattern"
+	OccurrenceCount      int     `json:"occurrence_count"`           // number of rejected_approach records matching
+	SampleApproach       string  `json:"sample_approach"`            // most recent approach text (for NL generation)
+	SampleReason         string  `json:"sample_reason"`              // most recent failure_reason (for NL generation)
+	Confidence           float64 `json:"confidence"`                 // 0.0–1.0; grows with occurrence_count
+	Text                 string  `json:"text"`                       // rendered natural-language warning
+	LastRecordCreatedAt  int64   `json:"last_record_created_at"`     // created_at of the most recent contributing rejected_approach
+	CreatedAt            int64   `json:"created_at"`                 // Unix seconds — set on first insert
+	UpdatedAt            int64   `json:"updated_at"`                 // Unix seconds — set on every upsert
 }
 
 // FailurePatternID returns the deterministic primary key for a failure pattern.
@@ -69,18 +70,20 @@ func (s *Store) UpsertFailurePattern(fp FailurePattern) error {
 	_, err := s.knowledgeDB.Exec(`
 		INSERT INTO extracted_failure_patterns
 		    (id, project_id, keyword, pattern_type, occurrence_count,
-		     sample_approach, sample_reason, confidence, text, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		     sample_approach, sample_reason, confidence, text,
+		     last_record_created_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-		    occurrence_count = excluded.occurrence_count,
-		    sample_approach  = excluded.sample_approach,
-		    sample_reason    = excluded.sample_reason,
-		    confidence       = excluded.confidence,
-		    text             = excluded.text,
-		    updated_at       = excluded.updated_at`,
+		    occurrence_count         = excluded.occurrence_count,
+		    sample_approach          = excluded.sample_approach,
+		    sample_reason            = excluded.sample_reason,
+		    confidence               = excluded.confidence,
+		    text                     = excluded.text,
+		    last_record_created_at   = excluded.last_record_created_at,
+		    updated_at               = excluded.updated_at`,
 		fp.ID, fp.ProjectID, fp.Keyword, fp.PatternType, fp.OccurrenceCount,
 		fp.SampleApproach, fp.SampleReason, fp.Confidence, fp.Text,
-		fp.CreatedAt, fp.UpdatedAt,
+		fp.LastRecordCreatedAt, fp.CreatedAt, fp.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert failure pattern: %w", err)
@@ -102,7 +105,8 @@ func (s *Store) GetProjectFailurePatterns(projectID string, minConfidence float6
 	}
 	rows, err := s.knowledgeDB.Query(`
 		SELECT id, project_id, keyword, pattern_type, occurrence_count,
-		       sample_approach, sample_reason, confidence, text, created_at, updated_at
+		       sample_approach, sample_reason, confidence, text,
+		       last_record_created_at, created_at, updated_at
 		FROM extracted_failure_patterns
 		WHERE project_id = ? AND confidence >= ?
 		ORDER BY confidence DESC, occurrence_count DESC`,
@@ -126,7 +130,7 @@ func scanFailurePattern(row failurePatternScanner) (*FailurePattern, error) {
 	err := row.Scan(
 		&fp.ID, &fp.ProjectID, &fp.Keyword, &fp.PatternType, &fp.OccurrenceCount,
 		&fp.SampleApproach, &fp.SampleReason, &fp.Confidence, &fp.Text,
-		&fp.CreatedAt, &fp.UpdatedAt,
+		&fp.LastRecordCreatedAt, &fp.CreatedAt, &fp.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

@@ -1826,6 +1826,34 @@ func (s *Server) handleValidatePreWrite(
 		len(fileResults), len(allSecFindings), critCount, highCount,
 		len(allArchViolations), summaryAction, status)
 
+	// Sprint 29.4: surface failure patterns relevant to the planned change.
+	// Matches patterns against the description so the agent gets a warning at
+	// the moment of planning — before the first line of code is written.
+	if s.store != nil && s.projectID != "" && description != "" {
+		if patterns, err := s.store.GetProjectFailurePatterns(s.projectID, 0.6); err == nil && len(patterns) > 0 {
+			descLower := strings.ToLower(description)
+			const maxPreWriteWarnings = 3
+			var faWarnings []string
+			for _, fp := range patterns {
+				if len(faWarnings) >= maxPreWriteWarnings {
+					break
+				}
+				kw := fp.Keyword
+				// Match keyword in description text.
+				if strings.Contains(descLower, kw) {
+					text := fp.Text
+					if age := relativeAge(fp.LastRecordCreatedAt); age != "" {
+						text += " (" + age + ")"
+					}
+					faWarnings = append(faWarnings, text)
+				}
+			}
+			if len(faWarnings) > 0 {
+				result["failure_avoidance"] = faWarnings
+			}
+		}
+	}
+
 	return jsonResult(result)
 }
 
