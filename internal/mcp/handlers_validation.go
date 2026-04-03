@@ -843,10 +843,14 @@ func (s *Server) handleVerifyImplementation(
 		// Sprint 26.7: security pattern findings (CheckFile) + Sprint 26.11: unknown import detection (CheckImports).
 		// Sprint 27.3: before/after comparison to attribute findings as new, existing, or fixed.
 		// Sprint 27.5: norm-based violation detection (CheckNorms) — fires for observed convention deviations.
+		// Sprint 28.5: LSP-triggered re-verification upgrades MEDIUM→HIGH / LOW→MEDIUM when LSP confirms entity.
 		if s.graph != nil && s.patternEngine != nil {
 			afterFindings := s.patternEngine.CheckFile(s.graph, absFile, fileContent)
 			afterFindings = append(afterFindings, s.patternEngine.CheckImports(s.graph, absFile)...)
 			afterFindings = append(afterFindings, s.patternEngine.CheckNorms(s.graph, absFile)...)
+			if s.lspManager != nil {
+				afterFindings = security.NewLSPEnricher(s.lspManager).Enrich(ctx, afterFindings, s.graph)
+			}
 			r.SecurityFindings = afterFindings
 			totalSecurityFindings += len(afterFindings)
 

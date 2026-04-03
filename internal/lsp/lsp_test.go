@@ -446,6 +446,79 @@ func TestManager_RegisterDoesNotHoldLockDuringClose(t *testing.T) {
 	<-done
 }
 
+// ── Manager.VerifySymbol (Sprint 28.5) ──────────────────────────────────────
+
+func TestManager_VerifySymbol_NoVerifier_ReturnsFalse(t *testing.T) {
+	// No verifier registered → NoOp → ConfidenceNone → false.
+	m := lsp.NewManager(lsp.Options{})
+	ok, err := m.VerifySymbol(context.Background(), "go", "/repo/handler.go", 44, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("want false when no verifier registered, got true")
+	}
+}
+
+func TestManager_VerifySymbol_Confirmed_ReturnsTrue(t *testing.T) {
+	// stubVerifier returns CallerInfo{File: pos.File, Line: pos.Line} — same as queried.
+	stub := &stubVerifier{lang: lsp.LanguageGo, confidence: lsp.ConfidenceHigh}
+	m := lsp.NewManager(lsp.Options{})
+	m.Register(stub)
+
+	ok, err := m.VerifySymbol(context.Background(), "go", "/repo/handler.go", 44, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("want true when LSP confirms same file:line, got false")
+	}
+}
+
+func TestManager_VerifySymbol_DifferentFile_ReturnsFalse(t *testing.T) {
+	// Verifier that returns a different file than queried.
+	stub := &differentFileVerifier{lang: lsp.LanguageGo}
+	m := lsp.NewManager(lsp.Options{})
+	m.Register(stub)
+
+	ok, err := m.VerifySymbol(context.Background(), "go", "/repo/handler.go", 44, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("want false when LSP resolves to different file, got true")
+	}
+}
+
+func TestManager_VerifySymbol_EmptyFile_ReturnsFalse(t *testing.T) {
+	stub := &stubVerifier{lang: lsp.LanguageGo, confidence: lsp.ConfidenceHigh}
+	m := lsp.NewManager(lsp.Options{})
+	m.Register(stub)
+
+	ok, err := m.VerifySymbol(context.Background(), "go", "", 0, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("want false for empty file path, got true")
+	}
+}
+
+func TestManager_VerifySymbol_ConfidenceNone_ReturnsFalse(t *testing.T) {
+	// Verifier returns ConfidenceNone (same file, but unreliable).
+	stub := &stubVerifier{lang: lsp.LanguageGo, confidence: lsp.ConfidenceNone}
+	m := lsp.NewManager(lsp.Options{})
+	m.Register(stub)
+
+	ok, err := m.VerifySymbol(context.Background(), "go", "/repo/handler.go", 10, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Error("want false when verifier returns ConfidenceNone, got true")
+	}
+}
+
 // ── stubVerifier — test double ────────────────────────────────────────────────
 
 type stubVerifier struct {
@@ -476,3 +549,17 @@ func (s *slowCloseVerifier) ResolveEdge(_ context.Context, from, to graph.NodeID
 
 func (s *slowCloseVerifier) Language() lsp.Language { return s.lang }
 func (s *slowCloseVerifier) Close() error           { time.Sleep(s.closeSleep); return nil }
+
+// differentFileVerifier returns a definition in a different file than queried.
+// Used to test that VerifySymbol returns false when the resolved location differs.
+type differentFileVerifier struct {
+	lang lsp.Language
+}
+
+func (d *differentFileVerifier) ResolveEdge(_ context.Context, from, to graph.NodeID, pos lsp.CallPosition) (*lsp.VerifiedEdge, error) {
+	callee := lsp.CalleeInfo{NodeID: to, File: "/other/file.go", Line: pos.Line}
+	return lsp.NewVerifiedEdge(from, to, callee, lsp.ConfidenceHigh), nil
+}
+
+func (d *differentFileVerifier) Language() lsp.Language { return d.lang }
+func (d *differentFileVerifier) Close() error           { return nil }

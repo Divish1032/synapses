@@ -27,6 +27,7 @@ import (
 	"github.com/SynapsesOS/synapses/internal/federation"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
+	"github.com/SynapsesOS/synapses/internal/lsp"
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	"github.com/SynapsesOS/synapses/internal/scout"
 	"github.com/SynapsesOS/synapses/internal/security"
@@ -137,6 +138,7 @@ type Server struct {
 	goalReinforcer     *goalReinforcer        // Sprint 25.6: per-session response counter for goal+convention reminders
 	findingQueue       *findingQueue          // Sprint 27.10: queued security findings for piggyback delivery
 	patternEngine      *security.Engine       // Sprint 26.7: security pattern matching engine
+	lspManager         *lsp.Manager           // Sprint 28.5: LSP-triggered re-verification of MEDIUM/LOW findings
 	// appSettings mirrors relevant fields from ~/.synapses/app_settings.json.
 	// Loaded once at startup. When false, the corresponding data collection is skipped.
 	logToolCalls     bool // controls RecordToolCall recording (default: true)
@@ -1240,6 +1242,14 @@ func (s *Server) SetMemoryEmbedder(e embed.Embedder) {
 // SetUpdateChecker sets the function that returns the pending update version.
 func (s *Server) SetUpdateChecker(fn func() string) {
 	s.updateChecker = fn
+}
+
+// SetLSPManager wires in a fully-configured LSP Manager for Sprint 28.5
+// LSP-triggered re-verification. When set, MEDIUM and LOW confidence security
+// findings are upgraded after CheckFile if LSP confirms the entity's identity.
+// If never called (or called with nil), LSP enrichment is silently skipped.
+func (s *Server) SetLSPManager(m *lsp.Manager) {
+	s.lspManager = m
 }
 
 // ServeStdio starts the MCP server on stdin/stdout. This call blocks until

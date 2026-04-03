@@ -225,6 +225,51 @@ func (m *Manager) toCache(pos CallPosition, edge *VerifiedEdge) {
 	}
 }
 
+// VerifySymbol asks the LSP to resolve the symbol at the given source position
+// and reports whether the definition is confirmed to be at that same location.
+//
+// This is the primary entry point for Sprint 28.5 LSP-triggered re-verification.
+// The security enricher calls it to upgrade MEDIUM-confidence findings (name-based
+// tree-sitter matches) to HIGH when LSP confirms the entity identity via the type
+// system, and to upgrade LOW-confidence findings (heuristic BFS) to MEDIUM.
+//
+// lang is the language string ("go", "typescript"). file is an absolute path.
+// line and col are zero-indexed (LSP specification). A col of 0 is safe for
+// most definitions — gopls and tsserver resolve function names from the start of
+// the function keyword line.
+//
+// Returns (true, nil) when LSP resolves the symbol and the definition points to
+// the same file and line as queried. Returns (false, nil) when LSP resolves to a
+// different location, cannot resolve, or no verifier is registered for lang.
+// Returns (false, err) only for transient LSP failures (process crash, timeout).
+func (m *Manager) VerifySymbol(ctx context.Context, lang string, file string, line, col int) (bool, error) {
+	if file == "" {
+		return false, nil
+	}
+	pos := CallPosition{File: file, Line: line, Col: col}
+	// Use empty NodeIDs: we are not resolving a named graph edge, just checking
+	// whether LSP agrees a symbol exists at this exact source position.
+	edge, err := m.Get(Language(lang)).ResolveEdge(ctx, graph.NodeID(""), graph.NodeID(""), pos)
+	if err != nil {
+		return false, err
+	}
+
+	// Update idle-timeout tracking so TrimIdle does not reclaim a verifier that is
+	// actively serving VerifySymbol calls. This mirrors the tracking done by
+	// Manager.ResolveEdge, which VerifySymbol bypasses to avoid cache pollution
+	// (the empty NodeIDs would corrupt cached VerifiedEdge entries used by real
+	// edge-resolution callers).
+	m.lastUsedMu.Lock()
+	m.lastUsed[Language(lang)] = time.Now()
+	m.lastUsedMu.Unlock()
+
+	if edge.Confidence < ConfidenceMedium {
+		return false, nil // LSP unavailable or could not resolve
+	}
+	// Confirmed: LSP returned a definition at the same file and zero-indexed line.
+	return edge.Callee.File == file && edge.Callee.Line == line, nil
+}
+
 // PurgeExpired removes all expired cache entries. Can be called periodically
 // by background goroutines (e.g. watcher's maintenance tick). Safe to call
 // at any time; if never called, expired entries are lazily evicted on read.
