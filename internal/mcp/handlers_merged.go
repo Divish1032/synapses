@@ -128,7 +128,14 @@ func (s *Server) handleMemoryDispatch(
 	}
 	switch action {
 	case "save":
-		return s.handleRemember(ctx, req)
+		result, err := s.handleRemember(ctx, req)
+		// Sprint 29.6: detect preference signals in the decision text and record
+		// user_preference session observations. Fire-and-forget — errors silently
+		// dropped so they never affect the memory save result.
+		if err == nil && result != nil && !result.IsError {
+			s.maybeRecordUserPrefObs(ctx, req)
+		}
+		return result, err
 	case "search":
 		return s.handleRecall(ctx, req)
 	case "list":

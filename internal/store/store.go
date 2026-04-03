@@ -1074,6 +1074,23 @@ func Open(path string) (*Store, error) {
 			updated_at       INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fp_project_conf ON extracted_failure_patterns(project_id, confidence DESC)`,
+		// Sprint 29.6: User preference tracking — materialized user preferences
+		// promoted from manual project-tier memories by the user preference engine.
+		// A preference is created when the same normalized phrase appears in ≥ 2
+		// memory records for a project. Upserted at end_session; delivered in
+		// _briefing.preferences at session_init.
+		// ID is deterministic: project_id || '::' || pref_key.
+		`CREATE TABLE IF NOT EXISTS user_preferences (
+			id               TEXT PRIMARY KEY,
+			project_id       TEXT NOT NULL,
+			pref_key         TEXT NOT NULL,
+			text             TEXT NOT NULL DEFAULT '',
+			occurrence_count INTEGER NOT NULL DEFAULT 0,
+			confidence       REAL    NOT NULL DEFAULT 0.0,
+			created_at       INTEGER NOT NULL DEFAULT 0,
+			updated_at       INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_pref_project ON user_preferences(project_id, confidence DESC)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()

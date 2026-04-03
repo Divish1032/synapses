@@ -30,6 +30,7 @@ type endSessionResult struct {
 	ObservationsSaved       int                    `json:"observations_saved,omitempty"`
 	ConventionsExtracted    int                    `json:"conventions_extracted,omitempty"`
 	FailurePatternsExtracted int                   `json:"failure_patterns_extracted,omitempty"`
+	UserPrefsExtracted       int                   `json:"user_prefs_extracted,omitempty"`
 	Retrospective        *store.ToolCallSummary `json:"retrospective,omitempty"`
 	EffectivenessReport *EffectivenessReport   `json:"effectiveness_report,omitempty"`
 }
@@ -528,6 +529,18 @@ func (s *Server) handleEndSession(
 		logutil.Warn("synapses: failure pattern extraction: %v\n", err)
 	} else {
 		result.FailurePatternsExtracted = n
+	}
+
+	// ── Sprint 29.6: User preference extraction ──
+	// Mine manual project-tier memories for recurring preference signals
+	// (phrases like "User prefers X", "User wants Y"). Promotes phrases seen in
+	// ≥ MinOccurrencesForUserPref memory records to UserPreference rows.
+	// Delivered at session_init in _briefing.preferences. Tier 1 — no special
+	// agent action required beyond saving memories about user preferences.
+	if n, err := runUserPrefExtraction(s.store, s.projectID); err != nil {
+		logutil.Warn("synapses: user pref extraction: %v\n", err)
+	} else {
+		result.UserPrefsExtracted = n
 	}
 
 	// ── D4: Archivist session memory synthesis ──

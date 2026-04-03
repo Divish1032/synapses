@@ -2653,3 +2653,124 @@ func TestSessionInit_LearnedConventions_CappedAtThree(t *testing.T) {
 		t.Errorf("expected at least 1 learned convention in briefing, got 0: %v", convs)
 	}
 }
+
+// ── _briefing.preferences (Sprint 29.6) ───────────────────────────────────────
+
+// TestSessionInit_UserPreferences_InBriefing verifies that promoted user
+// preferences appear in _briefing.preferences at session_init.
+func TestSessionInit_UserPreferences_InBriefing(t *testing.T) {
+	st := openMCPTestStore(t)
+	const projID = "proj-session-init-pref"
+	prefKey := "prefers verbose commit messages for every change"
+
+	// Insert MinOccurrencesForUserPref observations for the preference key.
+	for i := 0; i < MinOccurrencesForUserPref; i++ {
+		_, err := st.InsertSessionObservation(store.SessionObservation{
+			SessionID:  fmt.Sprintf("pref-sess-%d", i),
+			ProjectID:  projID,
+			AgentID:    "implementer",
+			Category:   store.ObsCategoryUserPref,
+			Key:        prefKey,
+			Confidence: 0.5,
+		})
+		if err != nil {
+			t.Fatalf("InsertSessionObservation: %v", err)
+		}
+	}
+
+	promoted, err := runUserPrefExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runUserPrefExtraction: %v", err)
+	}
+	if promoted == 0 {
+		t.Fatal("runUserPrefExtraction promoted 0 preferences; expected at least 1")
+	}
+
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	srv := New(g, cfg, st)
+	srv.SetProjectID(projID)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "pref-delivery-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	prefs, ok := briefing["preferences"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.preferences must be a slice, got %T", briefing["preferences"])
+	}
+	if len(prefs) == 0 {
+		t.Fatal("_briefing.preferences must contain at least 1 preference")
+	}
+	// The first preference should contain a capitalized version of the key.
+	first, ok := prefs[0].(string)
+	if !ok {
+		t.Fatalf("_briefing.preferences[0] must be a string, got %T", prefs[0])
+	}
+	if !strings.Contains(strings.ToLower(first), "verbose commit") {
+		t.Errorf("_briefing.preferences[0] should contain pref key text, got %q", first)
+	}
+}
+
+// TestSessionInit_UserPreferences_BelowThreshold_NotDelivered verifies that
+// preferences below MinOccurrencesForUserPref do NOT appear in the briefing.
+func TestSessionInit_UserPreferences_BelowThreshold_NotDelivered(t *testing.T) {
+	st := openMCPTestStore(t)
+	const projID = "proj-pref-below"
+
+	// Insert only 1 observation — below the threshold of 2.
+	_, err := st.InsertSessionObservation(store.SessionObservation{
+		SessionID:  "pref-single-sess",
+		ProjectID:  projID,
+		AgentID:    "implementer",
+		Category:   store.ObsCategoryUserPref,
+		Key:        "prefers bundled prs",
+		Confidence: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("InsertSessionObservation: %v", err)
+	}
+
+	promoted, err := runUserPrefExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runUserPrefExtraction: %v", err)
+	}
+	if promoted != 0 {
+		t.Fatalf("expected 0 promotions below threshold, got %d", promoted)
+	}
+
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	srv := New(g, cfg, st)
+	srv.SetProjectID(projID)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "pref-below-agent",
+	}))
+	m := mustResult(t, res, err)
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+	// preferences key must be absent (no prefs below threshold).
+	if _, exists := briefing["preferences"]; exists {
+		t.Errorf("_briefing.preferences should not be present below threshold, but it was: %v",
+			briefing["preferences"])
+	}
+}

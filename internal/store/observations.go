@@ -9,11 +9,12 @@ import (
 // ObservationCategory classifies what type of signal a session observation represents.
 // Used by the convention extraction engine (Sprint 29.2) to group observations.
 const (
-	ObsCategoryToolUsage     = "tool_usage"     // Which tools were used and how heavily
-	ObsCategoryTestingPattern = "testing_pattern" // Testing conventions observed
-	ObsCategoryLibraryUsage  = "library_usage"   // Libraries/frameworks detected in touched files
+	ObsCategoryToolUsage       = "tool_usage"       // Which tools were used and how heavily
+	ObsCategoryTestingPattern  = "testing_pattern"  // Testing conventions observed
+	ObsCategoryLibraryUsage    = "library_usage"    // Libraries/frameworks detected in touched files
 	ObsCategoryApproachOutcome = "approach_outcome" // Session success/failure signal
-	ObsCategoryFilePattern   = "file_pattern"    // Architectural layer / directory patterns
+	ObsCategoryFilePattern     = "file_pattern"     // Architectural layer / directory patterns
+	ObsCategoryUserPref        = "user_preference"  // User preference signals from memory saves (Sprint 29.6)
 )
 
 // MaxSessionObservationsRows is the per-project row cap for session_observations.
