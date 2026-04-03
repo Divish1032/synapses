@@ -1076,6 +1076,25 @@ func TestTSFrameworks_TS_Nextjs_MissingRateLimit_NoFire_UpstashRatelimit(t *test
 	}
 }
 
+func TestTSFrameworks_TS_Nextjs_MissingRateLimit_NoFire_UpstashRatelimitClass(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// @upstash/ratelimit exports `Ratelimit` (capital R, lowercase l) as its
+	// class name. `new Ratelimit({...})` is the idiomatic usage and must suppress.
+	addFileWithImports(g, "/project/app/api/users/route.ts", "@upstash/ratelimit")
+	addFunctionWithCalls(g, "/project/app/api/users/route.ts", "GET", "Ratelimit", "NextResponse")
+
+	violations := e.CheckFile(g, "/project/app/api/users/route.ts", nil)
+	if findViolation(violations, "ts-nextjs-missing-rate-limit") != nil {
+		t.Error("expected no violation: Ratelimit (actual @upstash/ratelimit class) must match Ratelimit* pattern")
+	}
+}
+
 func TestTSFrameworks_TS_Nextjs_MissingRateLimit_NoFire_RateLimitCall(t *testing.T) {
 	ps, err := LoadBuiltin()
 	if err != nil {

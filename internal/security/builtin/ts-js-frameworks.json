@@ -286,6 +286,7 @@
         "framework_identifiers": [],
         "annotation_patterns": [
           "rateLimit*", "RateLimit*",
+          "Ratelimit*",
           "rateLimiter*", "RateLimiter*",
           "Throttle*", "throttle*",
           "upstashRatelimit*", "createRatelimit*",
@@ -620,6 +621,7 @@
         "framework_identifiers": [],
         "annotation_patterns": [
           "rateLimit*", "RateLimit*",
+          "Ratelimit*",
           "rateLimiter*", "RateLimiter*",
           "Throttle*", "throttle*",
           "upstashRatelimit*", "createRatelimit*",
