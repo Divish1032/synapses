@@ -358,6 +358,68 @@ func TestCorrectnessAndCompleteness(t *testing.T) {
 	}
 }
 
+func TestAggregateGraphResults_LSPSummaryAndDelta(t *testing.T) {
+	// Two find_callers tests with LSP data, one without (find_imports).
+	// Baseline (LSP-covered subset): F1 = avg(0.5, 0.8) = 0.65
+	// LSP:                           F1 = avg(0.7, 0.9) = 0.80
+	// Delta:                         F1 delta = 0.80 - 0.65 = 0.15
+	results := []GraphBenchTestResult{
+		{
+			Repo: "a/b", Language: "go", QueryType: "find_callers", Query: "Foo",
+			Precision: 0.5, Recall: 0.5, F1: 0.5,
+			LSPNames: []string{"bar"}, LSPPrec: 0.7, LSPRecall: 0.7, LSPF1: 0.7,
+		},
+		{
+			Repo: "a/b", Language: "go", QueryType: "find_callees", Query: "Bar",
+			Precision: 0.8, Recall: 0.8, F1: 0.8,
+			LSPNames: []string{"baz"}, LSPPrec: 0.9, LSPRecall: 0.9, LSPF1: 0.9,
+		},
+		{
+			Repo: "a/b", Language: "go", QueryType: "find_imports", Query: "main.go",
+			Precision: 1.0, Recall: 1.0, F1: 1.0,
+			// No LSP data for find_imports
+		},
+	}
+	suites := []GraphBenchSuite{{Repo: "a/b", Language: "go"}}
+
+	gbr := aggregateGraphResults(results, suites, nil)
+
+	if gbr.LSPSummary == nil {
+		t.Fatal("expected LSPSummary to be set when LSP data exists")
+	}
+	if gbr.LSPDelta == nil {
+		t.Fatal("expected LSPDelta to be set when LSP data exists")
+	}
+
+	// LSP avg F1 = (0.7+0.9)/2 = 0.80
+	if diff := gbr.LSPSummary.F1 - 0.80; diff > 0.01 || diff < -0.01 {
+		t.Errorf("LSPSummary.F1 = %.3f, want 0.800", gbr.LSPSummary.F1)
+	}
+	// Baseline avg F1 on LSP tests = (0.5+0.8)/2 = 0.65
+	// Delta = 0.80 - 0.65 = 0.15
+	if diff := gbr.LSPDelta.F1 - 0.15; diff > 0.02 || diff < -0.02 {
+		t.Errorf("LSPDelta.F1 = %.3f, want 0.150", gbr.LSPDelta.F1)
+	}
+}
+
+func TestAggregateGraphResults_NoLSPData_NilSummary(t *testing.T) {
+	// No results have LSPNames set → LSPSummary should be nil.
+	results := []GraphBenchTestResult{
+		{Repo: "a/b", Language: "go", QueryType: "find_callers", Query: "Foo",
+			Precision: 0.5, Recall: 0.5, F1: 0.5},
+	}
+	suites := []GraphBenchSuite{{Repo: "a/b", Language: "go"}}
+
+	gbr := aggregateGraphResults(results, suites, nil)
+
+	if gbr.LSPSummary != nil {
+		t.Errorf("expected nil LSPSummary when no LSP data, got %+v", gbr.LSPSummary)
+	}
+	if gbr.LSPDelta != nil {
+		t.Errorf("expected nil LSPDelta when no LSP data, got %+v", gbr.LSPDelta)
+	}
+}
+
 func TestLooksLikeFile_NewExtensions(t *testing.T) {
 	for _, ext := range []string{
 		"main.lua", "app.ex", "lib.hs", "parser.ml", "core.clj",
