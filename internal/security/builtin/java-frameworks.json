@@ -44,6 +44,11 @@
           "*/resource/*.java",
           "*/resources/*.java"
         ],
+        "global_suppression_identifiers": [
+          "org.springframework.security.config.annotation.web.builders.HttpSecurity",
+          "org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter",
+          "org.springframework.security.web.SecurityFilterChain"
+        ],
         "scope": "file"
       },
       "message": "Spring controller file {file} does not call any security annotation (@PreAuthorize, @Secured, @RolesAllowed). All endpoints in this file may be accessible without proper authorization checks. Apply @PreAuthorize(\"hasRole('ROLE')\") to each handler method, or add a class-level @Secured annotation. If global auth is enforced via SecurityFilterChain, add @PermitAll to intentionally public endpoints.",

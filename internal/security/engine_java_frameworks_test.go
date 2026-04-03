@@ -242,6 +242,108 @@ func TestJavaFrameworks_Spring_MissingAuth_ResourceNamedSpring_Fires(t *testing.
 	}
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Global suppression — SecurityFilterChain bean downgrades CRITICAL → MEDIUM
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestJavaFrameworks_Spring_MissingAuth_GlobalSuppression_DowngradesToMedium(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Controller without auth annotation — would normally be CRITICAL.
+	addFileWithImports(g, "/project/src/UserController.java", "org.springframework.web.bind.annotation")
+	addFunctionWithCalls(g, "/project/src/UserController.java", "getUser", "GetMapping")
+
+	// Separate config file with SecurityFilterChain — project has global auth.
+	addFileWithImports(g, "/project/src/config/SecurityConfig.java",
+		"org.springframework.security.config.annotation.web.builders.HttpSecurity",
+		"org.springframework.security.web.SecurityFilterChain",
+	)
+
+	violations := e.CheckFile(g, "/project/src/UserController.java", nil)
+	found := findViolation(violations, "java-spring-missing-auth")
+	if found == nil {
+		t.Fatal("expected java-spring-missing-auth violation (as MEDIUM), got none")
+	}
+	if found.Severity != SeverityMedium {
+		t.Errorf("severity = %s, want MEDIUM (downgraded from CRITICAL due to global SecurityFilterChain)", found.Severity)
+	}
+}
+
+func TestJavaFrameworks_Spring_MissingAuth_NoGlobalConfig_StaysCritical(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Controller without auth annotation, no SecurityFilterChain in project.
+	addFileWithImports(g, "/project/src/UserController.java", "org.springframework.web.bind.annotation")
+	addFunctionWithCalls(g, "/project/src/UserController.java", "getUser", "GetMapping")
+
+	violations := e.CheckFile(g, "/project/src/UserController.java", nil)
+	found := findViolation(violations, "java-spring-missing-auth")
+	if found == nil {
+		t.Fatal("expected java-spring-missing-auth violation, got none")
+	}
+	if found.Severity != SeverityCritical {
+		t.Errorf("severity = %s, want CRITICAL (no global config present)", found.Severity)
+	}
+}
+
+func TestJavaFrameworks_Spring_MissingAuth_GlobalSuppression_WithAnnotation_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Controller WITH auth annotation + global config — no violation at all.
+	addFileWithImports(g, "/project/src/UserController.java", "org.springframework.web.bind.annotation")
+	addFunctionWithCalls(g, "/project/src/UserController.java", "getUser", "GetMapping", "PreAuthorize")
+	addFileWithImports(g, "/project/src/config/SecurityConfig.java",
+		"org.springframework.security.config.annotation.web.builders.HttpSecurity",
+	)
+
+	violations := e.CheckFile(g, "/project/src/UserController.java", nil)
+	if findViolation(violations, "java-spring-missing-auth") != nil {
+		t.Error("expected no violation: PreAuthorize present even with global config")
+	}
+}
+
+func TestJavaFrameworks_JakartaEE_MissingAuth_GlobalConfigInProject_StaysCritical(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Jakarta EE resource without auth — no global_suppression_identifiers configured.
+	// Even if a Spring SecurityFilterChain exists in the project, Jakarta EE pattern
+	// must remain CRITICAL (container-level auth is not detectable via imports).
+	addFileWithImports(g, "/project/src/UserResource.java", "jakarta.ws.rs")
+	addFunctionWithCalls(g, "/project/src/UserResource.java", "getUser", "GET", "Path")
+	addFileWithImports(g, "/project/src/config/SecurityConfig.java",
+		"org.springframework.security.config.annotation.web.builders.HttpSecurity",
+	)
+
+	violations := e.CheckFile(g, "/project/src/UserResource.java", nil)
+	found := findViolation(violations, "java-jakartaee-missing-auth")
+	if found == nil {
+		t.Fatal("expected java-jakartaee-missing-auth violation, got none")
+	}
+	if found.Severity != SeverityCritical {
+		t.Errorf("severity = %s, want CRITICAL (Jakarta EE has no global suppression)", found.Severity)
+	}
+}
+
 func TestJavaFrameworks_Spring_MissingAuth_ApiPackage_NoViolation(t *testing.T) {
 	ps, err := LoadBuiltin()
 	if err != nil {

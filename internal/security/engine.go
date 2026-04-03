@@ -151,6 +151,20 @@ func (e *Engine) CheckFile(g *graph.Graph, filePath string, content []byte) []Vi
 			found = checkMissingMiddleware(fc, p, g)
 		case CheckTypeMissingAnnotation:
 			found = checkMissingAnnotation(fc, p)
+			// Global suppression: if any project file imports a known global-auth
+			// config identifier (e.g. Spring SecurityFilterChain), downgrade CRITICAL
+			// → MEDIUM. The project likely has auth enforced globally; we surface a
+			// MEDIUM to prompt coverage verification rather than blocking.
+			if len(found) > 0 && len(p.Detection.GlobalSuppressionIdentifiers) > 0 {
+				if projectImportsAny(g, p.Detection.GlobalSuppressionIdentifiers) {
+					for i := range found {
+						if found[i].Severity == SeverityCritical {
+							found[i].Severity = SeverityMedium
+							found[i].Message += " (Downgraded: global auth config detected in project — verify SecurityFilterChain or equivalent covers all controller paths.)"
+						}
+					}
+				}
+			}
 		case CheckTypeHardcodedSecret:
 			if content != nil {
 				found = checkHardcodedSecret(fc, p, content)
@@ -270,12 +284,55 @@ func (fc *fileContext) importsAny(identifiers []string) bool {
 	return false
 }
 
+// projectImportsAny reports whether ANY file in the graph imports a package
+// matching any of the identifier patterns. Used to detect project-level auth
+// configuration (e.g. a Spring SecurityFilterChain bean) that may cover all
+// controllers without per-controller annotations.
+func projectImportsAny(g *graph.Graph, identifiers []string) bool {
+	if len(identifiers) == 0 {
+		return false
+	}
+	for _, pkg := range g.FindByType(graph.NodePackage) {
+		for _, id := range identifiers {
+			if matchGlob(id, pkg.Name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // callsAny reports whether any function in this file calls a function whose
 // name matches any of the glob patterns.
 func (fc *fileContext) callsAny(patterns []string) bool {
 	for callee := range fc.callees {
 		for _, p := range patterns {
 			if matchGlob(p, callee) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// signaturesMatchAny reports whether any function or method node in this file
+// has a Metadata["signature"] that matches any of the glob patterns.
+// Used to detect auth types that appear as handler parameter types (e.g. Rust
+// extractors/guards) rather than as function calls.
+func (fc *fileContext) signaturesMatchAny(patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	for _, n := range fc.nodes {
+		if n.Type != graph.NodeFunction && n.Type != graph.NodeMethod {
+			continue
+		}
+		sig, ok := n.Metadata["signature"]
+		if !ok || sig == "" {
+			continue
+		}
+		for _, pat := range patterns {
+			if matchGlob(pat, sig) {
 				return true
 			}
 		}
@@ -351,6 +408,13 @@ func checkMissingMiddleware(fc *fileContext, p SecurityPattern, g *graph.Graph) 
 
 	// If any function in this file calls a required auth pattern, no violation.
 	if fc.callsAny(p.Detection.RequiredCallPatterns) {
+		return nil
+	}
+
+	// If any function signature contains a required auth type (extractor/guard),
+	// no violation. This catches Rust-style auth where the auth type appears as a
+	// handler parameter (e.g. "fn handle(user: AuthUser)") rather than a call site.
+	if fc.signaturesMatchAny(p.Detection.RequiredSignaturePatterns) {
 		return nil
 	}
 

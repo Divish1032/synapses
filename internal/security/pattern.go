@@ -149,6 +149,19 @@ type Detection struct {
 	// Examples: ["Auth*", "JWT*", "authenticate", "checkToken", "RequireAuth"]
 	RequiredCallPatterns []string `json:"required_call_patterns,omitempty"`
 
+	// RequiredSignaturePatterns are glob patterns matched against the full signature
+	// string (Metadata["signature"]) of function and method nodes in the file.
+	// A match suppresses the violation — it indicates auth types appear as parameter
+	// types in handler signatures (e.g. Rust extractors/guards such as
+	// "fn handle(user: AuthUser)" where AuthUser implements FromRequestParts).
+	// Unlike RequiredCallPatterns which detect auth via CALLS edges, this scans
+	// raw signature text, enabling detection of extractor- and guard-based auth
+	// patterns where the auth type is a function parameter rather than a call.
+	//
+	// Used by: CheckTypeMissingMiddleware
+	// Examples: ["*AuthUser*", "*Claims*", "*BearerToken*", "*Guard*", "*AuthGuard*"]
+	RequiredSignaturePatterns []string `json:"required_signature_patterns,omitempty"`
+
 	// ElevatedAuthPatterns are glob patterns for the higher-privilege auth functions
 	// required by admin routes. Must be a STRICT SUPERSET of RequiredCallPatterns
 	// to be meaningful (i.e. admin routes need BOTH regular auth AND elevated auth).
@@ -242,6 +255,23 @@ type Detection struct {
 	// Used by: CheckTypeAdminElevation
 	// Examples: ["*/admin/*", "*/admin.go", "*_admin.go", "*/management/*"]
 	AdminPackagePaths []string `json:"admin_package_paths,omitempty"`
+
+	// GlobalSuppressionIdentifiers are import paths that, if found in ANY file in the
+	// project, indicate that a project-level auth mechanism is in place. When any
+	// project file imports one of these identifiers, violations from this pattern are
+	// downgraded from CRITICAL → MEDIUM and the message is updated to note that a
+	// global config was detected.
+	//
+	// This prevents mass CRITICAL noise for well-configured projects that use a global
+	// auth bean (e.g. Spring SecurityFilterChain, Express app.use(auth)) while still
+	// surfacing a MEDIUM finding that prompts verification of full coverage.
+	//
+	// Used by: CheckTypeMissingAnnotation
+	// Examples (Spring): [
+	//   "org.springframework.security.config.annotation.web.builders.HttpSecurity",
+	//   "org.springframework.security.web.SecurityFilterChain"
+	// ]
+	GlobalSuppressionIdentifiers []string `json:"global_suppression_identifiers,omitempty"`
 
 	// WebSocketNodeNames are function or method names that identify WebSocket upgrade
 	// handlers or WebSocket connection handlers in the project. Used by
