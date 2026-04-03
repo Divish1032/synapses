@@ -68,6 +68,64 @@ func pathWithinRoot(root, path string) bool {
 		strings.HasPrefix(cleanPath, cleanRoot+string(filepath.Separator))
 }
 
+// archViolationAction maps an architectural rule violation's severity string to
+// the three-tier action directive used in validate responses (Sprint 27.4).
+//
+// Arch rule severities use "error"/"warning" (from config.Violation.Severity),
+// not the CRITICAL/HIGH/MEDIUM enum used by security patterns. The mapping:
+//   - "error"   → "warn"   (HIGH equivalent: strong warning, can override)
+//   - "warning" → "inform" (MEDIUM equivalent: informational, agent decides)
+//
+// CRITICAL / "block" is reserved for security pattern violations only.
+func archViolationAction(severity string) string {
+	if severity == "error" {
+		return "warn"
+	}
+	return "inform"
+}
+
+// worstActionRequired returns the highest-priority action directive across all
+// security findings and architectural violations in a validate response.
+// Priority order: "block" > "warn" > "inform" > "none".
+//
+// secFindings must have their Action field populated (by security.withActions).
+// archViolations are evaluated via archViolationAction.
+func worstActionRequired(secFindings []security.Violation, archViolations []config.Violation) string {
+	rank := func(action string) int {
+		switch action {
+		case "block":
+			return 3
+		case "warn":
+			return 2
+		case "inform":
+			return 1
+		default:
+			return 0
+		}
+	}
+	best := 0
+	for _, f := range secFindings {
+		if r := rank(f.Action); r > best {
+			best = r
+		}
+	}
+	for _, v := range archViolations {
+		if r := rank(archViolationAction(v.Severity)); r > best {
+			best = r
+		}
+	}
+	switch best {
+	case 3:
+		return "block"
+	case 2:
+		return "warn"
+	case 1:
+		return "inform"
+	default:
+		return "none"
+	}
+}
+
 // ProposedChange is a single entry in a validate_plan request.
 type ProposedChange struct {
 	File          string `json:"file"`
@@ -397,6 +455,12 @@ func (s *Server) handleValidatePlan(
 	}
 	if len(securityFindings) > 0 {
 		result["security_findings"] = securityFindings
+	}
+
+	// Sprint 27.4: action_required — worst directive across all findings.
+	// Present whenever there are any findings so the agent knows what to do.
+	if len(securityFindings) > 0 || len(violations) > 0 {
+		result["action_required"] = worstActionRequired(securityFindings, violations)
 	}
 
 	// Cross-project drift check: if any changed file has entities with
@@ -975,6 +1039,19 @@ doneSecurityStatus:
 	}
 	if totalImpactWarnings > 0 {
 		result["impact_hint"] = fmt.Sprintf("%d exported symbol(s) have callers — review signature_impact in each file to ensure call sites are still valid.", totalImpactWarnings)
+	}
+
+	// Sprint 27.4: action_required — worst directive across all security findings
+	// and architectural violations across all files and project-scope findings.
+	if totalViolations > 0 || totalSecurityFindings > 0 {
+		var allSec []security.Violation
+		var allArch []config.Violation
+		for _, r := range reports {
+			allSec = append(allSec, r.SecurityFindings...)
+			allArch = append(allArch, r.Violations...)
+		}
+		allSec = append(allSec, projectSecurityFindings...)
+		result["action_required"] = worstActionRequired(allSec, allArch)
 	}
 
 	// Auto-record episode when post-implementation violations are found.
@@ -1680,11 +1757,21 @@ func (s *Server) handleValidatePreWrite(
 			"Provide files=[\"path/to/file.go\"] for targeted security analysis."
 	}
 
+	// Sprint 27.4: action_required — worst directive across all findings.
+	actionRequired := worstActionRequired(allSecFindings, allArchViolations)
+	if len(allSecFindings) > 0 || len(allArchViolations) > 0 {
+		result["action_required"] = actionRequired
+	}
+
+	summaryAction := ""
+	if actionRequired != "none" {
+		summaryAction = fmt.Sprintf(" Action required: %s.", actionRequired)
+	}
 	result["_summary"] = fmt.Sprintf(
 		"pre_write: %d file(s) analyzed, %d security finding(s) (%d CRITICAL, %d HIGH), "+
-			"%d arch rule violation(s). Status: %s.",
+			"%d arch rule violation(s).%s Status: %s.",
 		len(fileResults), len(allSecFindings), critCount, highCount,
-		len(allArchViolations), status)
+		len(allArchViolations), summaryAction, status)
 
 	return jsonResult(result)
 }

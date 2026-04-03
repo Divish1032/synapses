@@ -108,7 +108,7 @@ func (e *Engine) CheckImports(g *graph.Graph, filePath string) []Violation {
 	if len(violations) == 0 {
 		return nil
 	}
-	return violations
+	return withActions(violations)
 }
 
 // buildUnknownImportViolation constructs a Violation for an import not found

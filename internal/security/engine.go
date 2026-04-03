@@ -33,7 +33,7 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 // Violation is a single security finding produced by the pattern matching engine.
-// Every field except Evidence is always populated on a returned violation.
+// Every field except Evidence and Tags is always populated on a returned violation.
 type Violation struct {
 	// PatternID is the unique slug of the pattern that fired (e.g. "go-chi-missing-auth").
 	PatternID string `json:"pattern_id"`
@@ -43,6 +43,13 @@ type Violation struct {
 
 	// Severity determines the required agent response (CRITICAL/HIGH/MEDIUM).
 	Severity Severity `json:"severity"`
+
+	// Action is the derived behavioral directive for the agent: "block", "warn", or "inform".
+	//   "block"  — CRITICAL: agent must fix before proceeding.
+	//   "warn"   — HIGH: strong warning; agent can override with justification.
+	//   "inform" — MEDIUM: informational; agent decides.
+	// Always set on violations returned by CheckFile, CheckProject, and CheckImports.
+	Action string `json:"action"`
 
 	// File is the absolute or repo-relative path of the file containing the violation.
 	File string `json:"file"`
@@ -61,6 +68,36 @@ type Violation struct {
 
 	// Tags from the pattern (e.g. "owasp-a01", "auth", "production-critical").
 	Tags []string `json:"tags,omitempty"`
+}
+
+// actionForSeverity returns the behavioral directive string for the given severity.
+// This is the canonical mapping used by withActions and any handler that needs
+// to derive an action from an arch-rule severity string.
+func actionForSeverity(s Severity) string {
+	switch s {
+	case SeverityCritical:
+		return "block"
+	case SeverityHigh:
+		return "warn"
+	default: // SeverityMedium and any unknown value
+		return "inform"
+	}
+}
+
+// withActions returns violations with the Action field set from each violation's
+// Severity. This is called at the exit boundary of CheckFile, CheckProject, and
+// CheckImports so Action is always consistent with Severity — including after any
+// in-flight severity downgrades (e.g. CRITICAL→MEDIUM via global suppression).
+//
+// If violations is nil, returns nil. Never returns an empty slice.
+func withActions(violations []Violation) []Violation {
+	if len(violations) == 0 {
+		return nil
+	}
+	for i := range violations {
+		violations[i].Action = actionForSeverity(violations[i].Severity)
+	}
+	return violations
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -181,7 +218,7 @@ func (e *Engine) CheckFile(g *graph.Graph, filePath string, content []byte) []Vi
 	if len(violations) == 0 {
 		return nil
 	}
-	return violations
+	return withActions(violations)
 }
 
 // CheckProject runs project-scope patterns (CheckTypeCrossTransportAuth) against
@@ -201,7 +238,7 @@ func (e *Engine) CheckProject(g *graph.Graph) []Violation {
 	if len(violations) == 0 {
 		return nil
 	}
-	return violations
+	return withActions(violations)
 }
 
 // PatternCount returns the total number of patterns in the engine.

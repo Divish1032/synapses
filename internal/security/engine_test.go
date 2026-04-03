@@ -1586,3 +1586,105 @@ func TestNilIfEmpty(t *testing.T) {
 		t.Error("nilIfEmpty(non-empty) should return non-nil")
 	}
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Sprint 27.4: action field and severity-tier helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+func TestActionForSeverity(t *testing.T) {
+	cases := []struct {
+		severity Severity
+		want     string
+	}{
+		{SeverityCritical, "block"},
+		{SeverityHigh, "warn"},
+		{SeverityMedium, "inform"},
+		{"UNKNOWN", "inform"}, // unknown falls through to "inform"
+		{"", "inform"},        // empty falls through to "inform"
+	}
+	for _, tc := range cases {
+		got := actionForSeverity(tc.severity)
+		if got != tc.want {
+			t.Errorf("actionForSeverity(%q) = %q, want %q", tc.severity, got, tc.want)
+		}
+	}
+}
+
+func TestWithActions_SetsActionFromSeverity(t *testing.T) {
+	violations := []Violation{
+		{PatternID: "a", Severity: SeverityCritical},
+		{PatternID: "b", Severity: SeverityHigh},
+		{PatternID: "c", Severity: SeverityMedium},
+	}
+	result := withActions(violations)
+	if result[0].Action != "block" {
+		t.Errorf("CRITICAL: got action %q, want %q", result[0].Action, "block")
+	}
+	if result[1].Action != "warn" {
+		t.Errorf("HIGH: got action %q, want %q", result[1].Action, "warn")
+	}
+	if result[2].Action != "inform" {
+		t.Errorf("MEDIUM: got action %q, want %q", result[2].Action, "inform")
+	}
+}
+
+func TestWithActions_Nil(t *testing.T) {
+	if withActions(nil) != nil {
+		t.Error("withActions(nil) should return nil")
+	}
+	if withActions([]Violation{}) != nil {
+		t.Error("withActions(empty) should return nil")
+	}
+}
+
+func TestWithActions_DowngradedSeverityReflectedInAction(t *testing.T) {
+	// Simulate the CRITICAL→MEDIUM downgrade that happens in checkMissingAnnotation
+	// when global suppression fires. withActions reads the final Severity, so the
+	// action must reflect the downgraded severity, not the original.
+	violations := []Violation{
+		{PatternID: "spring-missing-auth", Severity: SeverityMedium}, // already downgraded
+	}
+	result := withActions(violations)
+	if result[0].Action != "inform" {
+		t.Errorf("downgraded MEDIUM: got action %q, want %q", result[0].Action, "inform")
+	}
+}
+
+// TestCheckFile_ActionPopulated verifies that violations returned from CheckFile
+// have the Action field set. Uses the built-in patterns with a real test graph.
+func TestCheckFile_ActionPopulated(t *testing.T) {
+	g := buildTestGraph(t)
+	// Add a Go handler file that imports chi but doesn't call any auth middleware.
+	const goFile = "/project/handlers.go"
+	addFileWithImports(g, goFile, "github.com/go-chi/chi/v5", "net/http")
+	// Add route registration node (the missing-auth pattern fires on route nodes).
+	routeID := g.MakeNodeID(goFile, "router.Get /api/users")
+	g.AddNode(&graph.Node{
+		ID:   routeID,
+		Type: graph.NodeRoute,
+		Name: "router.Get",
+		File: goFile,
+	})
+
+	e := DefaultEngine()
+	violations := e.CheckFile(g, goFile, nil)
+	// If the engine produces any violations, all must have Action set.
+	for _, v := range violations {
+		if v.Action == "" {
+			t.Errorf("CheckFile returned violation %q with empty Action field", v.PatternID)
+		}
+		// Action must be one of the three valid values.
+		switch v.Action {
+		case "block", "warn", "inform":
+			// valid
+		default:
+			t.Errorf("CheckFile returned violation %q with invalid Action %q", v.PatternID, v.Action)
+		}
+		// Action must be consistent with Severity.
+		wantAction := actionForSeverity(v.Severity)
+		if v.Action != wantAction {
+			t.Errorf("CheckFile: violation %q has Severity=%q but Action=%q (want %q)",
+				v.PatternID, v.Severity, v.Action, wantAction)
+		}
+	}
+}
