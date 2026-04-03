@@ -38,6 +38,32 @@ func TestExtractObservations_ToolUsage(t *testing.T) {
 	}
 }
 
+// TestExtractObservations_SomeValidate verifies that low validate usage (1-4 calls)
+// produces some_validate_usage (not heavy_validate_usage).
+func TestExtractObservations_SomeValidate(t *testing.T) {
+	retro := &store.ToolCallSummary{
+		TotalCalls: 10,
+		TopTools: []store.ToolCallCount{
+			{ToolName: "get_context", Count: 7},
+			{ToolName: "validate", Count: 2},
+			{ToolName: "get_impact", Count: 4},
+		},
+	}
+
+	obs := extractSessionObservations("agent", "sess-some-v", "proj-1", nil, retro, nil)
+
+	keys := obsKeys(obs)
+	if !keys["some_validate_usage"] {
+		t.Error("expected some_validate_usage observation")
+	}
+	if keys["heavy_validate_usage"] {
+		t.Error("unexpected heavy_validate_usage for count=2")
+	}
+	if !keys["uses_impact_analysis"] {
+		t.Error("expected uses_impact_analysis observation for get_impact count=4")
+	}
+}
+
 // TestExtractObservations_NoValidate verifies that the absence of validate with
 // a high call volume produces a no_validate_usage observation.
 func TestExtractObservations_NoValidate(t *testing.T) {

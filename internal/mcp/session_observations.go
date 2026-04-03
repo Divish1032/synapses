@@ -263,7 +263,8 @@ var wellKnownLibraries = []struct {
 	// TypeScript/JS HTTP
 	{"express", "uses_express"},
 	{"fastify", "uses_fastify"},
-	{"next", "uses_nextjs"},
+	{"next/server", "uses_nextjs"},
+	{"nextjs", "uses_nextjs"},
 	// Java
 	{"springframework", "uses_spring"},
 	{"junit", "uses_junit"},

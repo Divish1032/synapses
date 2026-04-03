@@ -45,6 +45,9 @@ type SessionObservation struct {
 // Observations are immutable — InsertSessionObservation is the only write path.
 // Returns an error (and skips the insert) when the per-project row cap is reached.
 func (s *Store) InsertSessionObservation(o SessionObservation) (string, error) {
+	if s.knowledgeDB == nil {
+		return "", nil
+	}
 	if o.Category == "" {
 		return "", fmt.Errorf("observation category is required")
 	}
