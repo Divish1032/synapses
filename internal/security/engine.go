@@ -429,6 +429,29 @@ func checkMissingAnnotation(fc *fileContext, p SecurityPattern) []Violation {
 		}
 	}
 
+	// Check struct/class nodes for heritage_extends metadata (class-based auth mixins).
+	// Python CBV patterns like `class MyView(LoginRequiredMixin, View)` store base class
+	// names in metadata["heritage_extends"] as a comma-separated list. This is the only
+	// way to detect mixin-based auth without LSP — CALLS edges are not emitted for base
+	// class references.
+	for _, n := range fc.nodes {
+		if n.Type != graph.NodeStruct {
+			continue
+		}
+		he, ok := n.Metadata["heritage_extends"]
+		if !ok || he == "" {
+			continue
+		}
+		for _, base := range strings.Split(he, ",") {
+			base = strings.TrimSpace(base)
+			for _, annotPat := range p.Detection.AnnotationPatterns {
+				if matchGlob(annotPat, base) {
+					return nil // class inherits from an auth mixin
+				}
+			}
+		}
+	}
+
 	target := filepath.Base(fc.filePath)
 	msg := fillTemplate(p.Message, map[string]string{
 		"file":   fc.filePath,

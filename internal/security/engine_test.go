@@ -84,6 +84,23 @@ func addRouteNode(g *graph.Graph, filePath, method, routePath string) graph.Node
 	return routeID
 }
 
+// addStructWithHeritage adds a NodeStruct with heritage_extends metadata set to the
+// given comma-separated base class names. Used to simulate Python class-based views
+// where inheritance is stored in metadata rather than CALLS edges.
+func addStructWithHeritage(g *graph.Graph, filePath, structName string, bases ...string) graph.NodeID {
+	id := g.MakeNodeID(filePath, structName)
+	g.AddNode(&graph.Node{
+		ID:   id,
+		Type: graph.NodeStruct,
+		Name: structName,
+		File: filePath,
+		Metadata: map[string]string{
+			"heritage_extends": strings.Join(bases, ","),
+		},
+	})
+	return id
+}
+
 // makeSinglePattern creates a minimal Pattern for a given check type.
 func makeSinglePattern(checkType CheckType, extra ...func(*SecurityPattern)) SecurityPattern {
 	b := true

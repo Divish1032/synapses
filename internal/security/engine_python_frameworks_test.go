@@ -776,14 +776,51 @@ func TestPythonFrameworks_Django_MissingAuth_WithLoginRequiredMixin_NoViolation(
 	g := buildTestGraph(t)
 
 	// Django CBV using LoginRequiredMixin as base class.
-	// The Python parser may represent class inheritance as CALLS edges to the mixin name.
-	// If it does, LoginRequiredMixin* in annotation_patterns will suppress the violation.
+	// The Python parser stores base classes in NodeStruct.Metadata["heritage_extends"],
+	// NOT as CALLS edges. checkMissingAnnotation reads heritage_extends to detect mixin auth.
 	addFileWithImports(g, "/project/app/views.py", "django")
-	addFunctionWithCalls(g, "/project/app/views.py", "UserDetailView", "LoginRequiredMixin", "DetailView")
+	addStructWithHeritage(g, "/project/app/views.py", "UserDetailView", "LoginRequiredMixin", "DetailView")
 
 	violations := e.CheckFile(g, "/project/app/views.py", nil)
 	if findViolation(violations, "python-django-missing-auth") != nil {
-		t.Error("expected no violation when LoginRequiredMixin is referenced (CBV auth pattern)")
+		t.Error("expected no violation: LoginRequiredMixin in heritage_extends should suppress django-missing-auth")
+	}
+}
+
+func TestPythonFrameworks_Django_MissingAuth_CBV_NoMixin_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Django CBV with no auth mixin — only View as base. Should fire.
+	addFileWithImports(g, "/project/app/views.py", "django")
+	addStructWithHeritage(g, "/project/app/views.py", "UserDetailView", "View")
+
+	violations := e.CheckFile(g, "/project/app/views.py", nil)
+	found := findViolation(violations, "python-django-missing-auth")
+	if found == nil {
+		t.Fatal("expected python-django-missing-auth: CBV with only View base has no auth")
+	}
+}
+
+func TestPythonFrameworks_Django_MissingAuth_CBV_PermissionRequiredMixin_NoViolation(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// PermissionRequiredMixin is the other common Django CBV auth mixin.
+	addFileWithImports(g, "/project/app/views.py", "django")
+	addStructWithHeritage(g, "/project/app/views.py", "AdminView", "PermissionRequiredMixin", "View")
+
+	violations := e.CheckFile(g, "/project/app/views.py", nil)
+	if findViolation(violations, "python-django-missing-auth") != nil {
+		t.Error("expected no violation: PermissionRequiredMixin in heritage_extends suppresses django-missing-auth")
 	}
 }
 
