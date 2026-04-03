@@ -530,11 +530,14 @@ func TestManager_PyrightUnregistered_ReturnsNone(t *testing.T) {
 
 // pyCfg drives the pyFakeTransport response behaviour.
 type pyCfg struct {
-	response      *pyDefLoc
-	responseRaw   string
-	queryErr      error
-	queryDelay    time.Duration
-	resolveNodeID NodeResolver
+	response         *pyDefLoc
+	responseRaw      string
+	queryErr         error
+	queryDelay       time.Duration
+	resolveNodeID    NodeResolver
+	chPrepareResult  interface{} // result for textDocument/prepareCallHierarchy
+	chIncomingResult interface{} // result for callHierarchy/incomingCalls
+	chOutgoingResult interface{} // result for callHierarchy/outgoingCalls
 }
 
 // pyDefLoc is a single definition location returned by pyFakeTransport.
@@ -650,8 +653,32 @@ func (f *pyFakeTransport) Send(v interface{}) error {
 		}
 		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), resultRaw)
 		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
+
+	case "textDocument/prepareCallHierarchy":
+		raw := pyEncodeResult(f.cfg.chPrepareResult)
+		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), raw)
+		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
+
+	case "callHierarchy/incomingCalls":
+		raw := pyEncodeResult(f.cfg.chIncomingResult)
+		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), raw)
+		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
+
+	case "callHierarchy/outgoingCalls":
+		raw := pyEncodeResult(f.cfg.chOutgoingResult)
+		resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, int64(id), raw)
+		f.msgQueue = append(f.msgQueue, json.RawMessage(resp))
 	}
 	return nil
+}
+
+// pyEncodeResult marshals v to JSON, returning "null" if v is nil.
+func pyEncodeResult(v interface{}) string {
+	if v == nil {
+		return "null"
+	}
+	raw, _ := json.Marshal(v)
+	return string(raw)
 }
 
 func (f *pyFakeTransport) Recv() (json.RawMessage, error) {
@@ -676,3 +703,197 @@ func (s *pyStubVerifier) ResolveEdge(_ context.Context, from, to graph.NodeID, p
 
 func (s *pyStubVerifier) Language() Language { return LanguagePython }
 func (s *pyStubVerifier) Close() error        { return nil }
+
+// ── PyrightVerifier — CallHierarchyProvider ───────────────────────────────────
+
+// pyCallHierarchyItemResult builds a single CallHierarchyItem wire object.
+func pyCallHierarchyItemResult(name, detail, uri string, line int) map[string]interface{} {
+	pos := map[string]interface{}{"line": line, "character": 0}
+	rng := map[string]interface{}{"start": pos, "end": pos}
+	return map[string]interface{}{
+		"name":           name,
+		"detail":         detail,
+		"kind":           12,
+		"uri":            uri,
+		"range":          rng,
+		"selectionRange": rng,
+	}
+}
+
+// pyIncomingCallResult builds one entry of a callHierarchy/incomingCalls response.
+func pyIncomingCallResult(name, detail, uri string, line int) map[string]interface{} {
+	return map[string]interface{}{
+		"from":       pyCallHierarchyItemResult(name, detail, uri, line),
+		"fromRanges": []interface{}{},
+	}
+}
+
+// pyOutgoingCallResult builds one entry of a callHierarchy/outgoingCalls response.
+func pyOutgoingCallResult(name, detail, uri string, line int) map[string]interface{} {
+	return map[string]interface{}{
+		"to":         pyCallHierarchyItemResult(name, detail, uri, line),
+		"fromRanges": []interface{}{},
+	}
+}
+
+func TestPyrightVerifier_PrepareCallHierarchy_NotFound_ReturnsNil(t *testing.T) {
+	opts := PyrightVerifierOptions{ProjectRoot: t.TempDir(), PyrightPath: ""}
+	v := &PyrightVerifier{opts: opts.withDefaults()}
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: "/x.py", Line: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil when binary not found, got %v", items)
+	}
+}
+
+func TestPyrightVerifier_PrepareCallHierarchy_NonPythonFile_ReturnsNil(t *testing.T) {
+	v := pyMakeVerifier(t, pyCfg{})
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: "/src/main.go", Line: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil for non-Python file, got %v", items)
+	}
+}
+
+func TestPyrightVerifier_PrepareCallHierarchy_EmptyFile_ReturnsNil(t *testing.T) {
+	ft := &pyFakeTransport{cfg: pyCfg{}}
+	v := pyMakeVerifierWithTransport(t, ft)
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{}) // empty file
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if items != nil {
+		t.Errorf("expected nil for empty file, got %v", items)
+	}
+}
+
+func TestPyrightVerifier_PrepareCallHierarchy_Success(t *testing.T) {
+	srcFile := pyTempFile(t, "views.py", "# src\n")
+	defURI := pathToURI(srcFile)
+
+	itemResult := []interface{}{
+		pyCallHierarchyItemResult("get_user", "AuthService.get_user", defURI, 12),
+	}
+	v := pyMakeVerifier(t, pyCfg{chPrepareResult: itemResult})
+
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 12, Col: 0})
+	if err != nil {
+		t.Fatalf("PrepareCallHierarchy: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Name != "get_user" {
+		t.Errorf("expected Name=get_user, got %q", items[0].Name)
+	}
+	if items[0].Detail != "AuthService.get_user" {
+		t.Errorf("expected Detail=AuthService.get_user, got %q", items[0].Detail)
+	}
+	if items[0].File != srcFile {
+		t.Errorf("expected File=%q, got %q", srcFile, items[0].File)
+	}
+	if items[0].Line != 12 {
+		t.Errorf("expected Line=12, got %d", items[0].Line)
+	}
+}
+
+func TestPyrightVerifier_PrepareCallHierarchy_NullResponse_ReturnsEmpty(t *testing.T) {
+	srcFile := pyTempFile(t, "app.py", "# src\n")
+	v := pyMakeVerifier(t, pyCfg{chPrepareResult: nil}) // nil → "null"
+
+	items, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 items for null response, got %d", len(items))
+	}
+}
+
+func TestPyrightVerifier_IncomingCalls_Success(t *testing.T) {
+	srcFile := pyTempFile(t, "service.py", "# src\n")
+	caller1URI := pathToURI(pyTempFile(t, "main.py", "# main\n"))
+	caller2URI := pathToURI(pyTempFile(t, "tests.py", "# tests\n"))
+	defURI := pathToURI(srcFile)
+
+	prepResult := []interface{}{
+		pyCallHierarchyItemResult("handle_request", "RequestHandler.handle_request", defURI, 20),
+	}
+	incomingResult := []interface{}{
+		pyIncomingCallResult("main", "main", caller1URI, 5),
+		pyIncomingCallResult("test_handler", "test_handler", caller2URI, 10),
+	}
+	v := pyMakeVerifier(t, pyCfg{
+		chPrepareResult:  prepResult,
+		chIncomingResult: incomingResult,
+	})
+
+	// PrepareCallHierarchy must be called first to start the verifier.
+	prepItems, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 20, Col: 0})
+	if err != nil || len(prepItems) == 0 {
+		t.Fatalf("PrepareCallHierarchy failed or empty: %v", err)
+	}
+
+	item := CallHierarchyItem{Name: "handle_request", File: srcFile, Line: 20, Col: 0}
+	callers, err := v.IncomingCalls(context.Background(), item)
+	if err != nil {
+		t.Fatalf("IncomingCalls: %v", err)
+	}
+	if len(callers) != 2 {
+		t.Fatalf("expected 2 callers, got %d", len(callers))
+	}
+	if callers[0].Name != "main" {
+		t.Errorf("expected first caller=main, got %q", callers[0].Name)
+	}
+	if callers[1].Name != "test_handler" {
+		t.Errorf("expected second caller=test_handler, got %q", callers[1].Name)
+	}
+}
+
+func TestPyrightVerifier_OutgoingCalls_Success(t *testing.T) {
+	srcFile := pyTempFile(t, "handler.py", "# src\n")
+	calleeURI := pathToURI(pyTempFile(t, "db.py", "# db\n"))
+	defURI := pathToURI(srcFile)
+
+	prepResult := []interface{}{
+		pyCallHierarchyItemResult("login", "AuthHandler.login", defURI, 35),
+	}
+	outgoingResult := []interface{}{
+		pyOutgoingCallResult("query", "Database.query", calleeURI, 88),
+		pyOutgoingCallResult("hash_password", "bcrypt.hash_password", calleeURI, 12),
+	}
+	v := pyMakeVerifier(t, pyCfg{
+		chPrepareResult:  prepResult,
+		chOutgoingResult: outgoingResult,
+	})
+
+	_, err := v.PrepareCallHierarchy(context.Background(), CallPosition{File: srcFile, Line: 35, Col: 0})
+	if err != nil {
+		t.Fatalf("PrepareCallHierarchy: %v", err)
+	}
+
+	item := CallHierarchyItem{Name: "login", File: srcFile, Line: 35, Col: 0}
+	callees, err := v.OutgoingCalls(context.Background(), item)
+	if err != nil {
+		t.Fatalf("OutgoingCalls: %v", err)
+	}
+	if len(callees) != 2 {
+		t.Fatalf("expected 2 callees, got %d", len(callees))
+	}
+	if callees[0].Name != "query" {
+		t.Errorf("expected first callee=query, got %q", callees[0].Name)
+	}
+	if callees[1].Name != "hash_password" {
+		t.Errorf("expected second callee=hash_password, got %q", callees[1].Name)
+	}
+}
+
+// TestPyrightVerifier_CallHierarchyProvider_InterfaceSatisfied verifies that
+// *PyrightVerifier implements CallHierarchyProvider at compile time.
+func TestPyrightVerifier_CallHierarchyProvider_InterfaceSatisfied(t *testing.T) {
+	var _ CallHierarchyProvider = (*PyrightVerifier)(nil)
+}

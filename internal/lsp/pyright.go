@@ -253,6 +253,9 @@ func (pv *PyrightVerifier) initialize(ctx context.Context, tr LSPTransport) erro
 						"dynamicRegistration": false,
 						"linkSupport":         false,
 					},
+					"callHierarchy": map[string]interface{}{
+						"dynamicRegistration": false,
+					},
 				},
 			},
 			"initializationOptions": initOpts,
@@ -341,6 +344,133 @@ func (pv *PyrightVerifier) ensureOpen(path string) error {
 		},
 	}
 	return pv.transport.Send(notif)
+}
+
+// ── Call Hierarchy — PyrightVerifier implementation ───────────────────────────
+
+// PrepareCallHierarchy implements CallHierarchyProvider.
+// pos should be on a Python function or method definition (zero-indexed).
+// Gracefully returns nil, nil when pyright-langserver is unavailable or cannot
+// resolve pos. Only .py and .pyi files are accepted; other extensions return nil.
+func (pv *PyrightVerifier) PrepareCallHierarchy(ctx context.Context, pos CallPosition) ([]CallHierarchyItem, error) {
+	if pv.opts.PyrightPath == "" || pos.File == "" {
+		return nil, nil
+	}
+	if !IsPythonFile(pos.File) {
+		return nil, nil
+	}
+
+	pv.mu.Lock()
+	defer pv.mu.Unlock()
+
+	if err := pv.ensureStarted(); err != nil {
+		return nil, nil // graceful degradation
+	}
+	if err := pv.ensureOpen(pos.File); err != nil {
+		return nil, fmt.Errorf("ensureOpen for prepareCallHierarchy: %w", err)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, pv.opts.QueryTimeout)
+	defer cancel()
+
+	id := pv.nextID
+	pv.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "textDocument/prepareCallHierarchy",
+		Params: map[string]interface{}{
+			"textDocument": map[string]interface{}{"uri": pathToURI(pos.File)},
+			"position":     map[string]interface{}{"line": pos.Line, "character": pos.Col},
+		},
+	}
+	if err := pv.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send prepareCallHierarchy: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, pv.transport, id)
+	if err != nil {
+		pv.teardown()
+		return nil, fmt.Errorf("prepareCallHierarchy response: %w", err)
+	}
+	return parseCallHierarchyItems(raw)
+}
+
+// IncomingCalls implements CallHierarchyProvider.
+// Returns the direct callers of item. Gracefully returns nil, nil on failure.
+func (pv *PyrightVerifier) IncomingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error) {
+	if pv.opts.PyrightPath == "" {
+		return nil, nil
+	}
+
+	pv.mu.Lock()
+	defer pv.mu.Unlock()
+
+	if err := pv.ensureStarted(); err != nil {
+		return nil, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, pv.opts.QueryTimeout)
+	defer cancel()
+
+	id := pv.nextID
+	pv.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "callHierarchy/incomingCalls",
+		Params:  map[string]interface{}{"item": callHierarchyItemToWire(item)},
+	}
+	if err := pv.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send incomingCalls: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, pv.transport, id)
+	if err != nil {
+		pv.teardown()
+		return nil, fmt.Errorf("incomingCalls response: %w", err)
+	}
+	return parseIncomingCalls(raw)
+}
+
+// OutgoingCalls implements CallHierarchyProvider.
+// Returns the direct callees of item. Gracefully returns nil, nil on failure.
+func (pv *PyrightVerifier) OutgoingCalls(ctx context.Context, item CallHierarchyItem) ([]CallHierarchyItem, error) {
+	if pv.opts.PyrightPath == "" {
+		return nil, nil
+	}
+
+	pv.mu.Lock()
+	defer pv.mu.Unlock()
+
+	if err := pv.ensureStarted(); err != nil {
+		return nil, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, pv.opts.QueryTimeout)
+	defer cancel()
+
+	id := pv.nextID
+	pv.nextID++
+
+	req := lspRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "callHierarchy/outgoingCalls",
+		Params:  map[string]interface{}{"item": callHierarchyItemToWire(item)},
+	}
+	if err := pv.transport.Send(req); err != nil {
+		return nil, fmt.Errorf("send outgoingCalls: %w", err)
+	}
+
+	raw, err := readResponseWithID(queryCtx, pv.transport, id)
+	if err != nil {
+		pv.teardown()
+		return nil, fmt.Errorf("outgoingCalls response: %w", err)
+	}
+	return parseOutgoingCalls(raw)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

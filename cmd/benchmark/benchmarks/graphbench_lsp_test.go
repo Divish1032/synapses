@@ -128,3 +128,27 @@ func TestLSPBenchRunner_Close_NilEv(t *testing.T) {
 		t.Errorf("Close with nil ev should return nil, got %v", err)
 	}
 }
+
+func TestNewLSPBenchRunner_UnsupportedLang_ReturnsNil(t *testing.T) {
+	r, err := NewLSPBenchRunner("java", t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error for unsupported lang: %v", err)
+	}
+	if r != nil {
+		t.Errorf("expected nil runner for unsupported lang, got %+v", r)
+	}
+}
+
+func TestNewLSPBenchRunner_PythonLang_ReturnsRunner(t *testing.T) {
+	// Python is now supported. Binary may not be installed, but NewLSPBenchRunner
+	// should still return a non-nil runner (binary absence is handled lazily).
+	r, err := NewLSPBenchRunner("python", t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error for python lang: %v", err)
+	}
+	if r == nil {
+		t.Error("expected non-nil runner for python (PyrightVerifier implements CallHierarchyProvider)")
+	} else {
+		_ = r.Close()
+	}
+}

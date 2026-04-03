@@ -67,6 +67,18 @@ func NewLSPBenchRunner(lang, repoRoot string) (*LSPBenchRunner, error) {
 		}
 		return &LSPBenchRunner{provider: chp, ev: v, lang: lang}, nil
 
+	case "python":
+		v := lsp.NewPyrightVerifier(lsp.PyrightVerifierOptions{
+			ProjectRoot:    repoRoot,
+			QueryTimeout:   defaultLSPQueryTimeout,
+			StartupTimeout: defaultLSPStartupTimeout,
+		})
+		chp, ok := any(v).(lsp.CallHierarchyProvider)
+		if !ok {
+			return nil, nil
+		}
+		return &LSPBenchRunner{provider: chp, ev: v, lang: lang}, nil
+
 	default:
 		return nil, nil
 	}
