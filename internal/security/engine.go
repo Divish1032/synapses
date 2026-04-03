@@ -222,8 +222,9 @@ func (e *Engine) CheckFile(g *graph.Graph, filePath string, content []byte) []Vi
 	return withActions(violations)
 }
 
-// CheckProject runs project-scope patterns (CheckTypeCrossTransportAuth) against
-// the entire graph. Per-file patterns are NOT run here — use CheckFile for those.
+// CheckProject runs project-scope patterns against the entire graph.
+// Currently dispatches: CheckTypeCrossTransportAuth, CheckTypeLayerMapping.
+// Per-file patterns are NOT run here — use CheckFile for those.
 // Returns nil if no violations are found.
 func (e *Engine) CheckProject(g *graph.Graph) []Violation {
 	if e == nil || e.patterns == nil || g == nil {
@@ -233,6 +234,12 @@ func (e *Engine) CheckProject(g *graph.Graph) []Violation {
 	for _, p := range e.patterns.ForCheckType(CheckTypeCrossTransportAuth) {
 		if p.IsEnabled() {
 			found := checkCrossTransportAuth(g, p)
+			violations = append(violations, found...)
+		}
+	}
+	for _, p := range e.patterns.ForCheckType(CheckTypeLayerMapping) {
+		if p.IsEnabled() {
+			found := checkLayerMapping(g, p)
 			violations = append(violations, found...)
 		}
 	}
@@ -279,7 +286,9 @@ func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
 
 	lang := languageFromPath(filePath)
 	dir := filepath.Dir(filePath)
-	if dir == "" || dir == "." {
+	if dir == "." {
+		// filePath is a bare filename with no directory (e.g. "handler.go").
+		// No meaningful package scope can be inferred — skip norm detection.
 		return nil
 	}
 
@@ -371,25 +380,251 @@ func (e *Engine) CheckNorms(g *graph.Graph, filePath string) []Violation {
 	}
 
 	// Sort for deterministic output: HIGH first, then MEDIUM; within tier, alphabetical.
-	sevPriority := func(s Severity) int {
-		switch s {
-		case SeverityCritical:
-			return 3
-		case SeverityHigh:
-			return 2
-		default:
-			return 1
-		}
-	}
+	// CheckNorms only assigns SeverityHigh or SeverityMedium — no CRITICAL branch needed.
 	sort.Slice(violations, func(i, j int) bool {
-		pi, pj := sevPriority(violations[i].Severity), sevPriority(violations[j].Severity)
-		if pi != pj {
-			return pi > pj
+		si, sj := violations[i].Severity, violations[j].Severity
+		if si != sj {
+			return si == SeverityHigh // HIGH sorts before MEDIUM
 		}
 		return violations[i].PatternID < violations[j].PatternID
 	})
 
 	return withActions(violations)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Layer mapping (Sprint 27.6)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// defaultLayerConfig returns the built-in 3-tier architectural layer hierarchy.
+//
+// Keywords are conservative by design: they avoid segments that commonly appear
+// in external library import paths (e.g. "database" appears in "database/sql"
+// but is excluded here because external DB libraries are already caught by
+// checkDirectImport with explicit forbidden_import_patterns).
+//
+// Layer ordering (index 0 = outermost, index 2 = innermost):
+//
+//	presentation (0) → service (1) → data (2)
+//
+// A violation fires when a file in layer N imports a package in layer N+2 or
+// deeper (skipping at least one intermediate layer).
+func defaultLayerConfig() []LayerDef {
+	return []LayerDef{
+		{
+			Name: "presentation",
+			Keywords: []string{
+				"handler", "handlers",
+				"api",
+				"controller", "controllers",
+				"route", "routes",
+				"transport",
+			},
+		},
+		{
+			Name: "service",
+			Keywords: []string{
+				"service", "services",
+				"usecase", "usecases",
+				"business",
+				"domain",
+			},
+		},
+		{
+			Name: "data",
+			Keywords: []string{
+				"repo", "repository", "repositories",
+				"dal",
+			},
+		},
+	}
+}
+
+// inferLayerFromPath determines which architectural layer a path belongs to by
+// checking each slash-delimited segment against the layer keyword lists.
+// Returns the layer name and its zero-based index in layers, or ("", -1) when
+// no keyword matches (unknown layer — callers should skip the path).
+//
+// Only exact segment matches are accepted: "repository" matches a path containing
+// ".../repository/..." but NOT ".../user-repository/..." or ".../repo-factory/...".
+// Matching is case-insensitive.
+//
+// When multiple segments match different layers, the deepest matching layer
+// (highest index) takes precedence — the last directory segment typically best
+// identifies the package's role.
+func inferLayerFromPath(p string, layers []LayerDef) (string, int) {
+	// Normalise to forward slashes for consistent segment splitting.
+	p = filepath.ToSlash(p)
+	// Strip file extension from the last segment so "handler.go" → "handler".
+	if idx := strings.LastIndexByte(p, '.'); idx > strings.LastIndexByte(p, '/') {
+		p = p[:idx]
+	}
+	segments := strings.Split(p, "/")
+
+	bestName := ""
+	bestIdx := -1
+	for _, seg := range segments {
+		if seg == "" {
+			continue
+		}
+		seg = strings.ToLower(seg)
+		for li, layer := range layers {
+			for _, kw := range layer.Keywords {
+				if seg == strings.ToLower(kw) {
+					// Take the deepest matching layer in the hierarchy.
+					if li > bestIdx {
+						bestIdx = li
+						bestName = layer.Name
+					}
+				}
+			}
+		}
+	}
+	return bestName, bestIdx
+}
+
+// checkLayerMapping fires when a file in one architectural layer imports a
+// package from a non-adjacent (skipped) layer.
+//
+// The check is project-scope: it iterates all NodeFile nodes in the graph,
+// infers each file's layer from its path, then checks each imported NodePackage
+// for a layer classification. A violation fires when the import's layer index
+// exceeds the file's layer index by more than 1 (a skip).
+//
+// At most maxLayerViolations violations are returned to avoid overwhelming
+// response payloads in monorepos with widespread layering issues.
+//
+// Thread-safety: reads the graph under read-locks via the public Graph API.
+func checkLayerMapping(g *graph.Graph, p SecurityPattern) []Violation {
+	layers := p.Detection.LayerConfig
+	if len(layers) == 0 {
+		layers = defaultLayerConfig()
+	}
+
+	const maxLayerViolations = 50
+
+	// seen deduplicates (filePath, importPath) pairs — a single IMPORTS edge is
+	// enough to fire, but graph traversal may encounter duplicates.
+	type dedupKey struct{ file, imp string }
+	seen := make(map[dedupKey]bool)
+
+	var violations []Violation
+
+	g.IterateNodes(func(n *graph.Node) {
+		if len(violations) >= maxLayerViolations {
+			return
+		}
+		if n.Type != graph.NodeFile {
+			return
+		}
+
+		filePath := n.File
+		if filePath == "" {
+			return
+		}
+		// Skip test files — layer violations in tests are expected (tests import
+		// across layers by necessity).
+		if isTestFile(filePath) {
+			return
+		}
+		// Skip vendor/generated directories.
+		if isVendoredPath(filePath) {
+			return
+		}
+
+		// Determine the file's layer from its path.
+		_, srcIdx := inferLayerFromPath(filePath, layers)
+		if srcIdx < 0 {
+			return // unknown layer — cannot make a valid judgement
+		}
+		srcLayerName := layers[srcIdx].Name
+
+		// Walk IMPORTS edges from this NodeFile to NodePackage nodes.
+		for _, e := range g.OutEdges(n.ID) {
+			if len(violations) >= maxLayerViolations {
+				return
+			}
+			if e.Type != graph.EdgeImports {
+				continue
+			}
+			imp := g.GetNode(e.To)
+			if imp == nil || imp.Type != graph.NodePackage {
+				continue
+			}
+			importPath := imp.Name
+			if importPath == "" {
+				continue
+			}
+
+			// Dedup (file, import) to avoid repeated violations for the same pair.
+			key := dedupKey{filePath, importPath}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			// Determine the import's layer from its path.
+			_, dstIdx := inferLayerFromPath(importPath, layers)
+			if dstIdx < 0 {
+				continue // import is from an unknown layer — skip
+			}
+
+			// A skip violation: destination layer is more than one step deeper.
+			// e.g. presentation (0) → data (2): skip = 2 - 0 = 2 > 1 → violation.
+			// Adjacent: presentation (0) → service (1): 1 - 0 = 1 → fine.
+			// Reverse: service (1) → presentation (0): fine (different concern,
+			//   lower severity; reverse dependency is a design smell but not this check's scope).
+			if dstIdx <= srcIdx+1 {
+				continue
+			}
+
+			dstLayerName := layers[dstIdx].Name
+
+			// Build natural-language violation.
+			// Find the middle (skipped) layer name for the evidence message.
+			skippedLayer := ""
+			if srcIdx+1 < len(layers) {
+				skippedLayer = layers[srcIdx+1].Name
+			}
+
+			var evidence string
+			base := filepath.Base(filePath)
+			if skippedLayer != "" {
+				evidence = fmt.Sprintf(
+					"%s is in the %s layer but directly imports %q which is in the %s layer, "+
+						"skipping the %s layer. Route this access through the %s layer instead.",
+					base, srcLayerName, importPath, dstLayerName,
+					skippedLayer, skippedLayer,
+				)
+			} else {
+				evidence = fmt.Sprintf(
+					"%s is in the %s layer but directly imports %q which is in the %s layer.",
+					base, srcLayerName, importPath, dstLayerName,
+				)
+			}
+
+			msg := fillTemplate(p.Message, map[string]string{
+				"file":        filePath,
+				"target":      importPath,
+				"src_layer":   srcLayerName,
+				"dst_layer":   dstLayerName,
+				"skip_layer":  skippedLayer,
+			})
+
+			violations = append(violations, Violation{
+				PatternID:   p.ID,
+				PatternName: p.Name,
+				Severity:    p.Severity,
+				File:        filePath,
+				Target:      importPath,
+				Message:     msg,
+				Evidence:    evidence,
+				Tags:        p.Tags,
+			})
+		}
+	})
+
+	return nilIfEmpty(violations)
 }
 
 // PatternCount returns the total number of patterns in the engine.

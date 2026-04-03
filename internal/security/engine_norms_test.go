@@ -112,6 +112,9 @@ func TestCheckNorms_MediumConfidence(t *testing.T) {
 		if v.Action != "inform" {
 			t.Errorf("action = %q, want inform", v.Action)
 		}
+		if !strings.Contains(v.Evidence, "3/5") {
+			t.Errorf("evidence %q does not mention 3/5", v.Evidence)
+		}
 	}
 	if !found {
 		t.Errorf("no norm violation for RateLimit; violations: %+v", violations)
@@ -276,6 +279,164 @@ func TestCheckNorms_SortOrder(t *testing.T) {
 	}
 	if violations[1].Severity != SeverityMedium {
 		t.Errorf("second violation severity = %q, want MEDIUM", violations[1].Severity)
+	}
+}
+
+// TestCheckNorms_ExactlyTwoSiblings verifies that with exactly 2 sibling route
+// files both calling the norm (2/2 = 100%) the result is MEDIUM, not HIGH —
+// because siblingRouteCount=2 is below the ≥3 threshold for HIGH.
+func TestCheckNorms_ExactlyTwoSiblings(t *testing.T) {
+	g, e, target := buildNormsGraph(t, "/project/internal/exact2", 2, "AuthMiddleware")
+
+	violations := e.CheckNorms(g, target)
+
+	found := false
+	for _, v := range violations {
+		if !strings.Contains(v.PatternID, "AuthMiddleware") {
+			continue
+		}
+		found = true
+		if v.Severity != SeverityMedium {
+			t.Errorf("severity = %q, want MEDIUM (2 siblings < 3 required for HIGH)", v.Severity)
+		}
+		if v.Action != "inform" {
+			t.Errorf("action = %q, want inform", v.Action)
+		}
+	}
+	if !found {
+		t.Errorf("expected a norm violation; got %+v", violations)
+	}
+}
+
+// TestCheckNorms_SeventyFivePercentBoundary verifies that 3/4 siblings (exactly
+// 75%) with ≥3 sibling route files produces a HIGH violation.
+func TestCheckNorms_SeventyFivePercentBoundary(t *testing.T) {
+	const dir = "/project/internal/boundary75"
+	g := buildTestGraph(t)
+
+	// 4 sibling route files: 3 call "AuthMiddleware", 1 does not.
+	for i := 0; i < 3; i++ {
+		f := dir + "/with" + string(rune('a'+i)) + ".go"
+		addFileWithImports(g, f)
+		addRouteNode(g, f, "GET", "/r"+string(rune('a'+i)))
+		addFunctionWithCalls(g, f, "Reg"+string(rune('A'+i)), "AuthMiddleware")
+	}
+	withoutSib := dir + "/without.go"
+	addFileWithImports(g, withoutSib)
+	addRouteNode(g, withoutSib, "GET", "/s")
+	// withoutSib does NOT call AuthMiddleware
+
+	target := dir + "/target.go"
+	addFileWithImports(g, target)
+	addRouteNode(g, target, "GET", "/target")
+
+	e := NewEngine(nil)
+	violations := e.CheckNorms(g, target)
+
+	found := false
+	for _, v := range violations {
+		if !strings.Contains(v.PatternID, "AuthMiddleware") {
+			continue
+		}
+		found = true
+		if v.Severity != SeverityHigh {
+			t.Errorf("severity = %q, want HIGH (3/4=75%% with 4≥3 siblings)", v.Severity)
+		}
+		if !strings.Contains(v.Evidence, "3/4") {
+			t.Errorf("evidence %q does not mention 3/4", v.Evidence)
+		}
+	}
+	if !found {
+		t.Errorf("expected HIGH norm violation for AuthMiddleware; got %+v", violations)
+	}
+}
+
+// TestCheckNorms_FiftyPercentBoundary verifies that exactly 1/2 siblings (50%)
+// produces a MEDIUM violation — the minimum qualifying threshold.
+func TestCheckNorms_FiftyPercentBoundary(t *testing.T) {
+	const dir = "/project/internal/boundary50"
+	g := buildTestGraph(t)
+
+	// 2 sibling route files: only 1 calls "AuthMiddleware".
+	with := dir + "/with.go"
+	addFileWithImports(g, with)
+	addRouteNode(g, with, "GET", "/r")
+	addFunctionWithCalls(g, with, "Reg", "AuthMiddleware")
+
+	without := dir + "/without.go"
+	addFileWithImports(g, without)
+	addRouteNode(g, without, "GET", "/s")
+	// without does NOT call AuthMiddleware
+
+	target := dir + "/target.go"
+	addFileWithImports(g, target)
+	addRouteNode(g, target, "GET", "/target")
+
+	e := NewEngine(nil)
+	violations := e.CheckNorms(g, target)
+
+	found := false
+	for _, v := range violations {
+		if strings.Contains(v.PatternID, "AuthMiddleware") {
+			found = true
+			if v.Severity != SeverityMedium {
+				t.Errorf("severity = %q, want MEDIUM (1/2=50%% exact boundary)", v.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected MEDIUM norm violation at exactly 50%% threshold; got %+v", violations)
+	}
+}
+
+// TestCheckNorms_BareFilename verifies that a filePath with no directory component
+// (dir == ".") does not panic and returns nil — no package scope can be inferred.
+func TestCheckNorms_BareFilename(t *testing.T) {
+	g := buildTestGraph(t)
+	// Add a route node for the bare filename so we pass the route check.
+	addFileWithImports(g, "target.go")
+	addRouteNode(g, "target.go", "GET", "/target")
+
+	e := NewEngine(nil)
+	if v := e.CheckNorms(g, "target.go"); v != nil {
+		t.Errorf("bare filename should return nil (dir=='.'), got %+v", v)
+	}
+}
+
+// TestCheckNorms_MediumEvidence verifies that the Evidence field for a MEDIUM
+// violation contains the correct ratio string.
+func TestCheckNorms_MediumEvidence(t *testing.T) {
+	const dir = "/project/internal/evidence"
+	g := buildTestGraph(t)
+
+	for i := 0; i < 3; i++ {
+		f := dir + "/sib" + string(rune('a'+i)) + ".go"
+		addFileWithImports(g, f)
+		addRouteNode(g, f, "GET", "/r"+string(rune('a'+i)))
+		addFunctionWithCalls(g, f, "Reg"+string(rune('A'+i)), "RateLimiter")
+	}
+	for i := 0; i < 2; i++ {
+		f := dir + "/no" + string(rune('a'+i)) + ".go"
+		addFileWithImports(g, f)
+		addRouteNode(g, f, "GET", "/s"+string(rune('a'+i)))
+	}
+	target := dir + "/target.go"
+	addFileWithImports(g, target)
+	addRouteNode(g, target, "GET", "/target")
+
+	e := NewEngine(nil)
+	violations := e.CheckNorms(g, target)
+
+	for _, v := range violations {
+		if !strings.Contains(v.PatternID, "RateLimiter") {
+			continue
+		}
+		if !strings.Contains(v.Evidence, "3/5") {
+			t.Errorf("evidence %q does not mention 3/5 ratio", v.Evidence)
+		}
+		if !strings.Contains(v.Message, "RateLimiter") {
+			t.Errorf("message %q does not name the normed function", v.Message)
+		}
 	}
 }
 
