@@ -40,9 +40,10 @@ func TestRustFrameworks_LoadBuiltin_ContainsAllPatterns(t *testing.T) {
 
 func TestRustFrameworks_DefaultEngine_PatternCount(t *testing.T) {
 	e := DefaultEngine()
-	// 55 pre-existing patterns (from sprints 26.1-26.9) + 3 new Rust framework patterns = 58 total minimum.
-	if e.PatternCount() < 58 {
-		t.Errorf("DefaultEngine PatternCount = %d, want >= 58", e.PatternCount())
+	// 58 pre-existing patterns (26.1-26.9 + 26.4 Python + 26.5 Java)
+	// + 3 new Rust framework patterns = 61 total minimum.
+	if e.PatternCount() < 61 {
+		t.Errorf("DefaultEngine PatternCount = %d, want >= 61", e.PatternCount())
 	}
 }
 
@@ -177,6 +178,25 @@ func TestRustFrameworks_Actix_NoRoutes_NoViolation(t *testing.T) {
 	violations := e.CheckFile(g, "/project/src/models.rs", nil)
 	if findViolation(violations, "rust-actix-missing-auth") != nil {
 		t.Error("expected no violation when no routes are registered")
+	}
+}
+
+// Framework identifier: actix-web (hyphen) as well as actix_web (underscore) must trigger.
+func TestRustFrameworks_Actix_HyphenIdentifier_Fires(t *testing.T) {
+	ps, err := LoadBuiltin()
+	if err != nil {
+		t.Fatalf("LoadBuiltin: %v", err)
+	}
+	e := NewEngine(ps)
+	g := buildTestGraph(t)
+
+	// Parser may record the import as "actix-web" (hyphen from Cargo.toml).
+	addFileWithImports(g, "/project/src/routes.rs", "actix-web")
+	addFunctionWithCalls(g, "/project/src/routes.rs", "setup", "route", "get", "post")
+
+	violations := e.CheckFile(g, "/project/src/routes.rs", nil)
+	if findViolation(violations, "rust-actix-missing-auth") == nil {
+		t.Fatal("expected rust-actix-missing-auth violation for actix-web (hyphen) import, got none")
 	}
 }
 

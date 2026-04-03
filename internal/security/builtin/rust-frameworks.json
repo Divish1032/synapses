@@ -58,7 +58,7 @@
           "AuthLayer*", "AuthMiddleware*",
           "login_required*", "token_required*",
           "check_token*", "checkToken*",
-          "from_request*", "extract_auth*"
+          "extract_auth*"
         ],
         "route_node_names": [
           "route", "nest", "nest_service", "merge"
@@ -76,7 +76,7 @@
       "framework": "rocket",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A file using Rocket mounts routes but does not apply any authentication. Rocket provides two auth mechanisms: (1) Fairings (middleware) — applied via .attach(AuthFairing) on the Rocket instance before launch; (2) Request guards — handler function parameters that implement FromRequest (e.g. AuthToken, Claims, a custom User guard). This check fires when a file calls .mount() or .ignite() but calls no recognised auth function. Note: request guard types in handler signatures are typically represented as type references rather than function calls in the AST — use this finding as a prompt to review whether each mounted route requires authentication.",
+      "description": "A file using Rocket mounts routes but does not apply any authentication. Rocket provides two auth mechanisms: (1) Fairings (middleware) — applied via .attach(AuthFairing) on the Rocket instance before launch; (2) Request guards — handler function parameters that implement FromRequest (e.g. AuthToken, Claims, a custom User guard). This check fires when a file calls .mount() but calls no recognised auth function. Note: request guard types in handler signatures are typically represented as type references rather than function calls in the AST — use this finding as a prompt to review whether each mounted route requires authentication.",
       "detection": {
         "check_type": "missing_middleware",
         "framework_identifiers": ["rocket"],
