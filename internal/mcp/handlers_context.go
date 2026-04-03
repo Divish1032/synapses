@@ -1101,6 +1101,26 @@ func (s *Server) handleGetContext(
 				norms := observeFileNorms(s.graph, best.File)
 				enrichment.SecurityConstraints = append(enrichment.SecurityConstraints, norms...)
 			}
+
+			// Sprint 27.1: Framework-aware security pattern violations (Pre-Write timing point).
+			// Runs the Sprint 26 pattern library against the target file. Unlike architectural
+			// rules (static config), patterns are graph-derived and framework-specific.
+			// content=nil: graph-based checks (middleware, annotation, admin) run; the
+			// hardcoded-secret check (content-based) is silently skipped — appropriate for
+			// pre-write context where reading disk is not warranted.
+			if s.patternEngine != nil && best.File != "" {
+				absFile := best.File
+				if repoRoot := s.graph.Root(); repoRoot != "" && !filepath.IsAbs(absFile) {
+					absFile = filepath.Join(repoRoot, absFile)
+				}
+				for _, v := range s.patternEngine.CheckFile(s.graph, absFile, nil) {
+					sc := fmt.Sprintf("%s [%s]: %s", v.Severity, v.PatternName, v.Message)
+					if v.Evidence != "" {
+						sc += " " + v.Evidence
+					}
+					enrichment.SecurityConstraints = append(enrichment.SecurityConstraints, sc)
+				}
+			}
 		}
 
 		if len(enrichment.ApplicableRules) > 0 || len(enrichment.RuleAlerts) > 0 || len(enrichment.SecurityConstraints) > 0 || len(enrichment.RecentFailures) > 0 || enrichment.ActiveTask != nil {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
@@ -621,4 +622,259 @@ func makeTestFuncNode(g *graph.Graph, file, name string, line int) graph.NodeID 
 		Line: line,
 	})
 	return id
+}
+
+// ── Sprint 27.1: Pattern engine violations in SecurityConstraints ─────────────
+
+// makeChiRouteGraph sets up a minimal graph that triggers the "go-chi-missing-auth"
+// pattern: a file that imports chi and registers routes (via "Get"/"Post" calls)
+// but has no auth middleware call. The graph is rooted at root so file paths are
+// absolute (required by the pattern engine's framework gate).
+func makeChiRouteGraph(t *testing.T, root, filePath string) *graph.Graph {
+	t.Helper()
+	g := graph.New("test-repo")
+	g.SetRoot(root)
+
+	// NodeFile for the routes file.
+	fileID := g.MakeNodeID(filePath, filePath)
+	g.AddNode(&graph.Node{
+		ID: fileID, Type: graph.NodeFile,
+		Name: filePath, File: filePath,
+	})
+
+	// chi import — triggers the framework gate.
+	chiID := g.MakeNodeID("github.com/go-chi/chi/v5", "github.com/go-chi/chi/v5")
+	g.AddNode(&graph.Node{
+		ID: chiID, Type: graph.NodePackage,
+		Name:    "github.com/go-chi/chi/v5",
+		Package: "github.com/go-chi/chi/v5",
+		File:    filePath,
+	})
+	g.AddEdge(&graph.Edge{From: fileID, To: chiID, Type: graph.EdgeImports})
+
+	// Handler function that calls route registration methods but NO auth.
+	fnID := g.MakeNodeID(filePath, "RegisterRoutes")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "RegisterRoutes", File: filePath, Line: 5,
+	})
+	getID := g.MakeNodeID("callee:Get", "Get")
+	g.AddNode(&graph.Node{ID: getID, Type: graph.NodeFunction, Name: "Get", File: "chi.go"})
+	g.AddEdge(&graph.Edge{From: fnID, To: getID, Type: graph.EdgeCalls})
+
+	return g
+}
+
+func TestGetContext_PatternEngine_ViolationAppearsInSecurityConstraints(t *testing.T) {
+	root := t.TempDir()
+	filePath := root + "/api/routes.go"
+	g := makeChiRouteGraph(t, root, filePath)
+
+	st := openMCPTestStore(t)
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	// intent=add on a chi route file without auth → pattern engine fires.
+	req := callTool(map[string]any{
+		"entity": "RegisterRoutes",
+		"intent": "add",
+		"format": "json",
+	})
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	enrichRaw, ok := m["enrichment"]
+	if !ok {
+		t.Fatal("expected enrichment section")
+	}
+	enrichMap := enrichRaw.(map[string]any)
+	constraintsRaw, ok := enrichMap["security_constraints"]
+	if !ok {
+		t.Fatal("expected security_constraints from pattern engine")
+	}
+	constraints, ok := constraintsRaw.([]any)
+	if !ok || len(constraints) == 0 {
+		t.Fatalf("expected non-empty security_constraints, got %v", constraintsRaw)
+	}
+
+	// At least one constraint must reference chi auth.
+	found := false
+	for _, c := range constraints {
+		s, ok := c.(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(strings.ToLower(s), "chi") ||
+			strings.Contains(strings.ToLower(s), "auth") ||
+			strings.Contains(strings.ToLower(s), "middleware") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no chi/auth/middleware constraint found in: %v", constraints)
+	}
+}
+
+func TestGetContext_PatternEngine_ViolationAbsentForDebugIntent(t *testing.T) {
+	root := t.TempDir()
+	filePath := root + "/api/routes.go"
+	g := makeChiRouteGraph(t, root, filePath)
+
+	st := openMCPTestStore(t)
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	// intent=debug must NOT trigger pattern violations in SecurityConstraints.
+	req := callTool(map[string]any{
+		"entity": "RegisterRoutes",
+		"intent": "debug",
+		"format": "json",
+	})
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	if enrichRaw, ok := m["enrichment"]; ok {
+		if enrichMap, ok := enrichRaw.(map[string]any); ok {
+			if _, ok := enrichMap["security_constraints"]; ok {
+				t.Error("security_constraints must be absent for intent=debug")
+			}
+		}
+	}
+}
+
+func TestGetContext_PatternEngine_NilEngineSafe(t *testing.T) {
+	// Verify no panic when patternEngine is nil (explicitly cleared after construction).
+	g := graph.New("test-repo")
+	fnID := g.MakeNodeID("api/routes.go", "Handler")
+	g.AddNode(&graph.Node{
+		ID: fnID, Type: graph.NodeFunction,
+		Name: "Handler", File: "api/routes.go", Line: 1,
+	})
+
+	st := openMCPTestStore(t)
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.patternEngine = nil // force nil to test guard
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{
+		"entity": "Handler",
+		"intent": "add",
+		"format": "json",
+	})
+	// Must not panic.
+	result, err := srv.handleGetContext(ctx, req)
+	if err != nil {
+		t.Fatalf("handleGetContext with nil patternEngine: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+func TestGetContext_PatternEngine_ConstraintIncludesSeverityAndName(t *testing.T) {
+	// Verify the format: "SEVERITY [PatternName]: Message Evidence"
+	root := t.TempDir()
+	filePath := root + "/api/routes.go"
+	g := makeChiRouteGraph(t, root, filePath)
+
+	st := openMCPTestStore(t)
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{
+		"entity": "RegisterRoutes",
+		"intent": "modify",
+		"format": "json",
+	})
+	result, err := srv.handleGetContext(ctx, req)
+	m := mustResult(t, result, err)
+
+	enrichMap := m["enrichment"].(map[string]any)
+	constraints, ok := enrichMap["security_constraints"].([]any)
+	if !ok || len(constraints) == 0 {
+		t.Skip("no pattern violations for this graph — skipping format check")
+	}
+
+	// At least one constraint from the pattern engine should follow the format:
+	// "SEVERITY [PatternName]: Message"
+	found := false
+	for _, c := range constraints {
+		s, ok := c.(string)
+		if !ok {
+			continue
+		}
+		// Pattern engine constraints have the form "CRITICAL [chi: missing auth middleware]: ..."
+		if (strings.HasPrefix(s, "CRITICAL") || strings.HasPrefix(s, "HIGH") || strings.HasPrefix(s, "MEDIUM")) &&
+			strings.Contains(s, "[") && strings.Contains(s, "]:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no pattern-engine-formatted constraint found in: %v", constraints)
+	}
+}
+
+func TestGetContext_PatternEngine_CompactFormatRendersViolation(t *testing.T) {
+	// Compact format (the default) must also render pattern engine violations
+	// via the 🔒 section in digest.go.
+	root := t.TempDir()
+	filePath := root + "/api/routes.go"
+	g := makeChiRouteGraph(t, root, filePath)
+
+	st := openMCPTestStore(t)
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	srv := New(g, cfg, st)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	req := callTool(map[string]any{
+		"entity": "RegisterRoutes",
+		"intent": "add",
+		"format": "compact",
+	})
+	result, err := srv.handleGetContext(ctx, req)
+	if err != nil {
+		t.Fatalf("handleGetContext: %v", err)
+	}
+	if result == nil || len(result.Content) == 0 {
+		t.Fatal("empty result")
+	}
+	// Compact format returns a single TextContent item.
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected mcp.TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(tc.Text, "🔒") {
+		t.Errorf("compact output must contain 🔒 security section when pattern violations exist; got:\n%s", tc.Text)
+	}
 }
