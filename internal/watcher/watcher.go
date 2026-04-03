@@ -133,6 +133,7 @@ type Watcher struct {
 	nmRunner          NameMatcherRunner        // set via SetNameMatcher; may be nil
 	afterRebuildHook  func()                   // called after each RebuildIndex; may be nil
 	onStaleEmbeddings func(memoryIDs []string) // called when embeddings are marked stale; may be nil
+	onSecurityScan    func(file string)        // Sprint 27.8: called after each file reparse to run security patterns; may be nil
 
 	mu        sync.Mutex
 	timers    map[string]*time.Timer // debounce timers keyed by absolute file path
@@ -409,6 +410,19 @@ func (w *Watcher) SetAfterRebuildHook(fn func()) {
 func (w *Watcher) SetOnStaleEmbeddings(fn func(memoryIDs []string)) {
 	w.mu.Lock()
 	w.onStaleEmbeddings = fn
+	w.mu.Unlock()
+}
+
+// SetSecurityScanCb registers a callback invoked after each successful file
+// reparse (in Phase 3 of applyBatch). The callback receives the absolute path
+// of the reparsed file. The watcher runs it via trackGo so it never blocks the
+// applyBatch critical path. Pass nil to disable.
+//
+// Sprint 27.8: wired by the MCP server to run security pattern scans and enqueue
+// findings into the finding queue for piggyback delivery to the agent.
+func (w *Watcher) SetSecurityScanCb(fn func(file string)) {
+	w.mu.Lock()
+	w.onSecurityScan = fn
 	w.mu.Unlock()
 }
 
@@ -1696,6 +1710,15 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 
 		logutil.Info("synapses/watcher: updated %s\n", s.result.path)
 		w.persistAsync(s.result.path)
+
+		// Sprint 27.8: run security pattern scan on the reparsed file.
+		// Runs asynchronously via trackGo — never blocks the applyBatch critical path.
+		// Only per-file checks (CheckFile, CheckNorms, CheckImports); NOT CheckProject,
+		// which is O(N×E) and unsuitable for per-keystroke execution.
+		if cb := w.onSecurityScan; cb != nil {
+			filePath := s.result.path
+			w.trackGo(func() { cb(filePath) })
+		}
 
 		if w.brainClient != nil {
 			select {

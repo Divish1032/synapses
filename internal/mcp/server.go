@@ -165,6 +165,12 @@ type Server struct {
 	lastAgentMu sync.RWMutex
 	lastAgentID string
 
+	// lastSynapseSessionID is the Synapses session UUID from the most recent tool
+	// call. Used by background components (file watcher) to enqueue findings into
+	// the correct session's finding queue. Sprint 27.8.
+	lastSynapseSessionMu sync.RWMutex
+	lastSynapseSessionID string
+
 	// promptTemplates holds activation-context prompts loaded at startup.
 	// They are auto-injected into get_context and session_init responses
 	// when their patterns (file, entity, module) match the queried entity.
@@ -582,6 +588,25 @@ func (s *Server) getLastAgent() string {
 	return s.lastAgentID
 }
 
+// setLastSynapseSessionID records the Synapses session UUID from the most recent tool call.
+// Called in the middleware so background components (watcher) can find the active session.
+func (s *Server) setLastSynapseSessionID(id string) {
+	if id == "" {
+		return
+	}
+	s.lastSynapseSessionMu.Lock()
+	s.lastSynapseSessionID = id
+	s.lastSynapseSessionMu.Unlock()
+}
+
+// getLastSynapseSessionID returns the Synapses session UUID from the most recent tool call.
+// Returns "" if no session has been initiated yet.
+func (s *Server) getLastSynapseSessionID() string {
+	s.lastSynapseSessionMu.RLock()
+	defer s.lastSynapseSessionMu.RUnlock()
+	return s.lastSynapseSessionID
+}
+
 // New creates a Server wired to the given graph, config, and optional store.
 // The store is required for Agent Task Memory tools (create_plan, get_pending_tasks, etc.).
 // Pass nil for st if running in a context without persistence (e.g. tests).
@@ -978,8 +1003,20 @@ func (s *Server) InvalidatePacketCache() {
 
 // SetChangeSource wires a change event source (typically the file watcher) so
 // get_working_state can report recent file activity to agents.
+//
+// Sprint 27.8: if cs also implements the optional securityScanSetter interface
+// (i.e. *watcher.Watcher), the server's security scan callback is registered
+// automatically — no extra wiring needed at the call site.
 func (s *Server) SetChangeSource(cs ChangeSource) {
 	s.changeSource = cs
+	// Optional: auto-wire the security scan callback when the change source supports it.
+	// Uses an anonymous interface so this file never imports internal/watcher directly.
+	type securityScanSetter interface {
+		SetSecurityScanCb(func(file string))
+	}
+	if setter, ok := cs.(securityScanSetter); ok {
+		setter.SetSecurityScanCb(s.onWatcherFileChanged)
+	}
 }
 
 // SetFederationResolver wires a federation.Resolver into the server for
@@ -1498,6 +1535,10 @@ func (s *Server) addOrDefer(t mcp.Tool, h server.ToolHandlerFunc) {
 		if sessionID == "" {
 			return result, nil
 		}
+
+		// Sprint 27.8: track the latest active Synapses session UUID so background
+		// components (file watcher) can enqueue findings into the correct session.
+		s.setLastSynapseSessionID(sessionID)
 
 		// Async write — never blocks the response
 		if len(entities) > 0 || len(files) > 0 {

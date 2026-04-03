@@ -1875,6 +1875,13 @@ func (s *Server) handleSessionInit(
 		}
 		briefing["security_rules"] = briefingSecurityRules
 
+		// Sprint 27.8: surface outstanding watcher-detected security findings.
+		// These are CRITICAL/HIGH findings detected while the agent was editing files
+		// that have not yet been addressed. Queried from the last 24 h of episodes.
+		if watcherFindings := s.getWatcherSecurityFindings(); len(watcherFindings) > 0 {
+			briefing["watcher_security_findings"] = watcherFindings
+		}
+
 		// (5) Recent decisions and rejected approaches.
 		//
 		// Decision episodes: explicit decisions stored via memory(action=save).
