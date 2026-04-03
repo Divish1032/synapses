@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -350,5 +351,56 @@ func TestGoalReinforcement_EndToEnd_FiresAtNthDispatch(t *testing.T) {
 	out6 := dispatch()
 	if !strings.Contains(out6, "📌 Reminder:") {
 		t.Errorf("call 6: expected second reminder at interval=3, got: %q", out6)
+	}
+}
+
+// TestTopConventions_IncludesLearnedConventions verifies that topConventions
+// (used by the goal reinforcer) returns cross-session learned conventions
+// between formatter conventions and configured rules.
+func TestTopConventions_IncludesLearnedConventions(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-top-conv"
+
+	// Insert 3 distinct sessions all observing uses_testify so it gets promoted.
+	for i := 0; i < MinSessionsForConvention; i++ {
+		_, err := st.InsertSessionObservation(store.SessionObservation{
+			SessionID:  fmt.Sprintf("sess-%d", i),
+			ProjectID:  projID,
+			AgentID:    "a",
+			Category:   store.ObsCategoryLibraryUsage,
+			Key:        "uses_testify",
+			Confidence: 0.6,
+		})
+		if err != nil {
+			t.Fatalf("insert observation: %v", err)
+		}
+	}
+	if _, err := runConventionExtraction(st, projID); err != nil {
+		t.Fatalf("runConventionExtraction: %v", err)
+	}
+
+	g := graph.New("repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	srv := &Server{
+		store:     st,
+		projectID: projID,
+		graph:     g,
+		config:    cfg,
+	}
+
+	convs := srv.topConventions(5)
+	found := false
+	for _, c := range convs {
+		if strings.Contains(c, "testify") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("topConventions did not include learned convention; got: %v", convs)
 	}
 }

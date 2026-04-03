@@ -178,7 +178,8 @@ func (s *Server) topConventions(n int) []string {
 	}
 
 	// Cross-session learned conventions (Sprint 29.2).
-	// GetProjectConventions is a fast indexed SQL read; at most 1 slot here.
+	// GetProjectConventions is a fast indexed SQL read (indexed on project_id,
+	// confidence). Fills remaining slots up to n with highest-confidence first.
 	if s.store != nil && s.projectID != "" {
 		if learned, err := s.store.GetProjectConventions(s.projectID, 0.6); err == nil {
 			for _, c := range learned {
