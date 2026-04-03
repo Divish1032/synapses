@@ -2569,3 +2569,87 @@ func TestSessionInit_LearnedConventions_BelowThresholdNotDelivered(t *testing.T)
 		}
 	}
 }
+
+// TestSessionInit_LearnedConventions_CappedAtThree verifies that even when more
+// than 3 conventions are promoted, session_init delivers at most 3 learned
+// conventions to keep the briefing terse (maxLearnedConventions = 3).
+func TestSessionInit_LearnedConventions_CappedAtThree(t *testing.T) {
+	st := openMCPTestStore(t)
+
+	const projID = "proj-session-init-cap"
+
+	// Promote 5 distinct conventions (all above threshold).
+	keys := []string{
+		"uses_testify", "uses_chi_router", "uses_gomock",
+		"uses_gin_router", "uses_echo_router",
+	}
+	for _, key := range keys {
+		for i := 0; i < MinSessionsForConvention; i++ {
+			_, err := st.InsertSessionObservation(store.SessionObservation{
+				SessionID:  fmt.Sprintf("cap-sess-%s-%d", key, i),
+				ProjectID:  projID,
+				AgentID:    "agent-cap",
+				Category:   store.ObsCategoryLibraryUsage,
+				Key:        key,
+				Confidence: 0.6,
+			})
+			if err != nil {
+				t.Fatalf("InsertSessionObservation: %v", err)
+			}
+		}
+	}
+
+	promoted, err := runConventionExtraction(st, projID)
+	if err != nil {
+		t.Fatalf("runConventionExtraction: %v", err)
+	}
+	if promoted < 4 {
+		t.Fatalf("expected ≥4 promoted conventions, got %d", promoted)
+	}
+
+	g := graph.New("test-repo")
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	srv := New(g, cfg, st)
+	srv.SetProjectID(projID)
+	srv.StartBackground()
+	t.Cleanup(func() { srv.Close() })
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "cap-agent",
+	}))
+	m := mustResult(t, res, err)
+
+	briefing, ok := m["_briefing"].(map[string]any)
+	if !ok {
+		t.Fatalf("_briefing must be a map, got %T", m["_briefing"])
+	}
+
+	convs, ok := briefing["conventions"].([]any)
+	if !ok {
+		t.Fatalf("_briefing.conventions must be a slice, got %T", briefing["conventions"])
+	}
+
+	// Count only the learned conventions (exclude formatter conventions if any).
+	// The cap of 3 applies specifically to learned conventions; formatter
+	// conventions are additional and uncapped. We check total ≤ 3 + formatter slots.
+	learnedCount := 0
+	for _, c := range convs {
+		s, ok := c.(string)
+		if !ok {
+			continue
+		}
+		// All learned conventions contain "(observed across N sessions)."
+		if strings.Contains(s, "observed across") {
+			learnedCount++
+		}
+	}
+	if learnedCount > 3 {
+		t.Errorf("expected at most 3 learned conventions in briefing, got %d: %v", learnedCount, convs)
+	}
+	if learnedCount == 0 {
+		t.Errorf("expected at least 1 learned convention in briefing, got 0: %v", convs)
+	}
+}

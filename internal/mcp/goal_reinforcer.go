@@ -183,8 +183,11 @@ func (s *Server) topConventions(n int) []string {
 	if s.store != nil && s.projectID != "" {
 		if learned, err := s.store.GetProjectConventions(s.projectID, 0.6); err == nil {
 			for _, c := range learned {
-				if len(convs) >= n || c.Text == "" {
+				if len(convs) >= n {
 					break
+				}
+				if c.Text == "" {
+					continue // skip corrupt/empty entries; keep processing
 				}
 				convs = append(convs, c.Text)
 			}
