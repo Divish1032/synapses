@@ -77,6 +77,9 @@ type cacheEntry struct {
 //
 // When no verifier is registered for a language, Get returns a NoOpVerifier.
 // Manager is safe for concurrent use after construction.
+//
+// Lock ordering: mu → lastUsedMu. Never take lastUsedMu while holding mu's
+// read lock from a concurrent path — take mu first, then lastUsedMu.
 type Manager struct {
 	opts      Options
 	mu        sync.RWMutex
@@ -84,6 +87,13 @@ type Manager struct {
 
 	cacheMu sync.Mutex
 	cache   map[cacheKey]cacheEntry
+
+	// lastUsedMu protects lastUsed. Lock ordering: mu → lastUsedMu.
+	lastUsedMu sync.Mutex
+	// lastUsed records the most recent ResolveEdge call time per language.
+	// Used by TrimIdle to close verifiers that have sat idle longer than
+	// opts.IdleTimeout without being queried.
+	lastUsed map[Language]time.Time
 }
 
 // NewManager constructs a Manager with the given options.
@@ -94,6 +104,7 @@ func NewManager(opts Options) *Manager {
 		opts:      o,
 		verifiers: make(map[Language]EdgeVerifier),
 		cache:     make(map[cacheKey]cacheEntry),
+		lastUsed:  make(map[Language]time.Time),
 	}
 }
 
@@ -141,6 +152,13 @@ func (m *Manager) ResolveEdge(ctx context.Context, lang Language, from, to graph
 		return nil, err
 	}
 
+	// Record activity time for this language so TrimIdle can enforce IdleTimeout.
+	// Updated even for NoOp results — the intent is to track when this language
+	// was last queried, regardless of whether LSP is actually running.
+	m.lastUsedMu.Lock()
+	m.lastUsed[lang] = time.Now()
+	m.lastUsedMu.Unlock()
+
 	// Cache results from real verifiers (not no-ops — ConfidenceNone is not
 	// worth caching since the no-op always returns the same cheap result).
 	if pos.File != "" && edge.Confidence > ConfidenceNone {
@@ -152,12 +170,18 @@ func (m *Manager) ResolveEdge(ctx context.Context, lang Language, from, to graph
 
 // Close shuts down all registered verifiers. Idempotent.
 // Should be called when the Manager is no longer needed (e.g. daemon shutdown).
+// Close calls each verifier's Close after releasing the write lock to prevent
+// a slow LSP process shutdown from blocking concurrent Get calls.
 func (m *Manager) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	verifiers := make([]EdgeVerifier, 0, len(m.verifiers))
 	for lang, v := range m.verifiers {
-		_ = v.Close()
+		verifiers = append(verifiers, v)
 		delete(m.verifiers, lang)
+	}
+	m.mu.Unlock()
+	for _, v := range verifiers {
+		_ = v.Close()
 	}
 }
 
@@ -212,5 +236,39 @@ func (m *Manager) PurgeExpired() {
 		if now.After(entry.expiresAt) {
 			delete(m.cache, k)
 		}
+	}
+}
+
+// TrimIdle closes verifiers that have not been used for longer than
+// opts.IdleTimeout, freeing the underlying LSP process (gopls, tsserver, etc.)
+// to reclaim system resources. The verifier restarts lazily on the next
+// ResolveEdge call.
+//
+// TrimIdle is designed to be called periodically — for example, once per
+// minute by the daemon's maintenance goroutine — rather than on every query.
+// It is safe to call from multiple goroutines concurrently.
+//
+// Lock ordering: mu → lastUsedMu. Both are acquired briefly, then released
+// before calling v.Close() to avoid blocking concurrent Get calls.
+func (m *Manager) TrimIdle() {
+	now := time.Now()
+
+	// Collect idle verifiers under both locks, then close outside all locks.
+	m.mu.Lock()
+	m.lastUsedMu.Lock()
+	var toClose []EdgeVerifier
+	for lang, v := range m.verifiers {
+		last, ok := m.lastUsed[lang]
+		if !ok || now.Sub(last) >= m.opts.IdleTimeout {
+			toClose = append(toClose, v)
+			delete(m.verifiers, lang)
+			delete(m.lastUsed, lang)
+		}
+	}
+	m.lastUsedMu.Unlock()
+	m.mu.Unlock()
+
+	for _, v := range toClose {
+		_ = v.Close()
 	}
 }

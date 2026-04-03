@@ -347,6 +347,81 @@ func TestNewVerifiedEdge_NotConfirmedWhenCalleeEmpty(t *testing.T) {
 	}
 }
 
+func TestManager_TrimIdle_ClosesIdleVerifier(t *testing.T) {
+	stub := &stubVerifier{lang: lsp.LanguageGo, confidence: lsp.ConfidenceHigh}
+	m := lsp.NewManager(lsp.Options{IdleTimeout: 5 * time.Millisecond, CacheTTL: time.Minute})
+	m.Register(stub)
+
+	// Make one call to record activity.
+	pos := lsp.CallPosition{File: "/repo/main.go", Line: 1, Col: 0}
+	_, _ = m.ResolveEdge(context.Background(), lsp.LanguageGo, "from", "to", pos)
+
+	time.Sleep(10 * time.Millisecond) // exceed IdleTimeout
+	m.TrimIdle()
+
+	if !stub.closed {
+		t.Error("TrimIdle should have closed idle verifier")
+	}
+	// After trim, Get should return NoOp.
+	edge, _ := m.Get(lsp.LanguageGo).ResolveEdge(context.Background(), "from", "to", pos)
+	if edge.Confidence != lsp.ConfidenceNone {
+		t.Errorf("expected NoOp after TrimIdle, got %v", edge.Confidence)
+	}
+}
+
+func TestManager_TrimIdle_DoesNotCloseActiveVerifier(t *testing.T) {
+	stub := &stubVerifier{lang: lsp.LanguageGo, confidence: lsp.ConfidenceHigh}
+	m := lsp.NewManager(lsp.Options{IdleTimeout: time.Hour, CacheTTL: time.Minute})
+	m.Register(stub)
+
+	pos := lsp.CallPosition{File: "/repo/main.go", Line: 1, Col: 0}
+	_, _ = m.ResolveEdge(context.Background(), lsp.LanguageGo, "from", "to", pos)
+
+	m.TrimIdle() // IdleTimeout is 1 hour — verifier is not idle
+
+	if stub.closed {
+		t.Error("TrimIdle should not close recently-used verifier")
+	}
+}
+
+func TestManager_TrimIdle_RegisteredButNeverUsed(t *testing.T) {
+	// A verifier that was registered but never had ResolveEdge called should
+	// be considered idle (no lastUsed entry).
+	stub := &stubVerifier{lang: lsp.LanguageGo, confidence: lsp.ConfidenceHigh}
+	m := lsp.NewManager(lsp.Options{IdleTimeout: time.Millisecond})
+	m.Register(stub)
+
+	m.TrimIdle() // no ResolveEdge ever called → no lastUsed entry → considered idle
+
+	if !stub.closed {
+		t.Error("TrimIdle should close verifier that was never used")
+	}
+}
+
+func TestManager_CloseDoesNotHoldLockDuringVerifierClose(t *testing.T) {
+	// Verify that Manager.Close() releases the write lock before calling v.Close(),
+	// so concurrent Get() calls are not blocked during a slow LSP shutdown.
+	slow := &slowCloseVerifier{lang: lsp.LanguageGo, closeSleep: 20 * time.Millisecond}
+	m := lsp.NewManager(lsp.Options{})
+	m.Register(slow)
+
+	done := make(chan struct{})
+	go func() {
+		m.Close()
+		close(done)
+	}()
+
+	// Give Close goroutine a moment to start, then Get should not block.
+	time.Sleep(2 * time.Millisecond)
+	v := m.Get(lsp.LanguageGo) // should not deadlock
+	edge, _ := v.ResolveEdge(context.Background(), "from", "to", lsp.CallPosition{File: "/f.go"})
+	if edge.Confidence != lsp.ConfidenceNone {
+		t.Errorf("expected NoOp after Close started, got %v", edge.Confidence)
+	}
+
+	<-done
+}
+
 func TestManager_RegisterDoesNotHoldLockDuringClose(t *testing.T) {
 	// Verify that Close() is called after releasing the write lock by observing
 	// that a concurrent Get() call (RLock) can proceed while the slow close runs.
