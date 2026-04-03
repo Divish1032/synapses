@@ -329,13 +329,14 @@ type RecallEffectivenessEvent struct {
 
 // ValidationEvent tracks outcomes of validate (phase=pre/post/list/full/safety).
 type ValidationEvent struct {
-	ToolName       string `json:"tool_name"` // "validate" (with phase qualifier)
-	Status         string `json:"status"`    // "ok" | "violations_found" | "pass"
-	ViolationCount int    `json:"violation_count"`
-	SafetyStatus   string `json:"safety_status,omitempty"` // "clear" | "warning"
-	RuleIDs        string `json:"rule_ids,omitempty"`      // JSON array of config.Violation.RuleID strings
-	AgentID        string `json:"agent_id,omitempty"`
-	ProjectID      string `json:"project_id,omitempty"`
+	ToolName             string `json:"tool_name"` // "validate" (with phase qualifier)
+	Status               string `json:"status"`    // "ok" | "violations_found" | "pass"
+	ViolationCount       int    `json:"violation_count"`
+	SecurityFindingCount int    `json:"security_finding_count,omitempty"` // Sprint 27.3: security pattern violations
+	SafetyStatus         string `json:"safety_status,omitempty"`          // "clear" | "warning"
+	RuleIDs              string `json:"rule_ids,omitempty"`               // JSON array of config.Violation.RuleID strings
+	AgentID              string `json:"agent_id,omitempty"`
+	ProjectID            string `json:"project_id,omitempty"`
 }
 
 // IndexEvent records the outcome of a full or incremental index operation.
