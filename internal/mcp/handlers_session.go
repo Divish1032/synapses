@@ -1910,6 +1910,13 @@ func (s *Server) handleSessionInit(
 						continue
 					}
 					text := fp.Text
+					// Append recency so agents can judge whether the pattern is
+					// still relevant. "last seen 2 days ago" carries more weight
+					// than "last seen 8 months ago". Computed at delivery time to
+					// avoid staleness in the stored Text field.
+					if age := relativeAge(fp.UpdatedAt); age != "" {
+						text += " (" + age + ")"
+					}
 					if rs := []rune(text); len(rs) > maxWarningRunes {
 						text = string(rs[:maxWarningRunes]) + "…"
 					}
@@ -1917,6 +1924,34 @@ func (s *Server) handleSessionInit(
 				}
 				if len(warnings) > 0 {
 					briefing["failure_avoidance"] = warnings
+				}
+			}
+		}
+
+		// (2c) User preferences: cross-session signals about how this user likes
+		// to work ("User prefers bundled PRs for refactors (observed 3 times)").
+		// Promoted by the user preference engine (Sprint 29.6) from manual memory
+		// saves. Capped at 5 to keep the briefing concise.
+		if s.store != nil && s.projectID != "" {
+			if prefs, err := s.store.GetProjectUserPreferences(s.projectID, 0.5); err == nil && len(prefs) > 0 {
+				const maxUserPrefs = 5
+				const maxPrefRunes = 160
+				var prefTexts []string
+				for _, p := range prefs {
+					if len(prefTexts) >= maxUserPrefs {
+						break
+					}
+					if p.Text == "" {
+						continue
+					}
+					text := p.Text
+					if rs := []rune(text); len(rs) > maxPrefRunes {
+						text = string(rs[:maxPrefRunes]) + "…"
+					}
+					prefTexts = append(prefTexts, text)
+				}
+				if len(prefTexts) > 0 {
+					briefing["preferences"] = prefTexts
 				}
 			}
 		}

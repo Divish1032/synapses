@@ -105,6 +105,11 @@ type directionalContext struct {
 	// Sprint 17: knowledge graph nodes linked via RELATES_TO, CAUSED_BY, INSTANCE_OF,
 	// CONTRADICTS edges — NL-to-graph derived concepts, entities, artifacts, decisions.
 	Knowledge []graph.CarvedNode `json:"knowledge,omitempty"`
+	// Sprint 29.4: failure avoidance — patterns matching this entity (e.g. if the
+	// entity name matches a backtick identifier or library keyword that was tried
+	// and abandoned in prior sessions). Targeted delivery: shown only when the
+	// entity queried has a known failure history, not sprayed at every entity.
+	FailureWarnings []string `json:"failure_warnings,omitempty"`
 	// BUG-EVAL-9: disambiguation — present when multiple entities share the same name
 	// and no file= hint was provided. Available in both JSON and compact formats.
 	OtherCandidates []map[string]interface{} `json:"other_candidates,omitempty"` // all matching entities (including the one shown)
@@ -1306,6 +1311,31 @@ func (s *Server) handleGetContext(
 	if s.store != nil && dc.Root != nil {
 		if gaps, err := s.store.GetGaps(store.GapFilter{NodeID: string(dc.Root.ID), Status: "open"}); err == nil && len(gaps) > 0 {
 			dc.QualityGaps = gaps
+		}
+	}
+
+	// Sprint 29.4: targeted failure-avoidance delivery.
+	// When the queried entity matches a known failure pattern (library name,
+	// package name, or backtick-identified function), surface the warning here —
+	// at the exact moment the agent is investigating the entity — rather than
+	// relying solely on the session_init bulk briefing (which caps at 3 global
+	// patterns and may not include entity-specific warnings).
+	if s.store != nil && s.projectID != "" {
+		entityLower := strings.ToLower(entityName)
+		if patterns, err := s.store.GetProjectFailurePatterns(s.projectID, 0.6); err == nil {
+			const maxEntityWarnings = 2
+			for _, fp := range patterns {
+				if len(dc.FailureWarnings) >= maxEntityWarnings {
+					break
+				}
+				if failurePatternMatchesEntity(fp, entityLower) {
+					text := fp.Text
+					if age := relativeAge(fp.UpdatedAt); age != "" {
+						text += " (" + age + ")"
+					}
+					dc.FailureWarnings = append(dc.FailureWarnings, text)
+				}
+			}
 		}
 	}
 

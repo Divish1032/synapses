@@ -87,6 +87,15 @@ func serializeCompact(dc *directionalContext, detailLevel string) string {
 		}
 	}
 
+	// Sprint 29.4: failure avoidance — entity-specific warnings from cross-session
+	// failure patterns. Only present when this entity matches a known failure keyword.
+	if len(dc.FailureWarnings) > 0 {
+		fmt.Fprintf(&b, "⚠ failure history (%d):\n", len(dc.FailureWarnings))
+		for _, w := range dc.FailureWarnings {
+			fmt.Fprintf(&b, "  • %s\n", w)
+		}
+	}
+
 	// Sprint 23.1: entity memories — institutional knowledge attached to this entity.
 	// Rendered near the beginning (high-attention zone) so agents never miss prior
 	// session findings. "summary" level skips these to respect the ~50-token budget.

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -282,6 +283,69 @@ func runFailurePatternExtraction(st *store.Store, projectID string) (int, error)
 		total++
 	}
 	return total, nil
+}
+
+// failurePatternMatchesEntity returns true when a failure pattern is relevant
+// to the entity currently being queried via get_context. Used to surface
+// targeted warnings at the exact moment an agent investigates a potentially
+// problematic entity, rather than relying solely on session_init bulk delivery.
+//
+// Matching rules (applied in priority order):
+//  1. Exact match: fp.Keyword == entityNameLower — always relevant.
+//  2. Contains match: entityNameLower contains the keyword — catches import
+//     paths like "github.com/dgrijalva/jwt-go" matching keyword "jwt-go".
+//     Keyword must be ≥ 6 chars to prevent short tokens like "gin" matching
+//     unrelated entity names like "origin" or "engine".
+//
+// error_pattern entries are excluded — nobody queries "nil-pointer-dereference"
+// as a get_context entity, and noise would harm signal quality.
+func failurePatternMatchesEntity(fp store.FailurePattern, entityNameLower string) bool {
+	if fp.PatternType == "error_pattern" {
+		return false
+	}
+	if fp.Keyword == entityNameLower {
+		return true
+	}
+	// Contains match: only for longer keywords to avoid false positives.
+	if len(fp.Keyword) >= 6 && strings.Contains(entityNameLower, fp.Keyword) {
+		return true
+	}
+	return false
+}
+
+// relativeAge returns a human-readable string describing how long ago a Unix
+// timestamp occurred (e.g. "last seen 3 days ago"). Returns "" for zero/negative
+// timestamps. Used to add recency context to failure pattern warnings at
+// delivery time — not stored in the pattern's Text field to avoid staleness.
+func relativeAge(unixSec int64) string {
+	if unixSec <= 0 {
+		return ""
+	}
+	d := time.Since(time.Unix(unixSec, 0))
+	switch {
+	case d < 2*24*time.Hour:
+		return "last seen today"
+	case d < 7*24*time.Hour:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "last seen 1 day ago"
+		}
+		return fmt.Sprintf("last seen %d days ago", days)
+	case d < 30*24*time.Hour:
+		weeks := int(d.Hours() / 24 / 7)
+		if weeks == 1 {
+			return "last seen 1 week ago"
+		}
+		return fmt.Sprintf("last seen %d weeks ago", weeks)
+	case d < 365*24*time.Hour:
+		months := int(d.Hours() / 24 / 30)
+		if months == 1 {
+			return "last seen 1 month ago"
+		}
+		return fmt.Sprintf("last seen %d months ago", months)
+	default:
+		return "last seen over a year ago"
+	}
 }
 
 // classifyLibraryType returns "library" when tok matches a well-known library

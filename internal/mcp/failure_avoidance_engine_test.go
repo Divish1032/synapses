@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/store"
 )
@@ -805,5 +806,142 @@ func TestSessionInit_FailureAvoidance_CappedAtThree(t *testing.T) {
 	}
 	if len(warnings) > 3 {
 		t.Errorf("failure_avoidance should be capped at 3, got %d", len(warnings))
+	}
+}
+
+// TestSessionInit_FailureAvoidance_RecencyInWarning verifies that session_init
+// briefing failure_avoidance warnings include recency information when the
+// pattern has a non-zero UpdatedAt.
+func TestSessionInit_FailureAvoidance_RecencyInWarning(t *testing.T) {
+	st := openMCPTestStore(t)
+	const projID = "proj-fa-recency"
+
+	for i := 0; i < MinOccurrencesForFailurePattern; i++ {
+		_, err := st.InsertRejectedApproach(store.RejectedApproach{
+			ID:            fmt.Sprintf("rej-rec-%d", i),
+			ProjectID:     projID,
+			Approach:      "Tried gin-gonic for HTTP routing",
+			FailureReason: "conflict with existing middleware chain",
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+	if n, err := runFailurePatternExtraction(st, projID); err != nil || n == 0 {
+		t.Fatalf("extraction: n=%d err=%v", n, err)
+	}
+
+	srv, _, _ := newPopulatedServer(t)
+	srv.store = st
+	srv.projectID = projID
+
+	res, err := srv.handleSessionInit(context.Background(), callTool(map[string]any{
+		"agent_id": "agent-rec",
+		"intent":   "recency test",
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("session_init failed: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(firstTextContent(res)), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	briefing := resp["_briefing"].(map[string]any)
+	fa, ok := briefing["failure_avoidance"]
+	if !ok {
+		t.Fatal("failure_avoidance missing from briefing")
+	}
+	warnings := fa.([]any)
+	if len(warnings) == 0 {
+		t.Fatal("expected ≥1 warning")
+	}
+	// Warning should contain "last seen" recency info (pattern was just written,
+	// so UpdatedAt is ~now → "last seen today").
+	w := warnings[0].(string)
+	if !strings.Contains(w, "last seen") {
+		t.Errorf("warning should contain recency info 'last seen ...', got: %q", w)
+	}
+}
+
+// ── failurePatternMatchesEntity unit tests ────────────────────────────────────
+
+// TestFailurePatternMatchesEntity_exactMatch verifies exact (lowercase) keyword
+// matching against the entity name.
+func TestFailurePatternMatchesEntity_exactMatch(t *testing.T) {
+	fp := store.FailurePattern{Keyword: "authmiddleware", PatternType: "function"}
+	if !failurePatternMatchesEntity(fp, "authmiddleware") {
+		t.Error("exact match should succeed")
+	}
+}
+
+// TestFailurePatternMatchesEntity_containsLibrary verifies that a library keyword
+// is matched when it appears as part of an import-path entity name.
+func TestFailurePatternMatchesEntity_containsLibrary(t *testing.T) {
+	fp := store.FailurePattern{Keyword: "jwt-go", PatternType: "library"}
+	// Typical entity name for a package node is the import path.
+	if !failurePatternMatchesEntity(fp, "github.com/dgrijalva/jwt-go") {
+		t.Error("import path containing keyword should match")
+	}
+}
+
+// TestFailurePatternMatchesEntity_shortKeywordNoContains verifies that keywords
+// shorter than 6 chars do NOT use the contains check (prevents false positives).
+func TestFailurePatternMatchesEntity_shortKeywordNoContains(t *testing.T) {
+	fp := store.FailurePattern{Keyword: "gin", PatternType: "package"} // 3 chars
+	// "gin" should NOT match "engine" or "origin" via contains.
+	if failurePatternMatchesEntity(fp, "engine") {
+		t.Error("short keyword should not match via contains")
+	}
+	if failurePatternMatchesEntity(fp, "origin") {
+		t.Error("short keyword should not match via contains")
+	}
+	// But exact match still works.
+	if !failurePatternMatchesEntity(fp, "gin") {
+		t.Error("exact match on short keyword should succeed")
+	}
+}
+
+// TestFailurePatternMatchesEntity_errorPatternExcluded verifies that error_pattern
+// entries never match entity names (nobody queries "nil-pointer-dereference").
+func TestFailurePatternMatchesEntity_errorPatternExcluded(t *testing.T) {
+	fp := store.FailurePattern{Keyword: "nil-pointer-dereference", PatternType: "error_pattern"}
+	if failurePatternMatchesEntity(fp, "nil-pointer-dereference") {
+		t.Error("error_pattern should never match even on exact keyword")
+	}
+}
+
+// ── relativeAge unit tests ────────────────────────────────────────────────────
+
+// TestRelativeAge_today verifies timestamps within the last 48 hours return
+// "last seen today".
+func TestRelativeAge_today(t *testing.T) {
+	now := time.Now().Unix()
+	got := relativeAge(now - 3600) // 1 hour ago
+	if got != "last seen today" {
+		t.Errorf("got %q, want 'last seen today'", got)
+	}
+}
+
+// TestRelativeAge_days verifies timestamps a few days in the past.
+func TestRelativeAge_days(t *testing.T) {
+	threeDaysAgo := time.Now().Unix() - 3*24*3600
+	got := relativeAge(threeDaysAgo)
+	if !strings.Contains(got, "day") {
+		t.Errorf("got %q, expected to contain 'day'", got)
+	}
+}
+
+// TestRelativeAge_zero verifies a zero timestamp returns an empty string.
+func TestRelativeAge_zero(t *testing.T) {
+	if got := relativeAge(0); got != "" {
+		t.Errorf("zero timestamp should return empty string, got %q", got)
+	}
+}
+
+// TestRelativeAge_negative verifies a negative timestamp returns an empty string.
+func TestRelativeAge_negative(t *testing.T) {
+	if got := relativeAge(-1); got != "" {
+		t.Errorf("negative timestamp should return empty string, got %q", got)
 	}
 }
