@@ -82,7 +82,7 @@ func (e *Engine) DiscoverNorms(g *graph.Graph) []DiscoveredNorm {
 
 	var norms []DiscoveredNorm
 	norms = append(norms, discoverRouteCallNorms(g)...)
-	norms = append(norms, discoverLayerNorms(g)...)
+	norms = append(norms, discoverLayerNorms(g, defaultLayerConfig())...)
 
 	if len(norms) == 0 {
 		return nil
@@ -229,20 +229,22 @@ func discoverRouteCallNorms(g *graph.Graph) []DiscoveredNorm {
 // directories) for direct data-layer imports. It reports the adherence rate —
 // what fraction of presentation files avoid skipping the service layer.
 //
+// layers defines the ordered tier hierarchy (index 0 = outermost/presentation,
+// last index = innermost/data). Callers pass defaultLayerConfig() for the
+// built-in 3-tier model, or a custom config for projects with different layering
+// (2-tier handler/store, 4-tier presentation/gateway/service/data, etc.).
+//
 // When all presentation-layer files are clean (0 violations), the norm is
 // surfaced with SuggestRule=true. When most are clean but some violate, the norm
 // is surfaced with the actual counts to give the agent a project picture.
 //
 // Requires at least 3 identifiable presentation-layer files to return a norm.
-func discoverLayerNorms(g *graph.Graph) []DiscoveredNorm {
-	layers := defaultLayerConfig()
-
+func discoverLayerNorms(g *graph.Graph, layers []LayerDef) []DiscoveredNorm {
 	// presentationIdx and dataIdx identify the outermost and innermost layers.
 	// The skip violation fires when a file at the outermost layer directly imports
 	// the innermost layer (skipping the intermediate service layer).
 	//
-	// With defaultLayerConfig: presentation=0, service=1, data=2.
-	// A skip = dataIdx - presentationIdx > 1 (true for 3-tier default).
+	// A skip = dataIdx - presentationIdx > 1.
 	var presentationIdx, dataIdx int
 	presentationIdx = 0
 	dataIdx = len(layers) - 1

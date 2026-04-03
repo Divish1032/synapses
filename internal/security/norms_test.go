@@ -362,6 +362,62 @@ func TestDiscoverNorms_LayerIsolation_InsufficientSamples(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// discoverLayerNorms — custom layer config tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+// TestDiscoverLayerNorms_TwoLayerConfig verifies that a 2-layer config (no
+// intermediate service layer) returns nil — a skip violation is not possible
+// when there is no layer to skip.
+func TestDiscoverLayerNorms_TwoLayerConfig(t *testing.T) {
+	g := buildTestGraph(t)
+	// 4 handler files importing a repo package directly.
+	for i := 0; i < 4; i++ {
+		f := "/project/internal/handler/" + string(rune('a'+i)) + ".go"
+		addFileWithImports(g, f, "/project/internal/repo")
+	}
+
+	twoLayer := []LayerDef{
+		{Name: "presentation", Keywords: []string{"handler"}},
+		{Name: "data", Keywords: []string{"repo"}},
+	}
+	norms := discoverLayerNorms(g, twoLayer)
+	if len(norms) != 0 {
+		t.Errorf("2-layer config: expected nil (no skip possible), got %+v", norms)
+	}
+}
+
+// TestDiscoverLayerNorms_CustomFourLayerConfig verifies that a 4-tier config
+// (presentation/gateway/service/data) correctly detects presentation→data skips
+// while allowing presentation→gateway imports.
+func TestDiscoverLayerNorms_CustomFourLayerConfig(t *testing.T) {
+	g := buildTestGraph(t)
+	fourLayer := []LayerDef{
+		{Name: "presentation", Keywords: []string{"handler"}},
+		{Name: "gateway", Keywords: []string{"gateway"}},
+		{Name: "service", Keywords: []string{"service"}},
+		{Name: "data", Keywords: []string{"repo"}},
+	}
+
+	// 3 clean handler files that import only the gateway layer.
+	for i := 0; i < 3; i++ {
+		f := "/project/internal/handler/" + string(rune('a'+i)) + ".go"
+		addFileWithImports(g, f, "/project/internal/gateway")
+	}
+
+	norms := discoverLayerNorms(g, fourLayer)
+	if len(norms) == 0 {
+		t.Fatal("4-layer config: expected a layer_isolation norm for clean handler files, got none")
+	}
+	n := norms[0]
+	if n.Adherence != 1.0 {
+		t.Errorf("adherence = %f, want 1.0", n.Adherence)
+	}
+	if n.Total != 3 {
+		t.Errorf("total = %d, want 3", n.Total)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // FormatDiscoveredNorm
 // ──────────────────────────────────────────────────────────────────────────────
 
