@@ -26,6 +26,7 @@ type endSessionResult struct {
 	MemoriesSaved       int                    `json:"memories_saved"`
 	SessionSummary      *sessionSummary        `json:"session_summary,omitempty"`
 	MemoriesExpired     int64                  `json:"memories_expired"`
+	ObservationsSaved   int                    `json:"observations_saved,omitempty"`
 	Retrospective       *store.ToolCallSummary `json:"retrospective,omitempty"`
 	EffectivenessReport *EffectivenessReport   `json:"effectiveness_report,omitempty"`
 }
@@ -487,6 +488,19 @@ func (s *Server) handleEndSession(
 		if err == nil {
 			memoriesSaved++
 		}
+	}
+
+	// ── Sprint 29.1: Session observation pipeline ──
+	// Tier 1 server-side auto-capture: extract structured signals from this session
+	// and persist them as SessionObservation records. No agent action required.
+	// The convention extraction engine (Sprint 29.2) aggregates these across
+	// sessions to identify project-wide patterns (testing style, library usage, etc.).
+	if synapseSessionID != "" {
+		observations := extractSessionObservations(agentID, synapseSessionID, s.projectID, sessSummary, retro, s.graph)
+		for _, obs := range observations {
+			_, _ = s.store.InsertSessionObservation(obs)
+		}
+		result.ObservationsSaved = len(observations)
 	}
 
 	// ── D4: Archivist session memory synthesis ──

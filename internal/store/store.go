@@ -1024,6 +1024,22 @@ func Open(path string) (*Store, error) {
 		// JSON array of strings. Default '[]' = no tracked files. Registered via
 		// tasks(action=set_tracked_files); checked by validate(phase=post).
 		`ALTER TABLE tasks ADD COLUMN tracked_files TEXT NOT NULL DEFAULT '[]'`,
+		// Sprint 29.1: Session observation pipeline — structured signals extracted from
+		// each session at end_session time. The convention extraction engine (29.2)
+		// aggregates these across sessions to identify project-wide patterns.
+		`CREATE TABLE IF NOT EXISTS session_observations (
+			id          TEXT PRIMARY KEY,
+			session_id  TEXT NOT NULL,
+			project_id  TEXT NOT NULL DEFAULT '',
+			agent_id    TEXT NOT NULL,
+			category    TEXT NOT NULL,
+			key         TEXT NOT NULL,
+			value       TEXT NOT NULL DEFAULT '',
+			confidence  REAL NOT NULL DEFAULT 0.5,
+			created_at  INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_obs_session     ON session_observations(session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_obs_project_cat ON session_observations(project_id, category, key)`,
 	} {
 		if _, err := knowledgeTx.Exec(m); err != nil && !isDupColumnErr(err) {
 			graphDB.Close()
