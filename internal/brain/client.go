@@ -285,21 +285,6 @@ func (c *Client) Memorize(ctx context.Context, req archivist.MemorizeRequest) (a
 	return c.brain.Memorize(ctx, req)
 }
 
-// GetPatterns returns learned co-occurrence patterns for a trigger entity.
-func (c *Client) GetPatterns(trigger string, limit int) []PatternHint {
-	return c.brain.GetPatterns(trigger, limit)
-}
-
-// DecayCoAccessPatterns reduces confidence for non-reinforced patterns. Sprint 27.5.
-func (c *Client) DecayCoAccessPatterns(accessedEntities []string) error {
-	return c.brain.DecayCoAccessPatterns(accessedEntities)
-}
-
-// UpsertCoAccessPattern records a co-access pattern. Sprint 27.5.
-func (c *Client) UpsertCoAccessPattern(trigger, coChange string) error {
-	return c.brain.UpsertCoAccessPattern(trigger, coChange)
-}
-
 // GetSDLCConfig returns the current SDLC phase and quality mode for the project.
 func (c *Client) GetSDLCConfig() SDLCConfig {
 	return c.brain.GetSDLCConfig()

@@ -1684,9 +1684,9 @@ func TestFlatGraph_PPR_ParityWithSlowPath(t *testing.T) {
 	}
 }
 
-// TestCarveEgoGraph_DocEdgeConfidenceWeighting verifies that embedding-derived
-// EXPLAINS edges with confidence metadata are weighted lower than name-match edges.
-func TestCarveEgoGraph_DocEdgeConfidenceWeighting(t *testing.T) {
+// TestCarveEgoGraph_DocEdgesReachable verifies that documentation sections
+// linked via DOCUMENTS edges are reachable from the code entity.
+func TestCarveEgoGraph_DocEdgesReachable(t *testing.T) {
 	g := graph.New("testrepo")
 
 	codeID := g.MakeNodeID("main.go", "BuildGraph")
@@ -1695,7 +1695,7 @@ func TestCarveEgoGraph_DocEdgeConfidenceWeighting(t *testing.T) {
 		Domain: graph.DomainCode,
 	})
 
-	// Doc section with name-match edge (no confidence metadata → full weight).
+	// Doc section linked via name-match.
 	secNameMatch := g.MakeNodeID("README.md", "README.md § API")
 	g.AddNode(&graph.Node{
 		ID:   secNameMatch,
@@ -1709,26 +1709,23 @@ func TestCarveEgoGraph_DocEdgeConfidenceWeighting(t *testing.T) {
 		},
 		Domain: graph.DomainDocs,
 	})
-	g.AddEdge(&graph.Edge{From: secNameMatch, To: codeID, Type: graph.EdgeExplains})
+	g.AddEdge(&graph.Edge{From: secNameMatch, To: codeID, Type: graph.EdgeDocuments})
 
-	// Doc section with embedding edge (confidence 0.60 → scaled weight).
-	secEmbed := g.MakeNodeID("docs.md", "docs.md § Overview")
+	// Second doc section.
+	secOther := g.MakeNodeID("docs.md", "docs.md § Overview")
 	g.AddNode(&graph.Node{
-		ID:   secEmbed,
+		ID:   secOther,
 		Type: graph.NodeSection,
 		Name: "docs.md § Overview",
 		File: "docs.md",
 		Metadata: map[string]string{
-			"title":               "Overview",
-			"body":                "General overview.",
-			"doc_link_source":     "embedding",
-			"doc_link_confidence": "0.600",
+			"title": "Overview",
+			"body":  "General overview.",
 		},
 		Domain: graph.DomainDocs,
 	})
-	g.AddEdge(&graph.Edge{From: secEmbed, To: codeID, Type: graph.EdgeExplains})
+	g.AddEdge(&graph.Edge{From: secOther, To: codeID, Type: graph.EdgeDocuments})
 
-	// BFS from code node — both sections should be reachable but with different scores.
 	cfg := graph.DefaultCarveConfig()
 	cfg.MaxDepth = 2
 	sub, err := g.CarveEgoGraph(codeID, cfg)
@@ -1736,26 +1733,21 @@ func TestCarveEgoGraph_DocEdgeConfidenceWeighting(t *testing.T) {
 		t.Fatalf("CarveEgoGraph error: %v", err)
 	}
 
-	var nameMatchScore, embedScore float64
+	var nameMatchScore, otherScore float64
 	for _, cn := range sub.Nodes {
 		if cn.Node.ID == secNameMatch {
 			nameMatchScore = cn.Relevance
 		}
-		if cn.Node.ID == secEmbed {
-			embedScore = cn.Relevance
+		if cn.Node.ID == secOther {
+			otherScore = cn.Relevance
 		}
 	}
 
-	// Name-match edge (full weight) should score higher than embedding edge (0.6× weight).
 	if nameMatchScore <= 0 {
 		t.Error("name-match section should be reachable")
 	}
-	if embedScore <= 0 {
-		t.Error("embedding section should be reachable")
-	}
-	if embedScore >= nameMatchScore {
-		t.Errorf("embedding section (score=%.4f) should rank below name-match section (score=%.4f)",
-			embedScore, nameMatchScore)
+	if otherScore <= 0 {
+		t.Error("second doc section should be reachable")
 	}
 }
 

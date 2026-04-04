@@ -779,7 +779,7 @@ func TestToDirectionalContext_NilWhenNoCrossDomainNodes(t *testing.T) {
 }
 
 func TestToDirectionalContext_DocNodeWithDirectLinkGoesToDocumentation(t *testing.T) {
-	// A doc node directly linked to root via DOCUMENTED_BY goes to Documentation, not CrossDomain.
+	// A doc node directly linked to root via DOCUMENTS (doc→root) goes to Documentation, not CrossDomain.
 	root := &graph.Node{ID: "root", Name: "Root", Type: graph.NodeFunction, Domain: graph.DomainCode}
 	docNode := &graph.Node{ID: "doc", Name: "README section", Type: graph.NodeFunction, Domain: graph.DomainDocs}
 
@@ -789,7 +789,7 @@ func TestToDirectionalContext_DocNodeWithDirectLinkGoesToDocumentation(t *testin
 			{Node: root}, {Node: docNode},
 		},
 		Edges: []*graph.Edge{
-			{From: "root", To: "doc", Type: graph.EdgeDocumentedBy},
+			{From: "doc", To: "root", Type: graph.EdgeDocuments},
 		},
 	}
 	dc := toDirectionalContext(sg)
@@ -798,7 +798,7 @@ func TestToDirectionalContext_DocNodeWithDirectLinkGoesToDocumentation(t *testin
 		t.Fatal("expected doc node in Documentation bucket")
 	}
 	if dc.CrossDomain != nil {
-		t.Error("doc node with direct DOCUMENTED_BY should not appear in CrossDomain")
+		t.Error("doc node with direct DOCUMENTS should not appear in CrossDomain")
 	}
 }
 

@@ -32,7 +32,6 @@ import (
 	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/config"
 	"github.com/SynapsesOS/synapses/internal/contextfile"
-	"github.com/SynapsesOS/synapses/internal/dataflow"
 	"github.com/SynapsesOS/synapses/internal/embed"
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/logutil"
@@ -222,9 +221,6 @@ func cmdIndex(args []string) error {
 
 	// Optional: enrich nodes with git churn + test coverage (metrics_days, coverage_profile).
 	enrichMetricsIfEnabled(g, absPath, cfg)
-
-	// Tag source/sink nodes and create DATA_FLOWS summary edges.
-	analyzeDataFlowIfEnabled(g, cfg)
 
 	identity := g.ProjectIdentity()
 	printSummaryTable(identity, time.Since(start), nil, 0, 0, 0, 0)
@@ -862,15 +858,6 @@ func emitGraphSnapshot(g *graph.Graph, pc *pulse.Client, projectID string) {
 	}()
 }
 
-// analyzeDataFlowIfEnabled tags source/sink nodes and creates DATA_FLOWS summary
-// edges between reachable (source, sink) pairs via existing CALLS edges.
-// Always runs — built-in heuristics detect common patterns even without config.
-func analyzeDataFlowIfEnabled(g *graph.Graph, cfg *config.Config) {
-	if n := dataflow.AnnotateGraph(g, cfg); n > 0 {
-		logutil.Info("synapses: %d DATA_FLOWS edges created\n", n)
-	}
-}
-
 // enrichMetricsIfEnabled annotates graph nodes with git churn and (optionally)
 // test-coverage data when the relevant config fields are set.
 // Complexity is already computed during parsing and needs no extra step here.
@@ -1109,14 +1096,9 @@ func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, qui
 		logutil.Info("synapses: resolved %d proto type reference edges\n", npt)
 	}
 	resolverDurationMs := float64(time.Since(resolverStart).Milliseconds())
-	// R31: resolve documentation → code entity links (EXPLAINS/DOCUMENTED_BY).
+	// Resolve documentation → code entity links (DOCUMENTS edges).
 	if nd := resolver.ResolveDocEdges(g); nd > 0 {
-		logutil.Info("synapses: resolved %d EXPLAINS edges\n", nd)
-	}
-	// Full-graph NL entity linking: link pre-existing docs/READMEs to code nodes
-	// so they are immediately visible in the knowledge graph on first index.
-	if nc := resolver.ResolveNLEntities(g, nil); len(nc) > 0 {
-		logutil.Info("synapses: NL entity resolution: %d unresolved candidates\n", len(nc))
+		logutil.Info("synapses: resolved %d DOCUMENTS edges\n", nd)
 	}
 	if nt := resolver.ResolveTerraformRefs(g); nt > 0 {
 		logutil.Info("synapses: resolved %d Terraform DEPENDS_ON edges\n", nt)
@@ -2139,29 +2121,6 @@ func fetchTopNSummaries(ctx context.Context, bc *brain.Client, g *graph.Graph, s
 // completes in ~3min at 8× concurrency — runs in background, does not block startup.
 // Summaries are stored in brain.sqlite and surfaced in get_context responses.
 // Sort order: high-fanin nodes first so the most-used code gets summaries soonest.
-// mainEmbedResolver adapts embed.Client + store.Store into the resolver.EmbedResolver
-// interface for post-embed discovery passes (doc↔code linking, knowledge relations).
-type mainEmbedResolver struct {
-	ec embed.Embedder
-	st *store.Store
-}
-
-func (r *mainEmbedResolver) EmbedText(ctx context.Context, text string) ([]float32, error) {
-	return r.ec.Embed(ctx, text)
-}
-
-func (r *mainEmbedResolver) SearchByVector(queryVec []float32, k int) []resolver.EmbedMatch {
-	results, err := r.st.VectorSearch(queryVec, k)
-	if err != nil || len(results) == 0 {
-		return nil
-	}
-	out := make([]resolver.EmbedMatch, len(results))
-	for i, sr := range results {
-		out[i] = resolver.EmbedMatch{NodeID: sr.ID, Score: sr.Score}
-	}
-	return out
-}
-
 // embedAllNodes generates vector embeddings for every graph node that does not
 // yet have one, storing results in the node_embeddings table. Runs in a
 // background goroutine after startup so the MCP server is never delayed.
@@ -2258,35 +2217,6 @@ func embedAllNodes(ctx context.Context, ec embed.Embedder, g *graph.Graph, st *s
 	// Rebuild HNSW so new vectors are immediately searchable.
 	if done > 0 {
 		st.RebuildNodeHNSW()
-	}
-
-	// Post-embed discovery: create doc↔code, knowledge, and community edges
-	// now that HNSW is populated. These passes are idempotent.
-	if g != nil {
-		er := &mainEmbedResolver{ec: ec, st: st}
-		dcCount := resolver.DiscoverDocCodeRelations(g, er, 0.60)
-		erCount := resolver.DiscoverEmbedRelations(g, er, 0.55)
-		comCount := resolver.DetectCommunities(g, 10)
-		if dcCount+erCount+comCount > 0 {
-			logutil.Info("synapses: post-embed discovery: %d doc-code, %d relations, %d communities\n",
-				dcCount, erCount, comCount)
-			// Persist new discovery edges to SQLite.
-			var newEdges []graph.Edge
-			for _, e := range g.AllEdges() {
-				switch e.Type {
-				case graph.EdgeExplains, graph.EdgeDocumentedBy, graph.EdgeRelatesTo,
-					graph.EdgeCausedBy, graph.EdgeInstanceOf, graph.EdgeContradicts:
-					newEdges = append(newEdges, *e)
-				}
-			}
-			if len(newEdges) > 0 {
-				if err := st.SaveDiscoveryEdges(newEdges); err != nil {
-					logutil.Warn("synapses: persist discovery edges: %v\n", err)
-				} else {
-					logutil.Info("synapses: persisted %d discovery edges\n", len(newEdges))
-				}
-			}
-		}
 	}
 
 	for _, fn := range onComplete {

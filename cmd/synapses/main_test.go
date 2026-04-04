@@ -985,12 +985,6 @@ func TestTryLoadSnapshot_NoSnapshot(t *testing.T) {
 
 // ── graph helper functions ────────────────────────────────────────────────────
 
-func TestAnalyzeDataFlowIfEnabled(t *testing.T) {
-	g := graph.New("test")
-	cfg := &config.Config{}
-	analyzeDataFlowIfEnabled(g, cfg) // Should not panic.
-}
-
 func TestEnrichMetricsIfEnabled_NoConfig(t *testing.T) {
 	g := graph.New("test")
 	dir := t.TempDir()

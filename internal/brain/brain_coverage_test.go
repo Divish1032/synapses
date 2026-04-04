@@ -137,13 +137,6 @@ func TestNullBrain_GetSDLCConfig(t *testing.T) {
 	}
 }
 
-func TestNullBrain_GetPatterns(t *testing.T) {
-	nb := &NullBrain{}
-	if nb.GetPatterns("", 10) != nil {
-		t.Error("expected nil patterns")
-	}
-}
-
 func TestNullBrain_Prune(t *testing.T) {
 	nb := &NullBrain{}
 	content, err := nb.Prune(context.Background(), "test content")
@@ -808,15 +801,6 @@ func TestImpl_SetQualityMode_Disabled(t *testing.T) {
 	}
 }
 
-func TestImpl_GetPatterns_Disabled(t *testing.T) {
-	cfg := brainconfig.BrainConfig{Enabled: false}
-	b := New(cfg)
-	patterns := b.GetPatterns("test-trigger", 10)
-	if patterns != nil {
-		t.Error("expected nil patterns for disabled brain")
-	}
-}
-
 func TestImpl_LogDecision_Disabled(t *testing.T) {
 	cfg := brainconfig.BrainConfig{Enabled: false}
 	b := New(cfg)
@@ -1119,24 +1103,6 @@ func TestStoreADRtoBrain_WithData(t *testing.T) {
 }
 
 // --- Additional impl struct tests (with disabled configs) ---
-
-func TestImpl_GetPatterns_Empty(t *testing.T) {
-	cfg := brainconfig.BrainConfig{Enabled: false}
-	b := New(cfg)
-	patterns := b.GetPatterns("", 0)
-	if patterns != nil {
-		t.Error("expected nil patterns from disabled brain")
-	}
-}
-
-func TestImpl_GetPatterns_WithTrigger(t *testing.T) {
-	cfg := brainconfig.BrainConfig{Enabled: false}
-	b := New(cfg)
-	patterns := b.GetPatterns("file_change", 10)
-	if patterns != nil {
-		t.Error("expected nil patterns from disabled brain")
-	}
-}
 
 func TestImpl_Memorize_WithEvents(t *testing.T) {
 	cfg := brainconfig.BrainConfig{Enabled: false}

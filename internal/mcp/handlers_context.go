@@ -102,9 +102,6 @@ type directionalContext struct {
 	// Contains all packages/modules imported by this file (IMPORTS edges from the NodeFile node).
 	Imports       []graph.CarvedNode `json:"imports,omitempty"`
 	Documentation []graph.CarvedNode `json:"documentation,omitempty"`
-	// Sprint 17: knowledge graph nodes linked via RELATES_TO, CAUSED_BY, INSTANCE_OF,
-	// CONTRADICTS edges — NL-to-graph derived concepts, entities, artifacts, decisions.
-	Knowledge []graph.CarvedNode `json:"knowledge,omitempty"`
 	// Sprint 29.4: failure avoidance — patterns matching this entity (e.g. if the
 	// entity name matches a backtick identifier or library keyword that was tried
 	// and abandoned in prior sessions). Targeted delivery: shown only when the
@@ -589,11 +586,8 @@ func (s *Server) handleGetContext(
 	// cfg.UsePPR is included so that toggling use_ppr in synapses.json produces
 	// a different cache key and agents never receive a stale {unchanged:true}
 	// response that was computed under a different traversal algorithm.
-	// Sprint 27.5: include co-access pattern count in cache key so cached
-	// subgraphs are invalidated when co-access patterns change.
-	coAccessCount := len(cfg.CoAccessPatterns)
-	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v|ppr:%v|coaccess:%d",
-		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred, cfg.UsePPR, coAccessCount)
+	entityCacheKey := fmt.Sprintf("%s|%s|%s|%s|%d|%d|inferred:%v|ppr:%v",
+		entityName, fileHint, format, detailLevel, cfg.MaxDepth, cfg.TokenBudget, includeInferred, cfg.UsePPR)
 
 	// Resolve the entity name to a node ID.
 	nodes := s.graph.FindByName(entityName)
@@ -724,13 +718,6 @@ func (s *Server) handleGetContext(
 			FocusFile:  relFile,
 			FocusSince: time.Now().UTC().Format(time.RFC3339),
 		})
-	}
-
-	// Sprint 27.5: Load co-access hints using the RESOLVED entity name
-	// (best.Name), not the raw user input. This ensures pattern lookup
-	// matches the canonical graph names stored by analyzeCoAccess.
-	if bc := s.brainClient; bc != nil {
-		cfg.CoAccessPatterns = loadCoAccessHints(bc, s.graph, best.Name)
 	}
 
 	traversalStart := time.Now()
@@ -1830,12 +1817,9 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	// Build sets of nodes directly called by / directly calling the root.
 	// R1: also include HANDLES edges so route nodes surface as callees.
 	// R31: also track DOCUMENTED_BY targets (section nodes documenting root).
-	// Sprint 17: also track knowledge-domain edges (RELATES_TO, CAUSED_BY, INSTANCE_OF,
-	// CONTRADICTS) so NL-to-graph knowledge nodes surface in context results.
 	calleesOfRoot := make(map[graph.NodeID]bool)
 	callersOfRoot := make(map[graph.NodeID]bool)
 	docsOfRoot := make(map[graph.NodeID]bool)
-	knowledgeOfRoot := make(map[graph.NodeID]bool)
 	containedByRoot := make(map[graph.NodeID]bool)
 	crossDomainDirectEdge := make(map[graph.NodeID]graph.EdgeType)
 	for _, e := range sg.Edges {
@@ -1863,33 +1847,13 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			// Surface both directions in Related for find_implementations queries.
 			// (Also reached via default → DomainCode → Related, but explicit
 			// handling here ensures they're never misrouted.)
-		case graph.EdgeDocumentedBy:
-			// code entity → section: section is a doc of root
-			if e.From == sg.Root {
-				docsOfRoot[e.To] = true
-			}
-		case graph.EdgeExplains:
-			// section → code entity: section explains root
-			if e.To == sg.Root {
-				docsOfRoot[e.From] = true
-			}
 		case graph.EdgeDocuments:
-			// doc → code entity: doc documents root → treat as Documentation (same
-			// semantic as EdgeDocumentedBy but reversed direction). If the doc points
-			// at a non-root code entity, track it as a cross-domain direct edge.
+			// doc → code entity: doc documents root.
+			// If the doc points at a non-root code entity, track as cross-domain.
 			if e.To == sg.Root {
 				docsOfRoot[e.From] = true
 			} else if e.From == sg.Root {
 				crossDomainDirectEdge[e.To] = e.Type
-			}
-		case graph.EdgeRelatesTo, graph.EdgeCausedBy, graph.EdgeInstanceOf, graph.EdgeContradicts:
-			// Knowledge-domain edges: NL-to-graph derived relationships.
-			// Track both directions — section→knowledge and knowledge→code.
-			if e.From == sg.Root {
-				knowledgeOfRoot[e.To] = true
-			}
-			if e.To == sg.Root {
-				knowledgeOfRoot[e.From] = true
 			}
 		case graph.EdgeDeploys, graph.EdgeConsumes, graph.EdgeConfiguredBy,
 			graph.EdgeMentions, graph.EdgeManual:
@@ -1929,8 +1893,6 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 			dc.Root = cn.Node
 		case docsOfRoot[id]:
 			dc.Documentation = append(dc.Documentation, cn)
-		case knowledgeOfRoot[id]:
-			dc.Knowledge = append(dc.Knowledge, cn)
 		case calleesOfRoot[id]:
 			// Sprint 28: filter non-code types from callee list — NodeFile,
 			// NodePackage, NodeVariable, and NodeRoute are structural artifacts,
@@ -1972,7 +1934,7 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 					dc.CrossDomain.Consumes = append(dc.CrossDomain.Consumes, cn)
 				case graph.EdgeConfiguredBy:
 					dc.CrossDomain.ConfiguredBy = append(dc.CrossDomain.ConfiguredBy, cn)
-				case graph.EdgeDocuments, graph.EdgeDocumentedBy, graph.EdgeExplains:
+				case graph.EdgeDocuments:
 					dc.CrossDomain.DocumentedIn = append(dc.CrossDomain.DocumentedIn, cn)
 				case graph.EdgeMentions:
 					dc.CrossDomain.Mentions = append(dc.CrossDomain.Mentions, cn)
@@ -2009,7 +1971,6 @@ func toDirectionalContext(sg *graph.SubGraph) *directionalContext {
 	}
 	sort.Slice(dc.Related, func(i, j int) bool { return byRelevance(dc.Related[i], dc.Related[j]) < 0 })
 	sort.Slice(dc.Documentation, func(i, j int) bool { return byRelevance(dc.Documentation[i], dc.Documentation[j]) < 0 })
-	sort.Slice(dc.Knowledge, func(i, j int) bool { return byRelevance(dc.Knowledge[i], dc.Knowledge[j]) < 0 })
 	if dc.CrossDomain != nil {
 		sortCN := func(s []graph.CarvedNode) {
 			sort.Slice(s, func(i, j int) bool { return byRelevance(s[i], s[j]) < 0 })

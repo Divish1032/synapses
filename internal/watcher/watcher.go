@@ -641,10 +641,9 @@ func (w *Watcher) launchNodeEmbedPass(embedder embed.Embedder, st *store.Store) 
 		return // another pass is already in flight
 	}
 	ctx := w.stopCtx
-	g := w.graph
 	if !w.trackGo(func() {
 		defer w.nodeEmbedRunning.Store(0)
-		runNodeEmbedPass(ctx, embedder, st, g, w.pulseClient)
+		runNodeEmbedPass(ctx, embedder, st, w.pulseClient)
 	}) {
 		// Watcher stopped before the goroutine could be launched.
 		// Clear the guard so the atomic doesn't stay stuck at 1.
@@ -1497,27 +1496,6 @@ func (w *Watcher) applyBatch(results []parseFileResult) {
 		}
 	}
 
-	// NL-to-graph Tier 0+1: extract entity candidates from doc section
-	// bodies and create knowledge nodes (concept/entity/artifact/decision).
-	// Only meaningful for doc files — code file changes don't add sections.
-	// Batch variant: ResolveNLEntitiesForFiles calls buildCodeNames once for all
-	// files in the batch (O(|graph|) instead of O(N×|graph|) for N doc files).
-	// Tier 2 LLM classification is submitted as a P1 brain task per file.
-	var docPaths []string
-	for _, s := range valid {
-		if ext := strings.ToLower(filepath.Ext(s.result.path)); isDocFile(ext) {
-			docPaths = append(docPaths, s.result.path)
-		}
-	}
-	if len(docPaths) > 0 {
-		w.mu.Lock()
-		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
-		w.mu.Unlock()
-		for fp, unresolved := range resolver.ResolveNLEntitiesForFiles(w.graph, docPaths, er) {
-			w.scheduleNLClassification(fp, unresolved)
-		}
-	}
-
 	// Launch the background node embedding pass when an embedder is configured.
 	// This ensures code entity vectors are populated in the HNSW index so future
 	// NL resolver runs can use Tier 1 embedding-based entity resolution.
@@ -1995,16 +1973,6 @@ func (w *Watcher) reparseFile(path, _ string) {
 		resolver.ResolveDocEdges(w.graph)
 	}
 
-	// NL-to-graph Tier 0+1 (doc files only — md, txt, rst).
-	// Tier 2 LLM classification submitted as P1 when brain is available.
-	if isDocFile(ext) {
-		w.mu.Lock()
-		er := newStoreEmbedResolver(w.nodeEmbedder, w.store)
-		w.mu.Unlock()
-		unresolved := resolver.ResolveNLEntitiesForFile(w.graph, path, er)
-		w.scheduleNLClassification(path, unresolved)
-	}
-
 	// Trigger background node embedding pass for this file change.
 	// Runs for both code and markdown files: code changes add new entities that
 	// need vectors for future NL resolution; markdown changes add knowledge nodes.
@@ -2410,60 +2378,6 @@ func (w *Watcher) persistAsync(changedFile string) {
 // so its semantic summaries stay current. After ingest, schedules a delayed
 // write-back to fetch the generated summaries and store them as annotations.
 // Runs in a goroutine; all errors are silently discarded (fail-silent contract).
-// scheduleNLClassification submits a Tier 2 LLM classification task for the
-// given unresolved entity candidates from filePath. The task runs as P1
-// (background, soon) via the brain scheduler. When the LLM returns, each
-// knowledge node's NodeType is upgraded from the Tier 0 default ("concept")
-// to the classified type (concept | entity | artifact | decision).
-//
-// No-op when brainClient is nil or the unresolved list is empty.
-// Safe to call while reparseMu is held: applyFn runs in the scheduler goroutine
-// (not under reparseMu) but graph.UpdateNodeMetadata is internally mutex-safe.
-func (w *Watcher) scheduleNLClassification(filePath string, unresolved []parser.EntityCandidate) {
-	if w.brainClient == nil || len(unresolved) == 0 {
-		return
-	}
-
-	// Build NLCandidate list by reconstructing NodeIDs from the candidate names.
-	// The NodeID formula must match resolver.makeKnowledgeNodeID:
-	//   g.MakeNodeID(filePath, "knowledge:"+resolver.NormalizeKnowledgeName(name))
-	candidates := make([]brain.NLCandidate, 0, len(unresolved))
-	for _, c := range unresolved {
-		norm := resolver.NormalizeKnowledgeName(c.Name)
-		if norm == "" {
-			continue
-		}
-		nodeID := w.graph.MakeNodeID(filePath, "knowledge:"+norm)
-		candidates = append(candidates, brain.NLCandidate{
-			Name:    c.Name,
-			Context: c.Context,
-			NodeID:  string(nodeID),
-		})
-	}
-	if len(candidates) == 0 {
-		return
-	}
-
-	req := brain.NLClassifyRequest{FilePath: filePath, Candidates: candidates}
-	w.brainClient.ScheduleNLClassification(req, func(results []brain.NLClassifyResult) {
-		for _, r := range results {
-			if r.NodeType == "" {
-				continue
-			}
-			w.graph.UpdateNodeMetadata(graph.NodeID(r.NodeID), func(n *graph.Node) {
-				n.Type = graph.NodeType(r.NodeType)
-				if n.Metadata == nil {
-					n.Metadata = make(map[string]string)
-				}
-				n.Metadata["tier"] = "2"
-				if r.Description != "" {
-					n.Metadata["description"] = r.Description
-				}
-			})
-		}
-	})
-}
-
 func (w *Watcher) ingestToBrain(path string) {
 	bc := w.brainClient
 	if bc == nil {

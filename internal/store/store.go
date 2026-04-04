@@ -3834,33 +3834,6 @@ func (s *Store) UpsertFileMtime(path string, mtime int64) error {
 	return err
 }
 
-// SaveDiscoveryEdges persists a batch of edges created by post-embed discovery
-// passes (DiscoverDocCodeRelations, DiscoverEmbedRelations). Uses INSERT OR
-// IGNORE so existing edges are not duplicated. This is the lightweight
-// alternative to SaveGraph for persisting edges created outside the normal
-// parse→resolve→save cycle.
-func (s *Store) SaveDiscoveryEdges(edges []graph.Edge) error {
-	if len(edges) == 0 {
-		return nil
-	}
-	tx, err := s.graphDB.Begin()
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO edges (from_id, to_id, type) VALUES (?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
-	}
-	defer stmt.Close()
-	for _, e := range edges {
-		if _, err := stmt.Exec(string(e.From), string(e.To), string(e.Type)); err != nil {
-			return fmt.Errorf("insert edge %s→%s: %w", e.From, e.To, err)
-		}
-	}
-	return tx.Commit()
-}
-
 // SaveCallSites replaces the persisted call-site table with the given sites.
 func (s *Store) SaveCallSites(sites []graph.CallSite) error {
 	tx, err := s.graphDB.Begin()

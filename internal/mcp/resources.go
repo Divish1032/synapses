@@ -11,7 +11,6 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/SynapsesOS/synapses/internal/brain"
 	"github.com/SynapsesOS/synapses/internal/graph"
 )
 
@@ -174,62 +173,6 @@ func (s *Server) notifyResourceChanged(uri string) {
 		mcp.MethodNotificationResourceUpdated,
 		map[string]any{"uri": uri},
 	)
-}
-
-// warmBrainCacheDebounce is the minimum interval between consecutive warm cycles.
-const warmBrainCacheDebounce = 2 * time.Second
-
-// warmBrainCache proactively pre-computes brain packets for entities in the
-// changed file and stores them in the brain's SQLite insight cache (6h TTL).
-// Runs in a background goroutine so the file-watcher callback is non-blocking.
-// Capped at 5 entities per call and debounced to 2s to avoid hammering the
-// brain on rapid successive saves.
-func (s *Server) warmBrainCache(changedFile string) {
-	bc := s.getBrainClient()
-	if bc == nil {
-		return
-	}
-
-	// Debounce: skip if we warmed the cache less than 2s ago.
-	s.warmMu.Lock()
-	if time.Since(s.lastWarm) < warmBrainCacheDebounce {
-		s.warmMu.Unlock()
-		return
-	}
-	s.lastWarm = time.Now()
-	s.warmMu.Unlock()
-
-	entities := s.graph.FindByFile(changedFile)
-	if len(entities) == 0 {
-		return
-	}
-	if len(entities) > 5 {
-		entities = entities[:5]
-	}
-
-	ents := make([]*graph.Node, len(entities))
-	copy(ents, entities)
-	projID := s.projectID
-	enableLLM := s.config.Brain.ContextBuilderEnabled()
-	s.goBackground(func() {
-		for _, entity := range ents {
-			ctx30, cancel30 := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel30()
-			_ = bc.BuildContextPacket(ctx30, brain.ContextPacketRequest{
-				ProjectID: projID,
-				Snapshot: brain.SnapshotInput{
-					RootNodeID: string(entity.ID),
-					RootName:   entity.Name,
-					RootType:   string(entity.Type),
-					RootFile:   entity.File,
-					RootDoc:    entity.Metadata["doc"],
-					HasTests:   fileHasTests(entity.File),
-					FanIn:      s.graph.Fanin(entity.ID),
-				},
-				EnableLLM: enableLLM,
-			})
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -503,12 +446,8 @@ type violationRef struct {
 // Watcher integration
 // ---------------------------------------------------------------------------
 
-// InvalidatePacketCacheForFile clears the in-memory packet cache, sends MCP
-// resource-updated notifications (currently a no-op, see notifyResourceChanged),
-// and proactively warms the brain cache for entities in the changed file.
-//
-// Call this from the file watcher instead of (or in addition to) the plain
-// InvalidatePacketCache to activate brain pre-warming.
+// InvalidatePacketCacheForFile clears the in-memory packet cache and sends MCP
+// resource-updated notifications for the changed file.
 func (s *Server) InvalidatePacketCacheForFile(changedFile string) {
 	s.packetCacheMu.Lock()
 	s.packetCache = make(map[string]*packetCacheEntry, packetCacheMax)
@@ -538,7 +477,6 @@ func (s *Server) InvalidatePacketCacheForFile(changedFile string) {
 		}
 		relFile := strings.TrimPrefix(changedFile, prefix)
 		s.notifyResourceChanged("synapses://file/" + relFile)
-		s.warmBrainCache(changedFile)
 	}
 }
 

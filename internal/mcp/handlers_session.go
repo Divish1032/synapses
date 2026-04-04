@@ -956,42 +956,6 @@ func (s *Server) handleSessionInit(
 		}
 	}
 
-	// ── Pre-warm brain cache for top entities (silent background op) ─────
-	if bc := s.getBrainClient(); bc != nil {
-		seen := make(map[string]bool)
-		var warmFiles []string
-		// Gather unique file paths from entry points and key entities.
-		for _, ep := range identity.EntryPoints {
-			if ep.File != "" && !seen[ep.File] {
-				seen[ep.File] = true
-				warmFiles = append(warmFiles, ep.File)
-				if len(warmFiles) >= 5 {
-					break
-				}
-			}
-		}
-		if len(warmFiles) < 5 {
-			for _, ke := range identity.KeyEntities {
-				if ke.File != "" && !seen[ke.File] {
-					seen[ke.File] = true
-					warmFiles = append(warmFiles, ke.File)
-					if len(warmFiles) >= 5 {
-						break
-					}
-				}
-			}
-		}
-		if len(warmFiles) > 0 {
-			files := make([]string, len(warmFiles))
-			copy(files, warmFiles)
-			s.goBackground(func() {
-				for _, f := range files {
-					s.warmBrainCache(f)
-				}
-			})
-		}
-	}
-
 	// ── 7. Sidecar availability ───────────────────────────────────────────
 	// Let agents skip tool calls for unavailable sidecars without trial-and-error.
 	// Skipped in quick/resume mode — not critical for lightweight sessions.

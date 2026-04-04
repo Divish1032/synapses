@@ -157,7 +157,7 @@ func TestInvalidatePacketCache(t *testing.T) {
 func TestInvalidatePacketCacheForFile_WithFile(t *testing.T) {
 	s := newTestServer(t)
 	s.setPacketCache("k", &brain.ContextPacket{EntityName: "v"})
-	// Must not panic; brain is nil so warmBrainCache exits early.
+	// Must not panic even when brain is nil.
 	s.InvalidatePacketCacheForFile("internal/auth/auth.go")
 	if got := s.getPacketFromCache("k"); got != nil {
 		t.Error("expected nil after InvalidatePacketCacheForFile")

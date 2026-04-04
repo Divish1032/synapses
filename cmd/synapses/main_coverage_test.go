@@ -225,17 +225,6 @@ func TestCmdDoctor_WithPulseURL(t *testing.T) {
 	}
 }
 
-// ── analyzeDataFlowIfEnabled ──────────────────────────────────────────────────
-
-func TestAnalyzeDataFlowIfEnabled_EmptyConfigCov(t *testing.T) {
-	dir := goRepoDir2(t)
-	g, err := buildGraph(dir, nil, nil, false, nil, nil, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	analyzeDataFlowIfEnabled(g, &config.Config{})
-}
-
 // ── enrichMetricsIfEnabled ────────────────────────────────────────────────────
 
 func TestEnrichMetricsIfEnabled_DefaultDays(t *testing.T) {

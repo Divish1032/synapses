@@ -55,8 +55,6 @@ func applyPhaseCarveConfig(cfg *graph.CarveConfig, phase brain.SDLCPhase) {
 			cfg.TokenBudget = 6000
 		}
 		boostEdge(cfg, graph.EdgeImplements, 1.4)
-		boostEdge(cfg, graph.EdgeExplains, 1.3)
-		boostEdge(cfg, graph.EdgeDocumentedBy, 1.3)
 
 	case brain.PhaseDevelopment:
 		// Development IS the baseline — no adjustments needed.

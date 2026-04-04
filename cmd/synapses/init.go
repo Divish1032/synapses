@@ -355,7 +355,6 @@ func runIndexing(absPath string) error {
 	applyGoTypesIfEnabled(g, absPath, cfg)
 	applyTSTypesIfEnabled(g, absPath, cfg)
 	enrichMetricsIfEnabled(g, absPath, cfg)
-	analyzeDataFlowIfEnabled(g, cfg)
 
 	elapsed := time.Since(start)
 	if identity := g.ProjectIdentity(); identity != nil {

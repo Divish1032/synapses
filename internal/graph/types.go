@@ -56,8 +56,7 @@ const (
 	EdgeDefines    EdgeType = "DEFINES"
 	EdgeEmbeds     EdgeType = "EMBEDS"
 	EdgeDependsOn  EdgeType = "DEPENDS_ON"
-	EdgeExports    EdgeType = "EXPORTS"
-	EdgeDataFlows  EdgeType = "DATA_FLOWS"
+	EdgeExports EdgeType = "EXPORTS"
 	// EdgeHandles is a synthetic edge injected by the heuristic pass (R1).
 	// Direction: routeNode --HANDLES--> handlerFunction.
 	// Represents framework routing registration: "this route dispatches to this handler."
@@ -67,12 +66,6 @@ const (
 	// EdgeContains links a document file to its section nodes (doc→section)
 	// and parent sections to child subsections (section→subsection).
 	EdgeContains EdgeType = "CONTAINS"
-	// EdgeExplains links a documentation section to a code entity it describes.
-	// Direction: Section → code entity. Created by ResolveDocEdges post-parse.
-	EdgeExplains EdgeType = "EXPLAINS"
-	// EdgeDocumentedBy is the reverse of EXPLAINS: code entity → Section.
-	// Enables get_context to surface documentation for any queried code entity.
-	EdgeDocumentedBy EdgeType = "DOCUMENTED_BY"
 	// EdgeLinksTo connects document nodes via markdown [text](path.md) links.
 	// Direction: source document/section → target document node.
 	EdgeLinksTo EdgeType = "LINKS_TO"
@@ -104,29 +97,6 @@ const (
 	// auto-created. BFS weight is lower than structural edges to reflect uncertainty.
 	EdgeMentions EdgeType = "MENTIONS"
 
-	// Sprint 17 #5: NL-to-graph knowledge edge types.
-	// Created during NL-to-graph extraction from natural-language documents.
-
-	// EdgeContradicts links two entities that express conflicting information
-	// (e.g. two doc sections making incompatible claims about a system).
-	// Direction: newer/conflicting entity → established entity.
-	EdgeContradicts EdgeType = "CONTRADICTS"
-
-	// EdgeCausedBy links an effect entity to its cause
-	// (e.g. "OutOfMemoryError" caused_by "LeakedConnection").
-	// Direction: effect → cause.
-	EdgeCausedBy EdgeType = "CAUSED_BY"
-
-	// EdgeInstanceOf links a specific entity to its general type or category
-	// (e.g. "Redis" instance_of "CacheSystem").
-	// Direction: specific → general.
-	EdgeInstanceOf EdgeType = "INSTANCE_OF"
-
-	// EdgeRelatesTo is the generic fallback relationship for NL-extracted edges
-	// where no more specific type applies. Used when Tier 2 classification is
-	// unavailable or returns an unrecognized type.
-	// Direction: source entity → related entity.
-	EdgeRelatesTo EdgeType = "RELATES_TO"
 )
 
 // DefaultEdgeWeights defines the semantic significance of each edge type.
@@ -137,7 +107,6 @@ const (
 // in a file with equal — and misleading — relevance scores.
 var DefaultEdgeWeights = map[EdgeType]float64{
 	EdgeCalls:      1.0,
-	EdgeDataFlows:  0.95,
 	EdgeImplements: 0.9,
 	EdgeEmbeds:     0.85,
 	EdgeDependsOn:  0.8,
@@ -150,11 +119,6 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	// R31: Documentation edge weights.
 	// CONTAINS is structural (doc→section), low weight like DEFINES.
 	EdgeContains: 0.15,
-	// EXPLAINS has moderate weight: doc sections explaining code are valuable context.
-	EdgeExplains: 0.7,
-	// DOCUMENTED_BY is the reverse: code entity → doc section. Slightly lower
-	// so code-to-code edges are preferred when the token budget is tight.
-	EdgeDocumentedBy: 0.6,
 	// LINKS_TO is cross-doc navigation, lowest semantic weight.
 	EdgeLinksTo: 0.3,
 	// MANUAL is a user-defined cross-domain edge (created via link_entities).
@@ -169,14 +133,6 @@ var DefaultEdgeWeights = map[EdgeType]float64{
 	EdgeDocuments:    0.65,
 	// MENTIONS is synthetic (name-match heuristic) — lower weight reflects uncertainty.
 	EdgeMentions: 0.55,
-	// Sprint 17 #5: NL-to-graph knowledge edge weights.
-	// CONTRADICTS is notable: opposing information carries more signal than a generic link.
-	EdgeContradicts: 0.6,
-	// CAUSED_BY and INSTANCE_OF are structured relationship types — moderate weight.
-	EdgeCausedBy:   0.5,
-	EdgeInstanceOf: 0.4,
-	// RELATES_TO is the generic fallback — lowest NL edge weight.
-	EdgeRelatesTo: 0.3,
 }
 
 // EdgeTypeDescriptor captures the semantic metadata for a single edge type.
@@ -217,13 +173,6 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Name:           EdgeCalls,
 		Description:    "Function or method invocation. Direction: caller → callee. Highest BFS weight — runtime behaviour flows along CALLS edges.",
 		SemanticWeight: 1.0,
-		Direction:      "directed",
-		Domain:         DomainCode,
-	},
-	{
-		Name:           EdgeDataFlows,
-		Description:    "Data dependency between entities: a value produced by one entity is consumed by another. Near-highest weight — data-flow edges are critical for debugging and impact analysis.",
-		SemanticWeight: 0.95,
 		Direction:      "directed",
 		Domain:         DomainCode,
 	},
@@ -280,14 +229,6 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Domain:         DomainCode,
 	},
 	{
-		Name:           EdgeExplains,
-		Description:    "Documentation section describes a code entity (R31). Direction: Section node → code entity. Moderate weight — doc context is valuable but secondary to structural code edges.",
-		SemanticWeight: 0.7,
-		Direction:      "directed",
-		Domain:         DomainDocs,
-		Synthetic:      true,
-	},
-	{
 		Name:           EdgeConfiguredBy,
 		Description:    "Code entity is controlled by a configuration resource. Direction: code entity → Terraform variable / k8s ConfigMap / config file node. Cross-domain — config changes can silently break code behaviour.",
 		SemanticWeight: 0.65,
@@ -301,22 +242,6 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		SemanticWeight: 0.65,
 		Direction:      "directed",
 		Domain:         DomainDocs,
-		Synthetic:      true,
-	},
-	{
-		Name:           EdgeDocumentedBy,
-		Description:    "Reverse of EXPLAINS: code entity references its documentation section (R31). Direction: code entity → Section node. Slightly lower than EXPLAINS so code-to-code edges are preferred under token budget pressure.",
-		SemanticWeight: 0.6,
-		Direction:      "directed",
-		Domain:         DomainDocs,
-		Synthetic:      true,
-	},
-	{
-		Name:           EdgeContradicts,
-		Description:    "Sprint 17 NL-to-graph: two entities express conflicting information (e.g. two doc sections with incompatible claims). Direction: newer/conflicting entity → established entity. Weight reflects the high signal value of detected contradictions.",
-		SemanticWeight: 0.6,
-		Direction:      "directed",
-		Domain:         DomainKnowledge,
 		Synthetic:      true,
 	},
 	{
@@ -343,35 +268,11 @@ var EdgeTypeCatalog = []EdgeTypeDescriptor{
 		Synthetic:      true,
 	},
 	{
-		Name:           EdgeCausedBy,
-		Description:    "Sprint 17 NL-to-graph: causal relationship between entities extracted from documentation. Direction: effect → cause (e.g. OutOfMemoryError caused_by LeakedConnection). Enables root-cause traversal in knowledge graph queries.",
-		SemanticWeight: 0.5,
-		Direction:      "directed",
-		Domain:         DomainKnowledge,
-		Synthetic:      true,
-	},
-	{
-		Name:           EdgeInstanceOf,
-		Description:    "Sprint 17 NL-to-graph: type hierarchy relationship extracted from documentation. Direction: specific → general (e.g. Redis instance_of CacheSystem). Lower weight than structural relationships — type hierarchy is contextual, not runtime-critical.",
-		SemanticWeight: 0.4,
-		Direction:      "directed",
-		Domain:         DomainKnowledge,
-		Synthetic:      true,
-	},
-	{
 		Name:           EdgeLinksTo,
 		Description:    "Markdown cross-document link (R31). Direction: source document/section → target document node. Lowest semantic weight among doc edges — navigation structure, not content relationship.",
 		SemanticWeight: 0.3,
 		Direction:      "directed",
 		Domain:         DomainDocs,
-		Synthetic:      true,
-	},
-	{
-		Name:           EdgeRelatesTo,
-		Description:    "Sprint 17 NL-to-graph: generic fallback relationship between knowledge entities when no more specific type applies. Direction: source entity → related entity. Created by Tier 0 heuristic extraction; may be upgraded to a typed edge by Tier 2 LLM classification.",
-		SemanticWeight: 0.3,
-		Direction:      "directed",
-		Domain:         DomainKnowledge,
 		Synthetic:      true,
 	},
 	{
@@ -406,8 +307,7 @@ func GetEdgeTypes() []EdgeTypeDescriptor {
 // called in the BFS/PPR hot path — it classifies edge types for impact analysis.
 func IsCrossDomainEdge(et EdgeType) bool {
 	switch et {
-	case EdgeDeploys, EdgeConsumes, EdgeConfiguredBy, EdgeDocuments, EdgeMentions, EdgeManual,
-		EdgeContradicts, EdgeCausedBy, EdgeInstanceOf, EdgeRelatesTo:
+	case EdgeDeploys, EdgeConsumes, EdgeConfiguredBy, EdgeDocuments, EdgeMentions, EdgeManual:
 		return true
 	default:
 		return false
@@ -603,11 +503,6 @@ type CarveConfig struct {
 	// Cap: 2.0x boost, floor: 0.3x penalty. Nil disables learned-weight
 	// adjustments (backward-compatible default).
 	LearnedEdgeWeights map[EdgeWeightKey]float64
-	// CoAccessPatterns maps a root entity name to co-accessed entity node IDs
-	// with their confidence scores. When non-nil, CarveEgoGraph injects these
-	// as virtual neighbors with floor relevance after the main BFS traversal.
-	// Sprint 27.5: Auto-pinning via co-access patterns.
-	CoAccessPatterns []CoAccessHint
 
 	// LearnedEdgeWeightsVersion is the store's monotonic write counter at the
 	// time LearnedEdgeWeights was loaded. It is included in the subgraph cache
@@ -615,14 +510,6 @@ type CarveConfig struct {
 	// to the edge_learned_weights table — regardless of whether the map has the
 	// same number of entries (len-based discrimination is not sufficient).
 	LearnedEdgeWeightsVersion int64
-}
-
-// CoAccessHint represents an entity that was frequently co-accessed with the
-// current query root. Used by CarveEgoGraph to inject "soft-linked" entities.
-// Sprint 27.5.
-type CoAccessHint struct {
-	NodeID     NodeID
-	Confidence float64 // 0.0–1.0
 }
 
 // EdgeWeightKey uniquely identifies a specific directed edge in the graph.
@@ -648,19 +535,16 @@ type QualityNode struct {
 // Agents modifying code need to see what they will break (dependencies).
 // IMPLEMENTS is reduced — the focus is behavioral, not contractual.
 var intentModifyWeights = map[EdgeType]float64{
-	EdgeCalls:        1.0,
-	EdgeDataFlows:    0.95,
-	EdgeImplements:   0.6,
-	EdgeEmbeds:       0.75,
-	EdgeDependsOn:    0.8,
-	EdgeImports:      0.6,
-	EdgeExports:      0.4,
-	EdgeDefines:      0.15,
-	EdgeHandles:      0.9,
-	EdgeContains:     0.15,
-	EdgeExplains:     0.5,
-	EdgeDocumentedBy: 0.4,
-	EdgeLinksTo:      0.2,
+	EdgeCalls:      1.0,
+	EdgeImplements: 0.6,
+	EdgeEmbeds:     0.75,
+	EdgeDependsOn:  0.8,
+	EdgeImports:    0.6,
+	EdgeExports:    0.4,
+	EdgeDefines:    0.15,
+	EdgeHandles:    0.9,
+	EdgeContains:   0.15,
+	EdgeLinksTo:    0.2,
 	// Sprint 16: cross-domain edges — deploy/consume targets are critical for modify.
 	EdgeDeploys:      0.75,
 	EdgeConsumes:     0.75,
@@ -673,19 +557,16 @@ var intentModifyWeights = map[EdgeType]float64{
 // intentDebugWeights boosts DATA_FLOWS and DEPENDS_ON for the "debug" intent.
 // Combined with negative DirectionBoost, callers (upstream triggers) are preferred.
 var intentDebugWeights = map[EdgeType]float64{
-	EdgeCalls:        1.0,
-	EdgeDataFlows:    1.1,
-	EdgeImplements:   0.7,
-	EdgeEmbeds:       0.65,
-	EdgeDependsOn:    0.95,
-	EdgeImports:      0.5,
-	EdgeExports:      0.4,
-	EdgeDefines:      0.15,
-	EdgeHandles:      0.9,
-	EdgeContains:     0.15,
-	EdgeExplains:     0.5,
-	EdgeDocumentedBy: 0.4,
-	EdgeLinksTo:      0.2,
+	EdgeCalls:      1.0,
+	EdgeImplements: 0.7,
+	EdgeEmbeds:     0.65,
+	EdgeDependsOn:  0.95,
+	EdgeImports:    0.5,
+	EdgeExports:    0.4,
+	EdgeDefines:    0.15,
+	EdgeHandles:    0.9,
+	EdgeContains:   0.15,
+	EdgeLinksTo:    0.2,
 	// Sprint 16: cross-domain edges — config is extra important for debugging.
 	EdgeDeploys:      0.65,
 	EdgeConsumes:     0.75,
@@ -698,19 +579,16 @@ var intentDebugWeights = map[EdgeType]float64{
 // intentReviewWeights boosts IMPLEMENTS and EMBEDS for the "review" intent.
 // Code review is about contract surface, interface compliance, and test coverage.
 var intentReviewWeights = map[EdgeType]float64{
-	EdgeCalls:        0.8,
-	EdgeDataFlows:    1.0,
-	EdgeImplements:   1.2,
-	EdgeEmbeds:       1.0,
-	EdgeDependsOn:    0.7,
-	EdgeImports:      0.5,
-	EdgeExports:      0.6,
-	EdgeDefines:      0.15,
-	EdgeHandles:      0.9,
-	EdgeContains:     0.15,
-	EdgeExplains:     0.7,
-	EdgeDocumentedBy: 0.6,
-	EdgeLinksTo:      0.3,
+	EdgeCalls:      0.8,
+	EdgeImplements: 1.2,
+	EdgeEmbeds:     1.0,
+	EdgeDependsOn:  0.7,
+	EdgeImports:    0.5,
+	EdgeExports:    0.6,
+	EdgeDefines:    0.15,
+	EdgeHandles:    0.9,
+	EdgeContains:   0.15,
+	EdgeLinksTo:    0.3,
 	// Sprint 16: cross-domain edges — all relevant for review.
 	EdgeDeploys:      0.75,
 	EdgeConsumes:     0.75,
@@ -723,19 +601,16 @@ var intentReviewWeights = map[EdgeType]float64{
 // intentAddWeights boosts IMPORTS and IMPLEMENTS for the "add" intent.
 // Agents adding new code need to follow existing import patterns and interfaces.
 var intentAddWeights = map[EdgeType]float64{
-	EdgeCalls:        0.7,
-	EdgeDataFlows:    0.8,
-	EdgeImplements:   1.0,
-	EdgeEmbeds:       0.9,
-	EdgeDependsOn:    0.9,
-	EdgeImports:      0.85,
-	EdgeExports:      0.65,
-	EdgeDefines:      0.15,
-	EdgeHandles:      0.9,
-	EdgeContains:     0.15,
-	EdgeExplains:     0.7,
-	EdgeDocumentedBy: 0.6,
-	EdgeLinksTo:      0.3,
+	EdgeCalls:      0.7,
+	EdgeImplements: 1.0,
+	EdgeEmbeds:     0.9,
+	EdgeDependsOn:  0.9,
+	EdgeImports:    0.85,
+	EdgeExports:    0.65,
+	EdgeDefines:    0.15,
+	EdgeHandles:    0.9,
+	EdgeContains:   0.15,
+	EdgeLinksTo:    0.3,
 	// Sprint 16: cross-domain edges — API/infra context useful when adding new code.
 	EdgeDeploys:      0.65,
 	EdgeConsumes:     0.75,
@@ -748,19 +623,16 @@ var intentAddWeights = map[EdgeType]float64{
 // intentPlanWeights boosts IMPLEMENTS and DEPENDS_ON for the "plan" intent.
 // Planning requires understanding interface contracts and dependency scope.
 var intentPlanWeights = map[EdgeType]float64{
-	EdgeCalls:        1.0,
-	EdgeDataFlows:    0.9,
-	EdgeImplements:   1.1,
-	EdgeEmbeds:       0.85,
-	EdgeDependsOn:    0.95,
-	EdgeImports:      0.7,
-	EdgeExports:      0.6,
-	EdgeDefines:      0.15,
-	EdgeHandles:      0.9,
-	EdgeContains:     0.15,
-	EdgeExplains:     0.8,
-	EdgeDocumentedBy: 0.7,
-	EdgeLinksTo:      0.3,
+	EdgeCalls:      1.0,
+	EdgeImplements: 1.1,
+	EdgeEmbeds:     0.85,
+	EdgeDependsOn:  0.95,
+	EdgeImports:    0.7,
+	EdgeExports:    0.6,
+	EdgeDefines:    0.15,
+	EdgeHandles:    0.9,
+	EdgeContains:   0.15,
+	EdgeLinksTo:    0.3,
 	// Sprint 16: cross-domain edges — plan intent needs full cross-domain picture.
 	EdgeDeploys:      0.75,
 	EdgeConsumes:     0.75,

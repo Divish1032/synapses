@@ -92,8 +92,7 @@ func linkDocFiles(g *graph.Graph, files []*graph.Node, codeNames map[string][]*g
 					continue
 				}
 				seen[target.ID] = true
-				g.AddEdge(&graph.Edge{From: f.ID, To: target.ID, Type: graph.EdgeExplains})
-				g.AddEdge(&graph.Edge{From: target.ID, To: f.ID, Type: graph.EdgeDocumentedBy})
+				g.AddEdge(&graph.Edge{From: f.ID, To: target.ID, Type: graph.EdgeDocuments})
 				created++
 			}
 		}
@@ -175,8 +174,7 @@ func linkSections(g *graph.Graph, sections []*graph.Node, codeNames map[string][
 				}
 				seen[target.ID] = true
 
-				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
-				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeDocuments})
 				secCreated++
 			}
 		}
@@ -241,8 +239,7 @@ func linkSectionsToFiles(g *graph.Graph, sections []*graph.Node, fileIdx map[str
 					continue
 				}
 				seen[target.ID] = true
-				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
-				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeDocuments})
 				created++
 			}
 		}
@@ -254,8 +251,7 @@ func linkSectionsToFiles(g *graph.Graph, sections []*graph.Node, fileIdx map[str
 					continue
 				}
 				seen[target.ID] = true
-				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
-				g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+				g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeDocuments})
 				created++
 			}
 		}
@@ -467,10 +463,10 @@ func linkCodeBlocks(g *graph.Graph, sections []*graph.Node, codeNames map[string
 			continue
 		}
 
-		// Collect existing EXPLAINS targets to dedup.
+		// Collect existing DOCUMENTS targets to dedup.
 		existing := make(map[graph.NodeID]bool)
 		for _, e := range g.OutEdges(sec.ID) {
-			if e.Type == graph.EdgeExplains {
+			if e.Type == graph.EdgeDocuments {
 				existing[e.To] = true
 			}
 		}
@@ -494,8 +490,7 @@ func linkCodeBlocks(g *graph.Graph, sections []*graph.Node, codeNames map[string
 						continue
 					}
 					existing[target.ID] = true
-					g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeExplains})
-					g.AddEdge(&graph.Edge{From: target.ID, To: sec.ID, Type: graph.EdgeDocumentedBy})
+					g.AddEdge(&graph.Edge{From: sec.ID, To: target.ID, Type: graph.EdgeDocuments})
 					secCreated++
 					if secCreated >= 5 {
 						break

@@ -44,31 +44,19 @@ func TestResolveDocEdges_BacktickReference(t *testing.T) {
 
 	n := ResolveDocEdges(g)
 	if n != 1 {
-		t.Fatalf("expected 1 EXPLAINS edge, got %d", n)
+		t.Fatalf("expected 1 DOCUMENTS edge, got %d", n)
 	}
 
-	// Check EXPLAINS: section → code
+	// Check DOCUMENTS: section → code
 	edges := g.OutEdges(secID)
-	var foundExplains bool
+	var foundDocuments bool
 	for _, e := range edges {
-		if e.To == funcID && e.Type == graph.EdgeExplains {
-			foundExplains = true
+		if e.To == funcID && e.Type == graph.EdgeDocuments {
+			foundDocuments = true
 		}
 	}
-	if !foundExplains {
-		t.Error("missing EXPLAINS edge from section to FlatGraph")
-	}
-
-	// Check DOCUMENTED_BY: code → section
-	edges = g.OutEdges(funcID)
-	var foundDocBy bool
-	for _, e := range edges {
-		if e.To == secID && e.Type == graph.EdgeDocumentedBy {
-			foundDocBy = true
-		}
-	}
-	if !foundDocBy {
-		t.Error("missing DOCUMENTED_BY edge from FlatGraph to section")
+	if !foundDocuments {
+		t.Error("missing DOCUMENTS edge from section to FlatGraph")
 	}
 }
 
@@ -451,8 +439,8 @@ func TestResolveDocEdgesForFile_OnlyLinksTargetFile(t *testing.T) {
 	// secB should have NO edges yet.
 	edgesB := g.OutEdges(secB)
 	for _, e := range edgesB {
-		if e.Type == graph.EdgeExplains {
-			t.Error("docs.md section should NOT have EXPLAINS edge from file-scoped resolution")
+		if e.Type == graph.EdgeDocuments {
+			t.Error("docs.md section should NOT have DOCUMENTS edge from file-scoped resolution")
 		}
 	}
 }
@@ -493,12 +481,12 @@ func TestResolveDocEdges_EntityInTitle(t *testing.T) {
 	edges := g.OutEdges(secID)
 	var found bool
 	for _, e := range edges {
-		if e.To == funcID && e.Type == graph.EdgeExplains {
+		if e.To == funcID && e.Type == graph.EdgeDocuments {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("missing EXPLAINS edge from section with entity name in title")
+		t.Error("missing DOCUMENTS edge from section with entity name in title")
 	}
 }
 
@@ -565,12 +553,12 @@ func TestResolveDocEdges_FrontmatterTitle(t *testing.T) {
 	edges := g.OutEdges(fileID)
 	var found bool
 	for _, e := range edges {
-		if e.To == funcID && e.Type == graph.EdgeExplains {
+		if e.To == funcID && e.Type == graph.EdgeDocuments {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("missing EXPLAINS edge from file node with frontmatter_title")
+		t.Error("missing DOCUMENTS edge from file node with frontmatter_title")
 	}
 }
 
@@ -628,12 +616,12 @@ func TestResolveDocEdges_FilePathInBacktick(t *testing.T) {
 
 	var found bool
 	for _, e := range g.OutEdges(secID) {
-		if e.To == fileID && e.Type == graph.EdgeExplains {
+		if e.To == fileID && e.Type == graph.EdgeDocuments {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("missing EXPLAINS edge from section to file referenced in backtick")
+		t.Error("missing DOCUMENTS edge from section to file referenced in backtick")
 	}
 }
 
@@ -777,15 +765,15 @@ func TestResolveDocEdges_TestFileFiltered(t *testing.T) {
 	// Should only link to BuildGraph.
 	var found bool
 	for _, e := range g.OutEdges(secID) {
-		if e.To == testID && e.Type == graph.EdgeExplains {
+		if e.To == testID && e.Type == graph.EdgeDocuments {
 			t.Error("should NOT link to test file entity")
 		}
-		if e.To == prodID && e.Type == graph.EdgeExplains {
+		if e.To == prodID && e.Type == graph.EdgeDocuments {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("missing EXPLAINS edge to production entity BuildGraph")
+		t.Error("missing DOCUMENTS edge to production entity BuildGraph")
 	}
 }
 
@@ -895,7 +883,7 @@ func TestResolveDocEdges_CodeBlockIdentifiers(t *testing.T) {
 
 	var foundFlask, foundRender bool
 	for _, e := range g.OutEdges(secID) {
-		if e.Type == graph.EdgeExplains {
+		if e.Type == graph.EdgeDocuments {
 			if e.To == flaskID {
 				foundFlask = true
 			}
@@ -905,10 +893,10 @@ func TestResolveDocEdges_CodeBlockIdentifiers(t *testing.T) {
 		}
 	}
 	if !foundFlask {
-		t.Error("missing EXPLAINS edge to Flask from code block")
+		t.Error("missing DOCUMENTS edge to Flask from code block")
 	}
 	if !foundRender {
-		t.Error("missing EXPLAINS edge to render_template from code block")
+		t.Error("missing DOCUMENTS edge to render_template from code block")
 	}
 }
 

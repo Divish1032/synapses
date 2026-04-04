@@ -119,12 +119,12 @@ func TestIntentCarveWeights_ModifyReducesImplements(t *testing.T) {
 	}
 }
 
-func TestIntentCarveWeights_DebugBoostsDataFlows(t *testing.T) {
+func TestIntentCarveWeights_DebugBoostsDependsOn(t *testing.T) {
 	w := graph.IntentCarveWeights("debug")
 	def := graph.DefaultEdgeWeights
-	if w[graph.EdgeDataFlows] <= def[graph.EdgeDataFlows] {
-		t.Errorf("debug: EdgeDataFlows weight %v should be > default %v (data flow traces bugs)",
-			w[graph.EdgeDataFlows], def[graph.EdgeDataFlows])
+	if w[graph.EdgeDependsOn] <= def[graph.EdgeDependsOn] {
+		t.Errorf("debug: EdgeDependsOn weight %v should be > default %v (dependency tracing helps debugging)",
+			w[graph.EdgeDependsOn], def[graph.EdgeDependsOn])
 	}
 }
 

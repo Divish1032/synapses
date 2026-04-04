@@ -149,10 +149,6 @@ type Server struct {
 	packetCacheMu sync.RWMutex
 	packetCache   map[string]*packetCacheEntry
 
-	// Brain cache warming debounce: prevents hammering the brain on rapid saves.
-	warmMu   sync.Mutex
-	lastWarm time.Time
-
 	// GAP-1: Feedback loop — track get_context call counts per (agentID, entity)
 	// within a session. When the same agent calls get_context ≥3 times for the
 	// same entity, we auto-record a "context_repeated" episode as a signal that

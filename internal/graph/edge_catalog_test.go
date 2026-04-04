@@ -117,14 +117,11 @@ func TestEdgeTypeCatalogKnownEdges(t *testing.T) {
 		synth  bool
 	}{
 		{graph.EdgeCalls, 1.0, graph.DomainCode, false},
-		{graph.EdgeDataFlows, 0.95, graph.DomainCode, false},
 		{graph.EdgeImplements, 0.9, graph.DomainCode, false},
 		{graph.EdgeHandles, 0.9, graph.DomainCode, true},
 		{graph.EdgeEmbeds, 0.85, graph.DomainCode, false},
 		{graph.EdgeDependsOn, 0.8, graph.DomainCode, false},
 		{graph.EdgeImports, 0.7, graph.DomainCode, false},
-		{graph.EdgeExplains, 0.7, graph.DomainDocs, true},
-		{graph.EdgeDocumentedBy, 0.6, graph.DomainDocs, true},
 		{graph.EdgeExports, 0.5, graph.DomainCode, false},
 		{graph.EdgeLinksTo, 0.3, graph.DomainDocs, true},
 		{graph.EdgeContains, 0.15, graph.DomainDocs, true},

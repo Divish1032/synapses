@@ -151,19 +151,6 @@ type Brain interface {
 	// GetSDLCConfig returns the current SDLC config.
 	GetSDLCConfig() SDLCConfig
 
-	// GetPatterns returns learned co-occurrence patterns sorted by confidence.
-	// If trigger is non-empty, only patterns with that trigger are returned.
-	// limit caps the number of results (0 = default of 20).
-	GetPatterns(trigger string, limit int) []PatternHint
-
-	// UpsertCoAccessPattern records a co-access pattern between two entities.
-	// Sprint 27.5: called from session-end co-access analysis.
-	UpsertCoAccessPattern(trigger, coChange string) error
-
-	// DecayCoAccessPatterns reduces confidence for patterns where trigger was
-	// accessed but co_change was not. Sprint 27.5.
-	DecayCoAccessPatterns(accessedEntities []string) error
-
 	// Prune strips boilerplate (navigation, ads, footers) from raw web page text
 	// using the Tier 0 (0.8B) model. Returns cleaned technical content.
 	// Falls back to returning the original content if the LLM is unavailable.
@@ -992,35 +979,6 @@ func (b *impl) GetSDLCConfig() SDLCConfig {
 		UpdatedAt:   row.UpdatedAt,
 		UpdatedBy:   row.UpdatedBy,
 	}
-}
-
-func (b *impl) UpsertCoAccessPattern(trigger, coChange string) error {
-	return b.store.UpsertPattern(trigger, coChange, "co-access")
-}
-
-func (b *impl) DecayCoAccessPatterns(accessedEntities []string) error {
-	return b.store.DecayCoAccessPatterns(accessedEntities)
-}
-
-func (b *impl) GetPatterns(trigger string, limit int) []PatternHint {
-	if limit <= 0 {
-		limit = 20
-	}
-	var raw []store.ContextPattern
-	if trigger != "" {
-		raw = b.store.GetPatternsForTriggers([]string{trigger}, limit)
-	} else {
-		all, _ := b.store.AllPatterns()
-		if len(all) > limit {
-			all = all[:limit]
-		}
-		raw = all
-	}
-	out := make([]PatternHint, len(raw))
-	for i, p := range raw {
-		out[i] = PatternHint{Trigger: p.Trigger, CoChange: p.CoChange, Reason: p.Reason, Confidence: p.Confidence}
-	}
-	return out
 }
 
 // --- conversion helpers ---

@@ -156,12 +156,6 @@ func TestImpl_GetSDLCConfig_DirectCall(t *testing.T) {
 	b.GetSDLCConfig()
 }
 
-func TestImpl_GetPatterns_DirectCall(t *testing.T) {
-	b := &impl{store: nil}
-	defer func() { recover() }()
-	b.GetPatterns("", 0)
-}
-
 func TestImpl_UpsertADR_DirectCall(t *testing.T) {
 	b := &impl{store: nil}
 	defer func() { recover() }()

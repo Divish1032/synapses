@@ -520,8 +520,8 @@ func TestApplyIntentCarveConfig_SetsAllThreeFields(t *testing.T) {
 	}{
 		// modify: DirectionBoost=0.3, IMPLEMENTS reduced vs default
 		{"modify", "modify", 0.3, graph.EdgeImplements, "lt"},
-		// debug: DirectionBoost=-0.3, DATA_FLOWS boosted vs default
-		{"debug", "debug", -0.3, graph.EdgeDataFlows, "gt"},
+		// debug: DirectionBoost=-0.3, DEPENDS_ON boosted vs default
+		{"debug", "debug", -0.3, graph.EdgeDependsOn, "gt"},
 		// review: DirectionBoost=0.0, IMPLEMENTS boosted vs default
 		{"review", "review", 0.0, graph.EdgeImplements, "gt"},
 		// understand: DirectionBoost=0.2, weights equal to default
@@ -870,9 +870,8 @@ func TestApplyPhaseCarveConfig_Planning(t *testing.T) {
 		MaxDepth:    2,
 		TokenBudget: 3000,
 		EdgeWeights: map[graph.EdgeType]float64{
-			graph.EdgeImplements:   0.9,
-			graph.EdgeExplains:     0.7,
-			graph.EdgeDocumentedBy: 0.6,
+			graph.EdgeImplements: 0.9,
+			graph.EdgeDocuments:  0.65,
 		},
 	}
 	applyPhaseCarveConfig(&cfg, brain.PhasePlanning)

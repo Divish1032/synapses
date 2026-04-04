@@ -2265,7 +2265,6 @@ func initProjectInstance(appCtx context.Context, absPath string, sharedPulse *pu
 	applyGoTypesIfEnabled(g, absPath, cfg)
 	applyTSTypesIfEnabled(g, absPath, cfg)
 	enrichMetricsIfEnabled(g, absPath, cfg)
-	analyzeDataFlowIfEnabled(g, cfg)
 
 	// D1: Activate FlatGraph SoA CSR fast path for BFS/PPR traversal.
 	// EnableFlatGraph builds the cache-friendly adjacency representation that

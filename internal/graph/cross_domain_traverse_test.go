@@ -35,11 +35,8 @@ func TestIsCrossDomainEdge(t *testing.T) {
 	sameDomain := []graph.EdgeType{
 		graph.EdgeCalls,
 		graph.EdgeImplements,
-		graph.EdgeDataFlows,
 		graph.EdgeImports,
 		graph.EdgeHandles,
-		graph.EdgeExplains,
-		graph.EdgeDocumentedBy,
 	}
 	for _, et := range sameDomain {
 		if graph.IsCrossDomainEdge(et) {

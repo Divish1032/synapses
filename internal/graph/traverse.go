@@ -278,24 +278,6 @@ func (g *Graph) pprScores(rootID NodeID, cfg CarveConfig, idx *GraphIndex) map[N
 				}
 			}
 
-			// Doc edge confidence scaling (mirrors BFS).
-			if e.Type == EdgeExplains || e.Type == EdgeDocumentedBy {
-				sourceID := e.From
-				if e.Type == EdgeDocumentedBy {
-					sourceID = e.To
-				}
-				if sourceNode := g.nodes[sourceID]; sourceNode != nil {
-					if confStr := sourceNode.Metadata["doc_link_confidence"]; confStr != "" {
-						if conf, err := strconv.ParseFloat(confStr, 64); err == nil && conf > 0 {
-							if conf > 1.0 {
-								conf = 1.0 // clamp: confidence is a cosine similarity, must be in (0, 1]
-							}
-							w *= conf
-						}
-					}
-				}
-			}
-
 			// Sprint 15 #3: apply per-edge learned weight multiplier.
 			w *= learnedEdgeMult(cfg.LearnedEdgeWeights, e.From, e.To, e.Type)
 
@@ -667,25 +649,6 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 					}
 				}
 
-				// Doc edge confidence scaling: embedding-derived EXPLAINS/DOCUMENTED_BY
-				// edges carry confidence metadata on the section node. Scale weight so
-				// high-confidence edges rank above low-confidence ones.
-				if e.Type == EdgeExplains || e.Type == EdgeDocumentedBy {
-					sourceID := e.From
-					if e.Type == EdgeDocumentedBy {
-						sourceID = e.To // confidence lives on the doc section node
-					}
-					if sourceNode := g.nodes[sourceID]; sourceNode != nil {
-						if confStr := sourceNode.Metadata["doc_link_confidence"]; confStr != "" {
-							if conf, err := strconv.ParseFloat(confStr, 64); err == nil && conf > 0 {
-								if conf > 1.0 {
-									conf = 1.0 // clamp: confidence is a cosine similarity, must be in (0, 1]
-								}
-								typeWeight *= conf
-							}
-						}
-					}
-				}
 
 				// Sprint 15 #3: apply per-edge learned weight multiplier derived
 				// from historical task outcomes. Neutral (1.0) when no entry exists.
@@ -772,33 +735,6 @@ func (g *Graph) CarveEgoGraph(rootID NodeID, cfg CarveConfig) (*SubGraph, error)
 				directCalleeSet[e.To] = true
 			}
 		}
-	}
-
-	// Sprint 27.5: Co-access injection — entities frequently co-accessed with
-	// the root get injected as virtual neighbors with floor relevance.
-	// Injected only if they exist in the graph, weren't already visited,
-	// and aren't excluded by ExcludeTypes.
-	for _, hint := range cfg.CoAccessPatterns {
-		if _, already := visited[hint.NodeID]; already {
-			continue
-		}
-		n := g.nodes[hint.NodeID]
-		if n == nil {
-			continue
-		}
-		// Respect ExcludeTypes — don't inject package/file hub nodes.
-		if cfg.ExcludeTypes[n.Type] {
-			continue
-		}
-		// Respect ExcludeTestFiles.
-		if cfg.ExcludeTestFiles && isTestFile(n.File) {
-			continue
-		}
-		floor := hint.Confidence * 0.15
-		if floor < 0.05 {
-			floor = 0.05
-		}
-		visited[hint.NodeID] = floor
 	}
 
 	// Build scored node list, applying MinRelevance and ExcludeTypes filters.
