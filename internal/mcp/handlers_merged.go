@@ -122,7 +122,8 @@ func (s *Server) handleValidateDispatch(
 	// Only phases that produce security findings can block. Management and info
 	// phases (list, safety, upsert_rule, …) never block.
 	if err == nil && result != nil && !result.IsError {
-		blockingPhase := phase == "pre" || phase == "pre_write" || phase == "post" || phase == "full"
+		// "full" maps to handlePlanContext which never emits action_required — exclude it.
+		blockingPhase := phase == "pre" || phase == "pre_write" || phase == "post"
 		if blockingPhase {
 			if reason, isBlocked := extractBlockReason(result); isBlocked {
 				override, _ := req.GetArguments()["override"].(bool)
