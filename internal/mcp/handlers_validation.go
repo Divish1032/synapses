@@ -1920,6 +1920,9 @@ func reformatValidateKV(result *mcp.CallToolResult, phase string, req mcp.CallTo
 				continue
 			}
 			sev, _ := finding["severity"].(string)
+			if sev == "" {
+				sev = "UNKNOWN"
+			}
 			msg, _ := finding["message"].(string)
 			ruleID, _ := finding["pattern_id"].(string)
 			if msg == "" {
@@ -1945,6 +1948,9 @@ func reformatValidateKV(result *mcp.CallToolResult, phase string, req mcp.CallTo
 				continue
 			}
 			sev, _ := viol["severity"].(string)
+			if sev == "" {
+				sev = "UNKNOWN"
+			}
 			desc, _ := viol["description"].(string)
 			ruleID, _ := viol["rule_id"].(string)
 			if desc == "" {

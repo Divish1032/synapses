@@ -287,6 +287,11 @@ func (s *Server) handleGetContext(
 	if format == "" {
 		format = "compact"
 	}
+	// Sprint 30.1: "kv" is the cross-tool alias for "compact" in get_context.
+	// Agents passing format="kv" get the same NL compact output.
+	if format == "kv" {
+		format = "compact"
+	}
 	detailLevel, _ := req.GetArguments()["detail_level"].(string)
 
 	// GAP-1: Feedback loop.
