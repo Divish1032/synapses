@@ -267,3 +267,40 @@ func TestSessionInit_ProjectValueMetrics_AllZeroOmitted(t *testing.T) {
 		t.Error("project_value_metrics should be omitted when all metrics are zero (first session)")
 	}
 }
+
+// TestSessionInit_ProjectValueMetrics_AbsentInResumeMode verifies that
+// project_value_metrics is NOT included when scope="resume".
+func TestSessionInit_ProjectValueMetrics_AbsentInResumeMode(t *testing.T) {
+	pulsePath := filepath.Join(t.TempDir(), "pulse.sqlite")
+	pc, err := pulse.New(pulsePath)
+	if err != nil {
+		t.Fatalf("pulse.New: %v", err)
+	}
+	defer pc.Close()
+
+	srv := newTestServer(t)
+	srv.SetPulseClient(pc)
+
+	// Seed data so metrics would be non-zero if the field were included.
+	st, err := pulsestore.Open(pulsePath)
+	if err != nil {
+		t.Fatalf("pulsestore.Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.InsertMemoryOp(pulsetypes.MemoryOperationEvent{Operation: "recall_hit"}); err != nil {
+		t.Fatalf("InsertMemoryOp: %v", err)
+	}
+
+	res, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "resume-agent",
+		"scope":    "resume",
+	}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+	m := mustResult(t, res, nil)
+
+	if _, ok := m["project_value_metrics"]; ok {
+		t.Error("project_value_metrics should NOT appear in resume mode")
+	}
+}

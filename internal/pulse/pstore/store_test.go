@@ -1145,3 +1145,56 @@ func TestGetProjectValueMetrics_DefaultDays(t *testing.T) {
 		t.Errorf("days=0 default: got %d, want 30", m.Days)
 	}
 }
+
+// TestGetProjectValueMetrics_DateWindowFilter verifies that records older than
+// the requested window are excluded from all three metric counts.
+func TestGetProjectValueMetrics_DateWindowFilter(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	// Insert one record of each type (all timestamped NOW by default).
+	if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+		Operation: "recall_hit", ProjectID: "proj-win",
+	}); err != nil {
+		t.Fatalf("InsertMemoryOp: %v", err)
+	}
+	if err := s.InsertValidationEvent(pulsetypes.ValidationEvent{
+		ToolName: "validate", ViolationCount: 1, ProjectID: "proj-win",
+	}); err != nil {
+		t.Fatalf("InsertValidationEvent: %v", err)
+	}
+	if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+		ToolName: "get_context", Refetched: false, ProjectID: "proj-win",
+	}); err != nil {
+		t.Fatalf("InsertContextDelivery: %v", err)
+	}
+
+	// Sanity: all three counts are 1 when queried within a 30-day window.
+	m := s.GetProjectValueMetrics("proj-win", 30)
+	if m.MemoryRetrievals != 1 || m.ValidateBlocks != 1 || m.FilesFromGraph != 1 {
+		t.Fatalf("before backdate: got retrievals=%d blocks=%d files=%d, want 1/1/1",
+			m.MemoryRetrievals, m.ValidateBlocks, m.FilesFromGraph)
+	}
+
+	// Backdate all three records to 40 days ago — outside the 30-day window.
+	old := time.Now().UTC().AddDate(0, 0, -40).Format(time.RFC3339)
+	for _, tbl := range []string{"memory_ops", "validation_events", "context_deliveries"} {
+		if _, err := s.db.Exec(
+			`UPDATE `+tbl+` SET created_at = ? WHERE project_id = 'proj-win'`, old,
+		); err != nil {
+			t.Fatalf("backdate %s: %v", tbl, err)
+		}
+	}
+
+	// All three counts must now be 0 for a 30-day window.
+	m = s.GetProjectValueMetrics("proj-win", 30)
+	if m.MemoryRetrievals != 0 {
+		t.Errorf("memory_retrievals after backdate: got %d, want 0", m.MemoryRetrievals)
+	}
+	if m.ValidateBlocks != 0 {
+		t.Errorf("validate_blocks after backdate: got %d, want 0", m.ValidateBlocks)
+	}
+	if m.FilesFromGraph != 0 {
+		t.Errorf("files_from_graph after backdate: got %d, want 0", m.FilesFromGraph)
+	}
+}
