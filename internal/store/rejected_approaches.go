@@ -165,6 +165,44 @@ func (s *Store) SearchRejectedApproaches(agentID, projectID, query string, limit
 	return scanRejectedApproaches(rows)
 }
 
+// GetRejectedApproachesInRange returns rejected approaches for the given agent
+// and project whose created_at falls in [since, until] (Unix seconds, inclusive).
+// Use since=0 to skip the lower bound. Used by the deterministic Archivist to
+// scope failures to the current session window.
+func (s *Store) GetRejectedApproachesInRange(agentID, projectID string, since, until int64, limit int) ([]RejectedApproach, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if since > 0 {
+		rows, err = s.knowledgeDB.Query(`
+			SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
+			FROM rejected_approaches
+			WHERE agent_id = ? AND project_id = ? AND created_at >= ? AND created_at <= ?
+			ORDER BY created_at DESC
+			LIMIT ?`,
+			agentID, projectID, since, until, limit,
+		)
+	} else {
+		rows, err = s.knowledgeDB.Query(`
+			SELECT id, agent_id, project_id, approach, failure_reason, blocker, context, created_at
+			FROM rejected_approaches
+			WHERE agent_id = ? AND project_id = ? AND created_at <= ?
+			ORDER BY created_at DESC
+			LIMIT ?`,
+			agentID, projectID, until, limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get rejected approaches in range: %w", err)
+	}
+	defer rows.Close()
+	return scanRejectedApproaches(rows)
+}
+
 // ── scanning helpers ──────────────────────────────────────────────────────────
 
 type rejectedApproachScanner interface {

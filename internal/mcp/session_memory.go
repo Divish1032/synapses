@@ -31,8 +31,9 @@ type endSessionResult struct {
 	ConventionsExtracted    int                    `json:"conventions_extracted,omitempty"`
 	FailurePatternsExtracted int                   `json:"failure_patterns_extracted,omitempty"`
 	UserPrefsExtracted       int                   `json:"user_prefs_extracted,omitempty"`
-	Retrospective        *store.ToolCallSummary `json:"retrospective,omitempty"`
-	EffectivenessReport *EffectivenessReport   `json:"effectiveness_report,omitempty"`
+	Retrospective              *store.ToolCallSummary `json:"retrospective,omitempty"`
+	EffectivenessReport        *EffectivenessReport   `json:"effectiveness_report,omitempty"`
+	DeterministicMemoriesSaved int                    `json:"deterministic_memories_saved,omitempty"`
 }
 
 // EffectivenessReport summarises session quality and compares to recent history (Sprint 15 #5).
@@ -543,6 +544,47 @@ func (s *Server) handleEndSession(
 		logutil.Warn("synapses: user pref extraction: %v\n", err)
 	} else {
 		result.UserPrefsExtracted = n
+	}
+
+	// ── Sprint 30.2: Deterministic Archivist ──────────────────────────────────
+	// Extract session learnings from the tool call log without LLM.
+	// Zero hallucination, zero latency. Runs synchronously so memories are
+	// immediately available for the current session. The LLM Archivist below
+	// continues as async optional enrichment.
+	if synapseSessionID != "" {
+		elogEntries, elogErr := s.store.GetSessionExplorationLog(synapseSessionID, 200)
+		if elogErr == nil && len(elogEntries) > 0 {
+			// Fetch failed approaches created in this session window.
+			var failedApproaches []store.RejectedApproach
+			if !sessionStartedAt.IsZero() {
+				failedApproaches, _ = s.store.GetRejectedApproachesInRange(
+					agentID, s.projectID,
+					sessionStartedAt.Unix(), time.Now().Unix(),
+					20,
+				)
+			}
+			// Convert to archivist types (keeps archivist package store-free).
+			detReq := buildDeterministicRequest(synapseSessionID, agentID, elogEntries, failedApproaches)
+			da := archivist.NewDeterministic()
+			detResp := da.Extract(detReq)
+			for _, m := range detResp.NewMemories {
+				if m.Content == "" {
+					continue
+				}
+				if _, err := s.store.InsertMemory(store.Memory{
+					Tier:          store.TierProject,
+					Content:       m.Content,
+					AgentID:       agentID,
+					TaskID:        taskID,
+					Source:        store.SourceAuto,
+					Tags:          `["archivist","deterministic","auto"]`,
+					SourceProject: s.projectID,
+				}); err == nil {
+					memoriesSaved++
+					result.DeterministicMemoriesSaved++
+				}
+			}
+		}
 	}
 
 	// ── D4: Archivist session memory synthesis ──
@@ -1480,4 +1522,32 @@ func (s *Server) buildHandoffPayload(agentID, summary string, sessSummary *sessi
 		return ""
 	}
 	return string(data)
+}
+
+// buildDeterministicRequest converts store types to archivist types (keeps the
+// archivist package store-free). Called by the Sprint 30.2 deterministic path.
+func buildDeterministicRequest(
+	sessionID, agentID string,
+	elogEntries []store.ExplorationEntry,
+	failedApproaches []store.RejectedApproach,
+) archivist.DeterministicRequest {
+	req := archivist.DeterministicRequest{
+		SessionID: sessionID,
+		AgentID:   agentID,
+	}
+	for _, e := range elogEntries {
+		req.ExplorationEntries = append(req.ExplorationEntries, archivist.ExplorationEntry{
+			ToolName:       e.ToolName,
+			EntityQueried:  e.EntityQueried,
+			FindingSummary: e.FindingSummary,
+		})
+	}
+	for _, fa := range failedApproaches {
+		req.FailedApproaches = append(req.FailedApproaches, archivist.FailedApproach{
+			Approach:      fa.Approach,
+			FailureReason: fa.FailureReason,
+			Blocker:       fa.Blocker,
+		})
+	}
+	return req
 }

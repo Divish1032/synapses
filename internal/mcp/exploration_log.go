@@ -19,13 +19,16 @@ type explorationCapture struct {
 
 // explorationToolSet is the set of tools whose responses are intercepted for
 // exploration log capture. Only exploration-heavy tools are included.
-// session_init, memory, tasks, end_session are excluded — they don't produce
-// "what was found" findings relevant to compaction recovery.
+// session_init, tasks, end_session are excluded — they don't produce
+// "what was found" findings relevant to compaction recovery or the Archivist.
+// memory(action=save) is included so explicit decisions flow into the
+// deterministic Archivist as "decision recorded" entries (Sprint 30.2).
 var explorationToolSet = map[string]bool{
 	"get_context": true,
 	"search":      true,
 	"get_impact":  true,
 	"validate":    true,
+	"memory":      true,
 }
 
 // extractExplorationCapture parses tool call args and result to produce a
@@ -61,6 +64,8 @@ func extractExplorationCapture(toolName string, args map[string]any, result *mcp
 		return extractGetImpactCapture(args, text)
 	case "validate":
 		return extractValidateCapture(args, text)
+	case "memory":
+		return extractMemorySaveCapture(args)
 	}
 	return nil
 }
@@ -272,6 +277,34 @@ func extractValidateCapture(args map[string]any, responseText string) *explorati
 		EntityQueried:  entity,
 		QueryContext:   phase,
 		FindingSummary: capStr(summary, 300),
+	}
+}
+
+// extractMemorySaveCapture captures an explicit memory(action=save) call so
+// that decisions recorded by the agent flow into the deterministic Archivist
+// as "decision recorded" entries (Sprint 30.2). Only fires for action=save;
+// other memory actions (search, list, hypothesize, decide, abandon) are ignored.
+//
+// We read directly from args (not the response) because the response only
+// confirms the save — the semantically useful data is in the request.
+func extractMemorySaveCapture(args map[string]any) *explorationCapture {
+	action, _ := args["action"].(string)
+	if action != "save" {
+		return nil
+	}
+	content, _ := args["content"].(string)
+	if content == "" {
+		return nil
+	}
+	key, _ := args["key"].(string)
+	entityQueried := key
+	if entityQueried == "" {
+		entityQueried = "memory"
+	}
+	return &explorationCapture{
+		EntityQueried:  capStr(entityQueried, 100),
+		QueryContext:   "save",
+		FindingSummary: capStr(content, 300),
 	}
 }
 
