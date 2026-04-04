@@ -249,10 +249,12 @@ func (s *Server) handleEndSession(
 	// Sprint 27.3: clear per-session tool counts.
 	// Sprint 25.6: clear goal reinforcer counter so resumed sessions start fresh.
 	// Sprint 27.10: clear finding queue — undelivered findings are dropped on session end.
+	// Sprint 30.1: clear session-delivered dedup set — frees memory.
 	if synapseSessionID != "" {
 		s.toolTracker.clear(synapseSessionID)
 		s.goalReinforcer.clear(synapseSessionID)
 		s.findingQueue.Clear(synapseSessionID)
+		s.sessionDelivered.clearSession(synapseSessionID)
 	}
 	var retro *store.ToolCallSummary
 	if s.store != nil && synapseSessionID != "" {

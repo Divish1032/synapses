@@ -113,6 +113,22 @@ func (s *Server) handleValidateDispatch(
 		// Sprint 27.3: inject reactive suggestions into validate results.
 		s.injectValidateSuggestions(ctx, result, req)
 	}
+
+	// Sprint 30.1: KV format — compact labeled output for validate responses.
+	if err == nil && result != nil && !result.IsError {
+		if format, _ := req.GetArguments()["format"].(string); format == "kv" {
+			detailLevel, _ := req.GetArguments()["detail_level"].(string)
+			if detailLevel == "" {
+				detailLevel = "summary"
+			}
+			tokenBudget := 300
+			if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
+				tokenBudget = int(tb)
+			}
+			result = reformatValidateKV(result, phase, req, detailLevel, tokenBudget)
+		}
+	}
+
 	return result, err
 }
 

@@ -1857,6 +1857,140 @@ func (s *Server) handleValidatePreWrite(
 	return jsonResult(result)
 }
 
+// ── Sprint 30.1: KV Format for validate ─────────────────────────────────────
+
+// reformatValidateKV converts a JSON validate result to labeled key-value format.
+// It parses the JSON body from the sub-handler result and extracts findings,
+// action, and summary into a compact text representation.
+//
+// Format example (format=kv, detail_level=summary):
+//
+//	# VALIDATE | post | handlers/users.go
+//	[CRITICAL] missing-auth: endpoint lacks auth middleware (8/8 routes have it)
+//	[MEDIUM] coupling-increase: handlers → store direct call
+//	Action: BLOCK — fix CRITICAL before proceeding
+func reformatValidateKV(result *mcp.CallToolResult, phase string, req mcp.CallToolRequest, detailLevel string, tokenBudget int) *mcp.CallToolResult {
+	if result == nil || len(result.Content) == 0 {
+		return result
+	}
+
+	// Extract the JSON text from the result content.
+	var rawText string
+	for _, c := range result.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			rawText = tc.Text
+			break
+		}
+	}
+	if rawText == "" {
+		return result
+	}
+
+	// Parse JSON body.
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(rawText), &body); err != nil {
+		// Not JSON (may already be text) — return as-is.
+		return result
+	}
+
+	// Build subtitle from phase + target file (if available).
+	subtitle := phase
+	if fw, _ := req.GetArguments()["files_written"].(string); fw != "" {
+		subtitle = fmt.Sprintf("%s | %s", phase, fw)
+	} else if desc, _ := req.GetArguments()["description"].(string); desc != "" {
+		if len(desc) > 60 {
+			desc = desc[:57] + "..."
+		}
+		subtitle = fmt.Sprintf("%s | %s", phase, desc)
+	}
+
+	var fields []KVField
+
+	// Overall action (BLOCK / WARN / OK).
+	if action, _ := body["action"].(string); action != "" && action != "none" {
+		actionStr := strings.ToUpper(action)
+		fields = append(fields, KVField{Key: "Action", Value: actionStr, Important: true})
+	}
+
+	// Security violations.
+	if secFindings, ok := body["security_findings"].([]interface{}); ok {
+		for _, f := range secFindings {
+			finding, ok := f.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			sev, _ := finding["severity"].(string)
+			msg, _ := finding["message"].(string)
+			ruleID, _ := finding["pattern_id"].(string)
+			if msg == "" {
+				continue
+			}
+			if detailLevel == "signal" && strings.ToUpper(sev) != "CRITICAL" {
+				continue // signal mode: only CRITICAL
+			}
+			label := fmt.Sprintf("[%s]", strings.ToUpper(sev))
+			if ruleID != "" {
+				label = fmt.Sprintf("[%s] %s", strings.ToUpper(sev), ruleID)
+			}
+			important := strings.ToUpper(sev) == "CRITICAL"
+			fields = append(fields, KVField{Key: label, Value: msg, Important: important})
+		}
+	}
+
+	// Architectural violations.
+	if violations, ok := body["violations"].([]interface{}); ok {
+		for _, v := range violations {
+			viol, ok := v.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			sev, _ := viol["severity"].(string)
+			desc, _ := viol["description"].(string)
+			ruleID, _ := viol["rule_id"].(string)
+			if desc == "" {
+				continue
+			}
+			if detailLevel == "signal" && strings.ToUpper(sev) != "CRITICAL" {
+				continue
+			}
+			label := fmt.Sprintf("[%s]", strings.ToUpper(sev))
+			if ruleID != "" {
+				label = fmt.Sprintf("[%s] %s", strings.ToUpper(sev), ruleID)
+			}
+			important := strings.ToUpper(sev) == "CRITICAL" || strings.ToUpper(sev) == "ERROR"
+			fields = append(fields, KVField{Key: label, Value: desc, Important: important})
+		}
+	}
+
+	// Full detail: include norms and suggestions.
+	if detailLevel == "full" {
+		if norms, ok := body["norm_violations"].([]interface{}); ok {
+			for _, n := range norms {
+				norm, ok := n.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				msg, _ := norm["message"].(string)
+				if msg != "" {
+					fields = append(fields, KVField{Key: "[MEDIUM] norm", Value: msg})
+				}
+			}
+		}
+	}
+
+	// Summary / status fallback for clean responses.
+	if len(fields) == 0 {
+		status, _ := body["status"].(string)
+		if status == "" {
+			status = "ok"
+		}
+		fields = append(fields, KVField{Key: "Status", Value: status, Important: true})
+	}
+
+	text := FormatKV("VALIDATE", subtitle, fields, tokenBudget)
+	return mcp.NewToolResultText(text)
+}
+
 // ── Tool Catalog for discover_tools ─────────────────────────────────────────
 
 // toolCatalogEntry describes a single Synapses tool for discovery purposes.

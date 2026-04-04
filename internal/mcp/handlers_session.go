@@ -110,6 +110,19 @@ func (s *Server) handleSessionInit(
 	provider, _ := req.GetArguments()["provider"].(string)
 	intent, _ := req.GetArguments()["intent"].(string)
 	agentVersion, _ := req.GetArguments()["agent_version"].(string)
+	// Sprint 30.1: format, detail_level, token_budget — KV format and token budget support.
+	siFormat, _ := req.GetArguments()["format"].(string)
+	if siFormat == "" {
+		siFormat = "json"
+	}
+	siDetailLevel, _ := req.GetArguments()["detail_level"].(string)
+	if siDetailLevel == "" {
+		siDetailLevel = "summary"
+	}
+	siTokenBudget := 500
+	if tb, ok := req.GetArguments()["token_budget"].(float64); ok && tb > 0 {
+		siTokenBudget = int(tb)
+	}
 	// scope controls response verbosity:
 	//   "standard" (default) — tasks + working_state + scale_guidance (~500 tokens); lists deferred sections in more_available
 	//   "full"               — all sections, backward compatible
@@ -2316,7 +2329,181 @@ func (s *Server) handleSessionInit(
 		resp["warnings"] = append(existing, "file_watcher_stopped: file watching is no longer active — context may be stale. Restart the daemon to restore live updates.")
 	}
 
+	// Sprint 30.1: KV format rendering — compact labeled key-value output.
+	// Default is "json" for backward compatibility; agents opt in with format="kv".
+	if siFormat == "kv" {
+		kvText := renderSessionInitKV(resp, synapseSessionID, siDetailLevel, siTokenBudget, &s.sessionDelivered)
+		return mcp.NewToolResultText(kvText), nil
+	}
+
 	return jsonResult(resp)
+}
+
+// renderSessionInitKV renders the session_init response as labeled key-value text.
+// It uses the already-built resp map to avoid duplicating business logic.
+// Session-level dedup (via delivered) skips conventions/warnings already sent
+// in this session so agents don't receive identical guidance on every call.
+//
+// detailLevel controls depth:
+//   - "signal"  (~30t): critical warnings + task count only
+//   - "summary" (~150t): tasks + conventions + key warnings (DEFAULT)
+//   - "full"    (~500t): all response sections
+func renderSessionInitKV(resp map[string]interface{}, sessionID, detailLevel string, tokenBudget int, delivered *sessionDeliveredTracker) string {
+	var fields []KVField
+
+	// --- Header info ---
+	branch := ""
+	if ws, ok := resp["working_state"].(map[string]interface{}); ok {
+		if b, ok := ws["current_branch"].(string); ok {
+			branch = b
+		}
+	}
+	if branch == "" {
+		branch = "unknown"
+	}
+
+	// Pending task count + violation count → Status field
+	taskCount := 0
+	if pt, ok := resp["pending_tasks"].(map[string]interface{}); ok {
+		if c, ok := pt["count"].(int); ok {
+			taskCount = c
+		}
+	}
+	violationCount := 0
+	if ws, ok := resp["working_state"].(map[string]interface{}); ok {
+		if v, ok := ws["active_violations"].(int); ok {
+			violationCount = v
+		}
+	}
+	statusVal := fmt.Sprintf("%d pending task(s) | %d active violation(s)", taskCount, violationCount)
+	fields = append(fields, KVField{Key: "Status", Value: statusVal, Important: true})
+
+	// --- Warnings (always delivered, deduplicated) ---
+	if warnings, ok := resp["warnings"].([]string); ok {
+		for _, w := range warnings {
+			hash := kvContentHash(w)
+			if delivered.wasDelivered(sessionID, hash) {
+				continue // already sent this session
+			}
+			delivered.markDelivered(sessionID, hash)
+			fields = append(fields, KVField{Key: "Warning", Value: w, Important: true})
+		}
+	}
+	if scopeWarn, ok := resp["scope_warning"].(string); ok && scopeWarn != "" {
+		fields = append(fields, KVField{Key: "Warning", Value: scopeWarn, Important: true})
+	}
+
+	// --- Tasks (signal + summary levels) ---
+	// Use JSON round-trip because pendingSection["tasks"] is a local type (taskWithState)
+	// not accessible from this package-level function.
+	if detailLevel != "signal" {
+		if pt, ok := resp["pending_tasks"].(map[string]interface{}); ok {
+			if taskRaw, ok := pt["tasks"]; ok {
+				// Marshal and re-unmarshal to []map[string]interface{} using JSON tags.
+				if taskBytes, err := json.Marshal(taskRaw); err == nil {
+					var taskMaps []map[string]interface{}
+					if json.Unmarshal(taskBytes, &taskMaps) == nil {
+						for _, task := range taskMaps {
+							title, _ := task["title"].(string)
+							status, _ := task["status"].(string)
+							if title != "" {
+								fields = append(fields, KVField{Key: "Task", Value: fmt.Sprintf("%s [%s]", title, status)})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// --- Conventions (summary + full, deduplicated) ---
+	if detailLevel != "signal" {
+		if ap, ok := resp["active_prompts"].(map[string]interface{}); ok {
+			if convs, ok := ap["conventions"].([]interface{}); ok {
+				for _, c := range convs {
+					var text string
+					switch v := c.(type) {
+					case string:
+						text = v
+					case map[string]interface{}:
+						t, _ := v["text"].(string)
+						text = t
+					}
+					if text == "" {
+						continue
+					}
+					hash := kvContentHash(text)
+					if delivered.wasDelivered(sessionID, hash) {
+						continue
+					}
+					delivered.markDelivered(sessionID, hash)
+					// Truncate individual convention to 150 chars
+					if len(text) > 150 {
+						text = text[:147] + "..."
+					}
+					fields = append(fields, KVField{Key: "Convention", Value: text})
+				}
+			}
+		}
+	}
+
+	// --- Failure warnings / recent failures (deduplicated) ---
+	// resp["recent_failure"] = map{"decision", "rationale", "outcome", "created_at"}
+	if detailLevel != "signal" {
+		if rf, ok := resp["recent_failure"].(map[string]interface{}); ok {
+			decision, _ := rf["decision"].(string)
+			if decision != "" {
+				msg := decision
+				if rationale, _ := rf["rationale"].(string); rationale != "" {
+					msg = fmt.Sprintf("%s — %s", decision, rationale)
+				}
+				hash := kvContentHash(msg)
+				if !delivered.wasDelivered(sessionID, hash) {
+					delivered.markDelivered(sessionID, hash)
+					fields = append(fields, KVField{Key: "Failure-history", Value: msg})
+				}
+			}
+		}
+	}
+
+	// --- Relevant memories (full level only) ---
+	if detailLevel == "full" {
+		if rm, ok := resp["relevant_memories"].(map[string]interface{}); ok {
+			if memories, ok := rm["memories"].([]interface{}); ok {
+				for i, m := range memories {
+					if i >= 3 {
+						break // cap at 3 to stay within budget
+					}
+					mem, ok := m.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					content, _ := mem["content"].(string)
+					if content == "" {
+						continue
+					}
+					hash := kvContentHash(content)
+					if delivered.wasDelivered(sessionID, hash) {
+						continue
+					}
+					delivered.markDelivered(sessionID, hash)
+					if len(content) > 200 {
+						content = content[:197] + "..."
+					}
+					fields = append(fields, KVField{Key: "Memory", Value: content})
+				}
+			}
+		}
+	}
+
+	// --- Summary line (signal mode: append _summary as supplemental info) ---
+	// Signal mode keeps Status + Warnings (Important=true, already in fields)
+	// and adds the _summary line. It does NOT replace existing important fields.
+	if sum, ok := resp["_summary"].(string); ok && sum != "" && detailLevel == "signal" {
+		fields = append(fields, KVField{Key: "Summary", Value: sum})
+	}
+
+	return FormatKV("SESSION", branch, fields, tokenBudget)
 }
 
 // inferOrphanEvidence classifies an orphaned task's likely completion status

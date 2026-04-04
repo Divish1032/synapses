@@ -253,6 +253,11 @@ type Server struct {
 	// quality correlation. Key: Synapses session ID (string), Value: *recallFootprintRing.
 	recallFootprints sync.Map
 
+	// sessionDelivered tracks intelligence already sent to an agent in the current
+	// session, preventing re-delivery of identical conventions, warnings, and memories.
+	// Cleared at end_session. See session_delivered.go for design notes.
+	sessionDelivered sessionDeliveredTracker
+
 	// formatterConvsMu protects formatterConvsPtr, which caches the result of
 	// detectFormatterConventions so the filesystem stats run only once per
 	// server lifetime (not on every session_init call).
@@ -1755,6 +1760,16 @@ func (s *Server) registerTools() {
 			mcp.WithNumber("peer_window_hours",
 				mcp.Description("Optional. How many hours back to look for peer agent activity (handoffs and active hypotheses) in the peer_activity briefing section. Default: 24. Set higher (e.g. 72) to surface work from agents active in the last few days; set lower (e.g. 4) to see only very recent activity."),
 			),
+			mcp.WithString("format",
+				mcp.Description("Response format: 'json' (default, structured), 'kv' (labeled key-value, ~5x smaller). "+
+					"Use 'kv' to reduce token overhead. See synapses://tool-params/session_init for full docs."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity: 'signal' (~30t, warnings only), 'summary' (~150t, default), 'full' (~500t, all sections)."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response tokens. Default 500 for session_init. 0 = no limit."),
+			),
 		),
 		s.handleSessionInit,
 	)
@@ -1981,6 +1996,19 @@ func (s *Server) registerTools() {
 				mcp.Description("File patterns for ADR. phase=upsert_adr."),
 				mcp.Items(map[string]any{"type": "string"}),
 			),
+			mcp.WithString("format",
+				mcp.Description("Response format: 'json' (default), 'kv' (labeled key-value, ~5x smaller). "+
+					"'kv' renders one line per finding: '[CRITICAL] missing-auth: endpoint lacks middleware'."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity: 'signal' (CRITICAL only), 'summary' (all findings, default), 'full' (findings + rule context + evidence)."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response tokens. Default 300. 0 = no limit."),
+			),
+			mcp.WithBoolean("override",
+				mcp.Description("Pass override=true to proceed past CRITICAL findings. Overrides are logged as episodes."),
+			),
 		),
 		s.handleValidateDispatch,
 	)
@@ -2068,6 +2096,13 @@ func (s *Server) registerTools() {
 					"risk_flags (entities with negative quality scores from historical signals), and failure_history "+
 					"(recent failure episodes related to this entity). One call replaces 10+ separate tool calls. "+
 					"Default: standard impact analysis."),
+			),
+			mcp.WithString("format",
+				mcp.Description("Response format: 'json' (default), 'kv' (labeled key-value). "+
+					"'kv' example: 'Blast-radius: 12 callers across 4 packages | Risk: HIGH'."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity: 'signal' (count only), 'summary' (top callers, default), 'full' (all dependents)."),
 			),
 		),
 		s.handleGetImpact,
@@ -2168,6 +2203,15 @@ func (s *Server) registerTools() {
 			mcp.WithBoolean("done",
 				mcp.Description("Mark spec item done (true) or pending (false). action=update_spec_item."),
 			),
+			mcp.WithString("format",
+				mcp.Description("Response format: 'json' (default), 'kv' (labeled key-value, compact task list)."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity: 'signal' (counts only), 'summary' (task titles + status, default), 'full' (spec items + notes)."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response tokens. Default 300. 0 = no limit."),
+			),
 		),
 		s.handleTasksDispatch,
 	)
@@ -2213,6 +2257,12 @@ func (s *Server) registerTools() {
 			),
 			mcp.WithNumber("cost_usd",
 				mcp.Description("Optional. Total USD cost for this session if known."),
+			),
+			mcp.WithString("format",
+				mcp.Description("Response format: 'json' (default), 'kv' (compact effectiveness report)."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity: 'signal' (summary line only), 'summary' (metrics, default), 'full' (all extraction details)."),
 			),
 		),
 		s.handleEndSession,
@@ -2415,6 +2465,15 @@ func (s *Server) registerTools() {
 			),
 			// action=abandon context uses the existing 'context' param.
 			// action=list_rejected uses the existing 'query' and 'limit' params.
+			mcp.WithString("format",
+				mcp.Description("Response format: 'json' (default), 'kv' (compact labeled list of memories/decisions)."),
+			),
+			mcp.WithString("detail_level",
+				mcp.Description("Verbosity: 'signal' (count only), 'summary' (titles + outcomes, default), 'full' (full content)."),
+			),
+			mcp.WithNumber("token_budget",
+				mcp.Description("Max response tokens. Default 300. 0 = no limit."),
+			),
 		),
 		s.handleMemoryDispatch,
 	)

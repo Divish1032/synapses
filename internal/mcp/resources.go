@@ -146,6 +146,23 @@ func (s *Server) registerResources() {
 		),
 		s.handleQueryResource,
 	)
+
+	// synapses://tool-params/{tool} — detailed parameter docs for each tool.
+	// Moved out of tool descriptions (Sprint 30.1) to keep tool descriptions ≤150 tokens.
+	// Agents call this when they need full parameter details for a specific tool.
+	s.mcp.AddResourceTemplate(
+		mcp.NewResourceTemplate(
+			"synapses://tool-params/{tool}",
+			"Tool Parameter Reference",
+			mcp.WithTemplateDescription(
+				"Full parameter documentation for a Synapses tool. "+
+					"Use when you need parameter details beyond the brief tool description. "+
+					"Supported tools: session_init, get_context, validate, search, get_impact, memory, tasks, end_session.",
+			),
+			mcp.WithTemplateMIMEType("text/plain"),
+		),
+		s.handleToolParamsResource,
+	)
 }
 
 // notifyResourceChanged sends a notifications/resources/updated delta to all
@@ -573,6 +590,227 @@ func (s *Server) handleAnalyticsResource(ctx context.Context, _ mcp.ReadResource
 
 func (s *Server) handleDecisionLogResource(_ context.Context, _ mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 	return toolResultToResource("synapses://decision-log", s.handleGetDecisionLog, map[string]any{})
+}
+
+// handleToolParamsResource returns full parameter documentation for a named tool.
+// URI: synapses://tool-params/{tool}
+func (s *Server) handleToolParamsResource(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	uri := req.Params.URI
+	toolName := ""
+	if idx := strings.Index(uri, "synapses://tool-params/"); idx >= 0 {
+		toolName = uri[len("synapses://tool-params/"):]
+	}
+
+	docs := toolParamDocs(toolName)
+	if docs == "" {
+		docs = fmt.Sprintf("Unknown tool: %q. Supported: session_init, get_context, validate, search, get_impact, memory, tasks, end_session.", toolName)
+	}
+	return []mcp.ResourceContents{
+		mcp.TextResourceContents{
+			URI:      uri,
+			MIMEType: "text/plain",
+			Text:     docs,
+		},
+	}, nil
+}
+
+// toolParamDocs returns the full parameter reference for a named tool.
+// Content moved from tool descriptions to keep descriptions ≤150 tokens (Sprint 30.1).
+func toolParamDocs(tool string) string {
+	switch tool {
+	case "session_init":
+		return `# session_init — Full Parameter Reference
+
+Parameters:
+  agent_id (string)  — Self-declared identifier. Enables incremental delivery: subsequent
+                       calls skip unchanged sections. Always provide for token savings.
+  intent   (string)  — Short declaration of current work (visible to peer agents).
+                       Pass "" to clear. E.g. "implementing auth middleware".
+  scope    (string)  — Controls response verbosity:
+                       "standard" (default): tasks + working_state + scale_guidance (~500t)
+                       "full": all sections including project_identity, memories, health stats
+                       "quick": alias for standard (legacy)
+                       "resume": task continuity after reconnect
+                       "compaction": recovery briefing after context compaction
+  format   (string)  — "json" (default, structured) | "kv" (labeled key-value, ~5x smaller)
+  detail_level (str) — "signal" (~30t, warnings only) | "summary" (~150t, default) | "full" (~500t)
+  token_budget (num) — Max response tokens. Default 500. 0 = no limit.
+  model    (string)  — Model name for analytics (e.g. "claude-sonnet-4-6").
+  provider (string)  — Model provider: "anthropic", "openai", etc.
+  peer_window_hours (num) — Hours back to look for peer activity. Default 24.
+
+KV format example (format=kv, detail_level=summary):
+  # SESSION (dev/0.9.5 | 2026-04-04)
+  Status: 2 pending tasks | 0 violations
+  Task: implement-auth — Implement OAuth2 middleware [in_progress]
+  Convention: table-driven tests (7 sessions)
+  Warning: jwt-go v3 incompatible — failed 3x; use github.com/golang-jwt/jwt`
+
+	case "get_context":
+		return `# get_context — Full Parameter Reference
+
+Parameters:
+  entity       (str) — Entity name for mode=context. Required unless mode=path/investigate.
+  mode         (str) — "context" (default): BFS graph traversal
+                       "intent": one-call assembly for a declared goal
+                       "path": shortest call chain between two entities
+                       "investigate": rank suspicious locations by relevance to a problem
+  intent       (str) — For mode=intent: "understand"|"modify"|"add"|"debug"|"review"|"plan"
+  depth        (num) — BFS hop limit (mode=context). Defaults to project config.
+  token_budget (num) — Max tokens. Default 4000 (context) or intent-specific.
+  file         (str) — File path suffix to disambiguate (e.g. "internal/auth/service.go").
+  format       (str) — "compact" (default) | "json" | "kv" (alias for compact)
+  detail_level (str) — "summary" (~50t) | "neighbors" (~200t, default) | "full" (~600t)
+  task_id      (str) — Relevance-boost by linked task.
+  agent_id     (str) — For peer tracking.
+  projects     (str) — Comma-separated federation aliases.
+  from, to     (str) — Source and target entity for mode=path.
+  problem      (str) — Problem description for mode=investigate.`
+
+	case "validate":
+		return `# validate — Full Parameter Reference
+
+Phases:
+  pre (default) — Check proposed changes against architectural rules before writing.
+                  Params: changes (JSON array), check_safety (bool), plan_description (str)
+  pre_write     — Describe what you are ABOUT TO WRITE; checked against security patterns.
+                  Params: description (str, required), files (JSON array)
+  post          — Audit written files for new violations.
+                  Params: files_written (JSON array, required), task_id (str)
+  list          — List active violations.
+                  Params: rule_id (str filter), include_log (bool), log_limit (num)
+  full          — Compound gate: scope + safety + rules.
+                  Params: target (str), file (str), changes (JSON), plan_description (str)
+  safety        — Check failure history for similar past mistakes.
+                  Params: plan_description (str), agent_id (str), project_id (str)
+  upsert_rule   — Add/update architectural rule.
+                  Params: description, severity, edge_type, from_file_pattern, to_file_pattern,
+                          to_name_pattern, path_pattern, context_source
+  delete_rule   — Remove rule. Params: rule_id (str, required)
+  candidates    — Show rule candidates from observed violations.
+  upsert_adr    — Add/update Architecture Decision Record.
+                  Params: id, title, decision, adr_status, context, consequences, linked_files
+  list_adrs     — List ADRs. Params: query (str filter)
+
+Common params:
+  format        (str) — "json" (default) | "kv" (one line per finding)
+  detail_level  (str) — "signal" (CRITICAL only) | "summary" (all findings, default) | "full"
+  token_budget  (num) — Max response tokens. Default 300.
+  override      (bool) — Pass true to proceed past CRITICAL findings. Logged as episode.
+  agent_id      (str) — Attribution.
+
+KV format example (format=kv):
+  # VALIDATE | post | handlers/users.go
+  [CRITICAL] missing-auth: POST /api/users lacks auth middleware (8/8 routes have it)
+  [MEDIUM] coupling-increase: handlers → store direct call (skip service layer)
+  Action: BLOCK — fix CRITICAL before proceeding | override=true to bypass`
+
+	case "search":
+		return `# search — Full Parameter Reference
+
+Parameters:
+  query        (str) — Search term. Required.
+  mode         (str) — "keyword" (default): substring match across entity names
+                       "fulltext": BM25 ranked full-text search
+                       "semantic": vector search (describe concept, not exact name)
+                       "exact": precise name-to-node-ID lookup (fastest)
+  limit        (num) — Max results. Default 8.
+  format       (str) — "json" (default) | "kv" (compact result list)
+  detail_level (str) — "signal" (names only) | "summary" (names + file:line, default) | "full"
+  token_budget (num) — Max response tokens. Default 300.
+  agent_id     (str) — Logged for analytics.
+  projects     (str) — Comma-separated federation aliases for cross-project search.
+
+KV format example (format=kv):
+  # SEARCH: "handleLogin" | 3 results
+  handleLogin (auth/handlers.go:145) — callers:4, callees:3
+  loginHandler (api/router.go:89) — alias
+  handleLoginAttempt (auth/attempts.go:67) — related`
+
+	case "get_impact":
+		return `# get_impact — Full Parameter Reference
+
+Parameters:
+  symbol       (str) — Entity name to analyse. Required unless files= provided.
+  files        (str) — Comma-separated file paths for PR-level blast radius.
+  depth        (num) — Max hop depth. Default 3, max 10.
+  token_budget (num) — Max response tokens. Default 2000. Peripheral nodes dropped first.
+  scope        (str) — "review": adds blast_radius summary, test_gaps, risk_flags, failure_history
+  projects     (str) — Federation aliases for cross-project callers.
+  format       (str) — "json" (default) | "kv" (compact blast-radius summary)
+  detail_level (str) — "signal" (count only) | "summary" (top callers, default) | "full"`
+
+	case "memory":
+		return `# memory — Full Parameter Reference
+
+Actions and their params:
+  save          — Record episode. Params: agent_id (req), decision (req), episode_type,
+                  outcome, rationale, trigger, affected_files, affected_nodes, tags,
+                  anchor_nodes, memory_importance, project_id
+  search        — Keyword/semantic recall. Params: query, outcome_filter, limit, include_stale,
+                  projects, as_of, since, until, depth
+  list          — Chronological browse. Params: limit, since_days, tags
+  annotate      — Attach note to graph entity. Params: node_id (req), note (req)
+  annotate_web  — Attach note + web hits to entity. Params: node_id (req), note, hits
+  add_gap       — Track quality gap. Params: node_id (req), gap_id (req), gap_description (req),
+                  gap_severity, gap_status, fix_notes
+  list_gaps     — List quality gaps. Params: gap_severity, gap_status, file
+  history       — Entity change timeline. Params: entity (req), file
+  hypothesize   — Record working theory. Params: content (new) or hypothesis_id + state (update)
+  list_hypotheses — Retrieve by state. Params: state_filter
+  decide        — Record structured decision. Params: choice (req), alternatives, reasoning, context
+  list_decisions — Search decisions. Params: query, limit
+  abandon       — Record rejected approach. Params: approach (req), failure_reason (req),
+                  blocker, context, agent_id
+  list_rejected — Search rejected approaches. Params: query, limit
+
+Common params:
+  format        (str) — "json" (default) | "kv" (compact labeled list)
+  detail_level  (str) — "signal" (count) | "summary" (titles + outcomes, default) | "full"
+  token_budget  (num) — Max response tokens. Default 300.`
+
+	case "tasks":
+		return `# tasks — Full Parameter Reference
+
+Actions and their params:
+  create_plan  — Create tracking plan. Params: title (req), description, tasks (JSON array),
+                 agent_id. Task objects: {title, description, spec_items:[{id,description}]}
+  list_plans   — All plans overview. No extra params.
+  pending      — Pending/in-progress tasks. Params: plan_id, agent_id, suggest_next
+  update       — Mark task done. Params: id (req), status (req), notes, intent, agent_id
+  update_spec_item — Mark spec item done. Params: task_id (req), item_id (req), done (bool)
+  save_state   — Checkpoint session state. Params: task_id (req), approach, files_modified,
+                 completed_steps, remaining_steps, blockers, decisions, context_snapshot, agent_id
+  get_state    — Restore session state. Params: task_id (req)
+  link_nodes   — Connect task to graph entities. Params: task_id (req), node_ids (JSON array)
+
+Common params:
+  format        (str) — "json" (default) | "kv" (compact task list)
+  detail_level  (str) — "signal" (counts only) | "summary" (titles + status, default) | "full"
+  token_budget  (num) — Max response tokens. Default 300.`
+
+	case "end_session":
+		return `# end_session — Full Parameter Reference
+
+Parameters:
+  agent_id     (str) — Required. Self-declared identifier.
+  summary      (str) — High-level summary of work. Saved as project-tier memory.
+  task_id      (str) — Link session memories to a task.
+  model        (str) — Model name for usage reporting (e.g. "claude-sonnet-4-6").
+  provider     (str) — Model provider: "anthropic", "openai", etc.
+  input_tokens (num) — Total input tokens consumed.
+  output_tokens (num) — Total output tokens generated.
+  cost_usd     (num) — Total USD cost if known.
+  format       (str) — "json" (default) | "kv" (compact effectiveness report)
+  detail_level (str) — "signal" (summary line only) | "summary" (metrics, default) | "full"
+
+Returns:
+  effectiveness_report: context_hit_rate, first_fetch_right, tokens_saved, 7-day trend.
+  memory_extracted: count of conventions/failures auto-extracted from session.`
+
+	default:
+		return ""
+	}
 }
 
 func (s *Server) handleQueryResource(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
