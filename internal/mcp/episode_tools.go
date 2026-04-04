@@ -492,11 +492,14 @@ func (s *Server) handleRecall(
 		asOfTime = &parsed
 	}
 
-	// Read depth for graph channel multi-hop traversal (Sprint 10 #8).
-	// 0 = default (2 hops). Negative values clamp to 1 inside quadRecallSearch.
+	// depth controls recall channel mode.
+	// 0 (default, or unset) = shallow mode: BM25 + Semantic only (<100ms).
+	// >0 or "deep" = deep mode: BM25 + Semantic + Graph[BFS at depth N] + Temporal.
 	depth := 0
 	if v, ok := req.GetArguments()["depth"].(float64); ok && v > 0 {
 		depth = int(v)
+	} else if s, ok := req.GetArguments()["depth"].(string); ok && s == "deep" {
+		depth = 2 // "deep" string alias → BFS depth 2
 	}
 
 	// Sprint 25.3: explicit intent parameter for intent-aware memory retrieval.

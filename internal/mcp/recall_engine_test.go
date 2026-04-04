@@ -65,7 +65,8 @@ func TestQuadRecallSearch_TemporalChannel(t *testing.T) {
 	}
 
 	// Query for "auth" — BM25 won't find "Docker" memory, but temporal should.
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", "", 10, false, 7, nil, 0)
+	// depth=2 enables deep mode so the temporal channel is active.
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth changes", "", 10, false, 7, nil, 2)
 
 	// Temporal channel returns recent memories regardless of text match.
 	foundDocker := false
@@ -102,8 +103,8 @@ func TestQuadRecallSearch_TemporalDoesNotOverwhelmRelevant(t *testing.T) {
 		})
 	}
 
-	// Query for "auth" with limit=5.
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", "", 5, false, 7, nil, 0)
+	// Query for "auth" with limit=5. depth=2 enables deep mode (temporal active).
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth OAuth middleware", "", 5, false, 7, nil, 2)
 
 	// The 2 auth-relevant memories should rank in the top 3 (multi-channel boost).
 	authCount := 0
@@ -166,7 +167,8 @@ func TestQuadRecallSearch_GraphChannel(t *testing.T) {
 		Source:  store.SourceManual,
 	}, []string{string(tokID)})
 
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 0)
+	// depth=2 enables deep mode so the graph channel is active.
+	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 2)
 
 	// Graph channel should find the TokenValidator memory via BFS from AuthLogin.
 	foundJWT := false
@@ -735,9 +737,12 @@ func TestBuildGraphPath_SeedIsAnchor_ReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestQuadRecallSearch_DepthZeroDefaultsToTwo(t *testing.T) {
-	// depth=0 should default to 2 (same behavior as before this feature).
-	// This tests backward compatibility — the graph channel still fires with default depth.
+func TestQuadRecallSearch_DepthZero_SkipsGraphChannel(t *testing.T) {
+	// Sprint 30.5: depth=0 is shallow mode — graph channel must NOT fire.
+	// The RS256 memory is anchored to TokenValidator (structurally reachable via
+	// AuthLogin → CALLS → TokenValidator), but BM25 won't find it since "RS256"
+	// doesn't appear in the query "auth login". depth=0 must skip the graph channel
+	// so the RS256 memory is absent from results.
 	srv := newTestServer(t)
 
 	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthLogin")
@@ -755,27 +760,34 @@ func TestQuadRecallSearch_DepthZeroDefaultsToTwo(t *testing.T) {
 		AgentID: "agent-1", Source: store.SourceManual,
 	}, []string{string(tokID)})
 
-	// depth=0 → defaults to 2; should find the TokenValidator memory via graph channel.
-	mems, attr, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 0)
+	// depth=0 → shallow mode: BM25+Semantic only, graph channel skipped.
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 0)
 
-	foundJWT := false
 	for _, m := range mems {
 		if strings.Contains(m.Content, "RS256") {
+			t.Error("depth=0 (shallow mode): RS256 memory should NOT appear — graph channel must be skipped")
+		}
+	}
+
+	// Verify depth=2 (deep mode) DOES find the RS256 memory via graph.
+	mems2, attr2, _, _ := srv.quadRecallSearch(context.Background(), "auth login", "", 10, false, 7, nil, 2)
+	foundJWT := false
+	for _, m := range mems2 {
+		if strings.Contains(m.Content, "RS256") {
 			foundJWT = true
-			channels := attr[m.ID]
 			hasGraph := false
-			for _, ch := range channels {
+			for _, ch := range attr2[m.ID] {
 				if ch == "graph" {
 					hasGraph = true
 				}
 			}
 			if !hasGraph {
-				t.Error("RS256 memory should be attributed to graph channel")
+				t.Error("RS256 memory should be attributed to graph channel in deep mode")
 			}
 		}
 	}
 	if !foundJWT {
-		t.Error("depth=0 (default 2): expected graph channel to find RS256 memory via TokenValidator")
+		t.Error("depth=2 (deep mode): expected graph channel to find RS256 memory via TokenValidator")
 	}
 }
 
@@ -919,6 +931,98 @@ func TestHandleRecall_DepthParam_WiredThrough(t *testing.T) {
 	// Mode must be search.
 	if resp["mode"] != "search" {
 		t.Errorf("expected mode=search, got %v", resp["mode"])
+	}
+}
+
+// TestHandleRecall_DepthDeepString verifies that passing depth="deep" as a string
+// enables deep mode (graph+temporal channels active), same as depth=2.
+func TestHandleRecall_DepthDeepString(t *testing.T) {
+	srv := newTestServer(t)
+
+	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthService")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1})
+	tokID := srv.graph.MakeNodeID("pkg/auth.go", "TokenSvc")
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenSvc", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "auth service initialises token pipeline",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(authID)})
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "token service validates RS256 expiry",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(tokID)})
+
+	ctx := context.Background()
+	res, err := srv.handleRecall(ctx, callTool(map[string]any{
+		"query": "auth service",
+		"depth": "deep", // string alias for deep mode
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			text = tc.Text
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// depth="deep" must activate graph channel → graph_traversal present.
+	if _, ok := resp["graph_traversal"]; !ok {
+		t.Error(`depth="deep": expected graph_traversal in response when graph is loaded`)
+	}
+}
+
+// TestHandleRecall_DefaultShallowMode verifies that without a depth parameter
+// the graph channel is NOT active (shallow mode — BM25+Semantic only).
+func TestHandleRecall_DefaultShallowMode_SkipsGraph(t *testing.T) {
+	srv := newTestServer(t)
+
+	authID := srv.graph.MakeNodeID("pkg/auth.go", "AuthService")
+	srv.graph.AddNode(&graph.Node{ID: authID, Name: "AuthService", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 1})
+	tokID := srv.graph.MakeNodeID("pkg/auth.go", "TokenSvc")
+	srv.graph.AddNode(&graph.Node{ID: tokID, Name: "TokenSvc", Type: graph.NodeFunction, File: "pkg/auth.go", Line: 50})
+	srv.graph.AddEdge(&graph.Edge{From: authID, To: tokID, Type: graph.EdgeCalls})
+
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "auth service initialises token pipeline",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(authID)})
+	_, _ = srv.store.InsertMemoryWithAnchors(store.Memory{
+		Tier: store.TierEntity, Content: "token service validates RS256 expiry",
+		AgentID: "a1", Source: store.SourceManual,
+	}, []string{string(tokID)})
+
+	ctx := context.Background()
+	// No depth param → shallow mode.
+	res, err := srv.handleRecall(ctx, callTool(map[string]any{
+		"query": "auth service",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var text string
+	for _, c := range res.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			text = tc.Text
+		}
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Shallow mode must NOT include graph_traversal even with a graph loaded.
+	if _, ok := resp["graph_traversal"]; ok {
+		t.Error("default (no depth param): graph_traversal must be absent in shallow mode")
 	}
 }
 

@@ -178,7 +178,8 @@ func TestQuadRecall_Scale_LargeProject_TemporalStillUseful(t *testing.T) {
 		insertMemory(t, srv, content)
 	}
 
-	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth JWT signing", "", 5, false, 7, nil, 0)
+	// depth=2 enables deep mode so the temporal channel fills remaining slots.
+	mems, _, _, _ := srv.quadRecallSearch(context.Background(), "auth JWT signing", "", 5, false, 7, nil, 2)
 
 	if len(mems) == 0 {
 		t.Fatal("expected results")

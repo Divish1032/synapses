@@ -565,7 +565,7 @@ func (s *Server) handleEndSession(
 				if m.Content == "" {
 					continue
 				}
-				if _, err := s.store.InsertMemory(store.Memory{
+				mid, err := s.store.InsertMemory(store.Memory{
 					Tier:          store.TierProject,
 					Content:       m.Content,
 					AgentID:       agentID,
@@ -573,9 +573,14 @@ func (s *Server) handleEndSession(
 					Source:        store.SourceAuto,
 					Tags:          `["archivist","deterministic","auto"]`,
 					SourceProject: s.projectID,
-				}); err == nil {
+				})
+				if err == nil {
 					memoriesSaved++
 					result.DeterministicMemoriesSaved++
+					// Sprint 30.5: wire embedding so next session can recall semantically.
+					if s.memoryEmbedder != nil {
+						s.QueueEmbedMemory(s.lifecycleCtx, s.memoryEmbedder, s.store, mid, m.Content)
+					}
 				}
 			}
 		}
@@ -617,6 +622,9 @@ func (s *Server) handleEndSession(
 			sessStore := s.store
 			sessAgentID2 := agentID
 			sessTaskID2 := taskID
+			// Sprint 30.5: capture embedder for the goroutine so LLM archivist
+			// memories also get embedded immediately after save.
+			archEmbedder := s.memoryEmbedder
 			s.goBackground(func() {
 				mctx, mcancel := context.WithTimeout(ctx, 30*time.Second)
 				defer mcancel()
@@ -628,7 +636,7 @@ func (s *Server) handleEndSession(
 					if m.Content == "" {
 						continue
 					}
-					_, _ = sessStore.InsertMemory(store.Memory{
+					if mid, serr := sessStore.InsertMemory(store.Memory{
 						Tier:          store.TierProject,
 						Content:       m.Content,
 						AgentID:       sessAgentID2,
@@ -636,7 +644,9 @@ func (s *Server) handleEndSession(
 						Source:        store.SourceAuto,
 						Tags:          `["archivist","session_synthesis","auto"]`,
 						SourceProject: s.projectID,
-					})
+					}); serr == nil && archEmbedder != nil {
+						s.QueueEmbedMemory(s.lifecycleCtx, archEmbedder, sessStore, mid, m.Content)
+					}
 				}
 			})
 		}

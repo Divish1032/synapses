@@ -134,19 +134,23 @@ func intentMemoryCategories(intent string) map[string]bool {
 	}
 }
 
-// quadRecallSearch runs 4 parallel retrieval channels and merges via RRF.
+// quadRecallSearch runs retrieval channels in two modes and merges via RRF.
 // Returns memories ranked by fused score, plus per-memory channel attribution,
 // stale embedding IDs, and optional graph traversal info.
 //
-// Channels:
+// Shallow mode (depth == 0): 2 channels — fast, <100ms target.
 //  1. BM25 — FTS5 full-text search on memory content (uses enrichedQuery)
 //  2. Semantic — cosine similarity on embeddings (uses enrichedQuery)
-//  3. Graph — BFS from anchor entities of query-matching memories (uses query — structure, not text)
+//
+// Deep mode (depth > 0): 4 channels — adds structural + recency signals.
+//  1. BM25 — same as shallow
+//  2. Semantic — same as shallow
+//  3. Graph — BFS from anchor entities of query-matching memories (uses query)
 //  4. Temporal — recent memories scored by recency decay (no text filter)
 //
-// enrichedQuery is used for BM25 and semantic channels; when empty it falls
-// back to query. The graph channel always uses query (structural lookup).
-// depth controls the graph channel's BFS hop count (0 = default 2, max 4).
+// depth=0 is the default (shallow / fast). Pass depth>=1 to enable the graph
+// and temporal channels (depth sets the BFS hop count, clamped to [1,4]).
+// enrichedQuery is used for BM25 and semantic; graph always uses raw query.
 // Each channel runs in its own goroutine with a 5s timeout.
 // Channel errors are logged but never fail the entire recall.
 // The response shape is unchanged — episodes are searched separately by the caller.
@@ -167,10 +171,11 @@ func (s *Server) quadRecallSearch(
 	if limit <= 0 {
 		limit = 5
 	}
-	// Clamp depth: 0 → default 2, negative → 1, >4 → 4.
-	if depth <= 0 {
-		depth = 2
-	} else if depth > 4 {
+	// deep mode: depth > 0 enables graph + temporal channels.
+	// depth == 0 → shallow mode (BM25 + Semantic only, fast).
+	// Clamp positive depth to [1, 4] for BFS safety.
+	deepMode := depth > 0
+	if deepMode && depth > 4 {
 		depth = 4
 	}
 
@@ -376,7 +381,9 @@ func (s *Server) quadRecallSearch(
 	}
 
 	// ── Channel 3: Graph ──────────────────────────────────────────────────
-	if s.graph != nil && s.store != nil {
+	// Only active in deep mode (depth > 0). Skipped by default to keep
+	// recall latency under 100ms for the common case.
+	if deepMode && s.graph != nil && s.store != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -493,53 +500,56 @@ func (s *Server) quadRecallSearch(
 	}
 
 	// ── Channel 4: Temporal ───────────────────────────────────────────────
-	// Temporal channel uses a lower limit than other channels. It returns
-	// unfiltered recent memories (no text match), so with channelLimit it
-	// would flood RRF with irrelevant noise. Capping at `limit` ensures
-	// temporal only fills gaps when other channels don't have enough results.
-	temporalLimit := limit
-	if temporalLimit < 5 {
-		temporalLimit = 5
+	// Only active in deep mode (depth > 0). Skipped by default.
+	// When active: uses a lower limit than other channels since it returns
+	// unfiltered recent memories (no text match) — channelLimit would flood
+	// RRF with irrelevant noise. Capping at `limit` ensures temporal only
+	// fills gaps when other channels don't have enough results.
+	if deepMode {
+		temporalLimit := limit
+		if temporalLimit < 5 {
+			temporalLimit = 5
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			select {
+			case <-chCtx.Done():
+				logRecallChannelError("temporal", chCtx.Err())
+				return
+			default:
+			}
+
+			mems, err := s.store.RecentMemoriesCtx(chCtx, temporalLimit, sinceDays, untilTime, includeStale)
+			if err != nil {
+				logRecallChannelError("temporal", err)
+				return
+			}
+
+			// Re-rank by recency decay score (most recent first is already the order,
+			// but we assign explicit rank positions for RRF).
+			// The order from RecentMemories is already created_at DESC, which is
+			// equivalent to recency-first ranking. No re-sort needed.
+			collectMemories("temporal", mems)
+			if useConvex && len(mems) > 0 {
+				// Use recency decay as raw temporal channel scores.
+				mu.Lock()
+				cs := &store.ChannelScores{
+					IDs:    make([]string, len(mems)),
+					Scores: make([]float64, len(mems)),
+				}
+				for i, m := range mems {
+					cs.IDs[i] = m.ID
+					cs.Scores[i] = store.DecayedImportanceScore(m, 0)
+				}
+				channelScores["temporal"] = cs
+				mu.Unlock()
+			}
+		}()
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-
-		select {
-		case <-chCtx.Done():
-			logRecallChannelError("temporal", chCtx.Err())
-			return
-		default:
-		}
-
-		mems, err := s.store.RecentMemoriesCtx(chCtx, temporalLimit, sinceDays, untilTime, includeStale)
-		if err != nil {
-			logRecallChannelError("temporal", err)
-			return
-		}
-
-		// Re-rank by recency decay score (most recent first is already the order,
-		// but we assign explicit rank positions for RRF).
-		// The order from RecentMemories is already created_at DESC, which is
-		// equivalent to recency-first ranking. No re-sort needed.
-		collectMemories("temporal", mems)
-		if useConvex && len(mems) > 0 {
-			// Use recency decay as raw temporal channel scores.
-			mu.Lock()
-			cs := &store.ChannelScores{
-				IDs:    make([]string, len(mems)),
-				Scores: make([]float64, len(mems)),
-			}
-			for i, m := range mems {
-				cs.IDs[i] = m.ID
-				cs.Scores[i] = store.DecayedImportanceScore(m, 0)
-			}
-			channelScores["temporal"] = cs
-			mu.Unlock()
-		}
-	}()
 
 	wg.Wait()
 
