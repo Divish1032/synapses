@@ -676,14 +676,20 @@ func (s *Server) handleUpdateTask(
 	if status == "done" {
 		taskID := id
 		aid := agentID
-		n := notes
+		n := notes // still needed for writeRetrospectiveAnnotations label
 		c := capturedCommits
 		s.goBackground(func() { s.writeRetrospectiveAnnotations(taskID, aid, n) })
-		// Sprint 29.7: auto-capture task completion learnings as project memories
-		// so future sessions can recall what approach worked, what patterns were
-		// used, and what the codebase impact was. Tier 1 auto-capture — no agent
-		// initiative required.
-		s.goBackground(func() { s.saveTaskCompletionLearning(taskID, aid, n, c) })
+		// Sprint 29.7: auto-capture task completion learnings as project memories.
+		// Uses task.Notes (full multi-session history) rather than the current call's
+		// note alone — richer recall for long-running tasks.
+		s.goBackground(func() { s.saveTaskCompletionLearning(taskID, aid, c) })
+	} else if status == "cancelled" {
+		// Persist a "what didn't work / why abandoned" memory so future agents
+		// don't repeat the same dead-end approach when the task is reopened.
+		taskID := id
+		aid := agentID
+		c := capturedCommits
+		s.goBackground(func() { s.saveCancellationLearning(taskID, aid, c) })
 	}
 
 	result := map[string]interface{}{
@@ -691,6 +697,27 @@ func (s *Server) handleUpdateTask(
 		"status":  status,
 		"message": fmt.Sprintf("Task updated to %q.", status),
 	}
+
+	// Sprint 29.7 (Concern 3): when an agent claims a task, surface any prior
+	// learning memories so they don't re-explore what a previous session already
+	// figured out. Push-model injection — no agent action required.
+	if status == "in_progress" && s.store != nil {
+		if mems, merr := s.store.GetMemoriesByTaskID(id); merr == nil && len(mems) > 0 {
+			content := mems[0].Content
+			if runes := []rune(content); len(runes) > 500 {
+				content = string(runes[:500]) + "…"
+			}
+			result["prior_learnings"] = content
+			if len(mems) > 1 {
+				result["prior_learnings_count"] = len(mems)
+				result["prior_learnings_hint"] = fmt.Sprintf(
+					"%d prior learning(s) recorded for this task — review before starting to avoid repeating past approaches.",
+					len(mems),
+				)
+			}
+		}
+	}
+
 	if len(unblocked) > 0 {
 		result["newly_unblocked"] = unblocked
 		result["message"] = fmt.Sprintf("Task updated to %q. %d task(s) are now unblocked: %v", status, len(unblocked), unblocked)
@@ -773,7 +800,10 @@ func (s *Server) writeRetrospectiveAnnotations(taskID, agentID, completionNotes 
 // Sprint 29.7 — Tier 1 auto-capture. Runs in a background goroutine after
 // handleUpdateTask returns so it never delays the response. All errors are
 // silently discarded (fail-silent contract matching writeRetrospectiveAnnotations).
-func (s *Server) saveTaskCompletionLearning(taskID, agentID, notes string, commits []string) {
+//
+// Uses task.Notes (full multi-session history) rather than the current call's
+// note alone — richer for tasks that span multiple work sessions.
+func (s *Server) saveTaskCompletionLearning(taskID, agentID string, commits []string) {
 	if s.store == nil {
 		return
 	}
@@ -782,7 +812,7 @@ func (s *Server) saveTaskCompletionLearning(taskID, agentID, notes string, commi
 		return
 	}
 
-	content := buildTaskLearningContent(task, notes, commits)
+	content := buildTaskLearningContent(task, commits)
 	if content == "" {
 		return
 	}
@@ -797,20 +827,56 @@ func (s *Server) saveTaskCompletionLearning(taskID, agentID, notes string, commi
 	})
 }
 
+// saveCancellationLearning captures "what didn't work / why abandoned" when a
+// task is cancelled. Persists a TierProject memory so future agents don't
+// repeat the same dead-end approach when the task is reopened or a similar
+// task is created.
+//
+// Mirrors saveTaskCompletionLearning — fail-silent, background goroutine.
+func (s *Server) saveCancellationLearning(taskID, agentID string, commits []string) {
+	if s.store == nil {
+		return
+	}
+	task, err := s.store.GetTask(taskID)
+	if err != nil || task == nil {
+		return
+	}
+
+	content := buildCancellationContent(task, commits)
+	if content == "" {
+		return
+	}
+
+	_, _ = s.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: content,
+		AgentID: agentID,
+		TaskID:  taskID,
+		Source:  store.SourceAuto,
+		Tags:    `["task_cancellation","auto"]`,
+	})
+}
+
 // buildTaskLearningContent produces the natural-language memory content for a
 // completed task. Returns "" when the task has no title (nothing meaningful to
 // record). Extracted as a pure function to enable unit testing without a store.
+//
+// Structured fields (spec, files, commits, entities) appear before the free-text
+// session history so that prepareMemory's 2000-rune truncation cuts notes rather
+// than machine-parseable metadata. task.Notes (full multi-session history) is
+// used rather than only the current call's completion note — richer for tasks
+// that span multiple work sessions.
 //
 // Content format (each section omitted when empty):
 //
 //	Task completed: "title"
 //	Goal: description
-//	Approach / notes: agent notes
 //	Spec coverage: N/M items completed
 //	Files modified: file1, file2 (N file(s))
 //	Commits: sha1, sha2 (N commit(s))
 //	Entities involved: FuncA, TypeB
-func buildTaskLearningContent(task *store.Task, notes string, commits []string) string {
+//	Session history: [timestamp] notes from all sessions
+func buildTaskLearningContent(task *store.Task, commits []string) string {
 	if task == nil || task.Title == "" {
 		return ""
 	}
@@ -823,11 +889,6 @@ func buildTaskLearningContent(task *store.Task, notes string, commits []string) 
 	if task.Description != "" {
 		b.WriteString("\nGoal: ")
 		b.WriteString(task.Description)
-	}
-
-	if notes != "" {
-		b.WriteString("\nApproach / notes: ")
-		b.WriteString(notes)
 	}
 
 	// Spec item coverage — gives future sessions a sense of task scope.
@@ -877,6 +938,108 @@ func buildTaskLearningContent(task *store.Task, notes string, commits []string) 
 			b.WriteString("\nEntities involved: ")
 			b.WriteString(strings.Join(names, ", "))
 		}
+	}
+
+	// Session history — placed last so prepareMemory's 2000-rune truncation
+	// cuts old notes rather than the structured fields above.
+	// task.Notes is an append-only audit trail across all sessions:
+	//   "[2026-04-04T08:00:00Z] approach used\n[2026-04-04T09:00:00Z] done"
+	if task.Notes != "" {
+		b.WriteString("\nSession history: ")
+		b.WriteString(task.Notes)
+	}
+
+	return b.String()
+}
+
+// buildCancellationContent produces the natural-language memory content for a
+// cancelled task. Focuses on what was attempted and why the task was abandoned
+// so future agents don't repeat the same dead-end approach.
+//
+// Content format (each section omitted when empty):
+//
+//	Task abandoned: "title"
+//	Goal: description
+//	Incomplete spec: X/M items not done
+//	Files modified before cancellation: file1 (N file(s))
+//	Commits before cancellation: sha1 (N commit(s))
+//	Entities involved: FuncA, TypeB
+//	Session history: [timestamp] notes including cancellation reason
+func buildCancellationContent(task *store.Task, commits []string) string {
+	if task == nil || task.Title == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("Task abandoned: \"")
+	b.WriteString(task.Title)
+	b.WriteByte('"')
+
+	if task.Description != "" {
+		b.WriteString("\nGoal: ")
+		b.WriteString(task.Description)
+	}
+
+	// Highlight incomplete spec items — what was left undone.
+	if len(task.SpecItems) > 0 {
+		done, total := 0, len(task.SpecItems)
+		var incomplete []string
+		for _, si := range task.SpecItems {
+			if si.Done {
+				done++
+			} else if si.Label != "" && len(incomplete) < 5 {
+				incomplete = append(incomplete, si.Label)
+			}
+		}
+		notDone := total - done
+		if notDone > 0 {
+			if len(incomplete) > 0 {
+				b.WriteString(fmt.Sprintf("\nIncomplete spec: %d/%d items not done: %s",
+					notDone, total, strings.Join(incomplete, ", ")))
+			} else {
+				b.WriteString(fmt.Sprintf("\nIncomplete spec: %d/%d items not done", notDone, total))
+			}
+		} else {
+			// Rare: all spec items were done but task was still cancelled.
+			b.WriteString(fmt.Sprintf("\nSpec coverage: %d/%d items completed before cancellation", done, total))
+		}
+	}
+
+	if len(task.TrackedFiles) > 0 {
+		b.WriteString(fmt.Sprintf("\nFiles modified before cancellation: %s (%d file(s))",
+			strings.Join(task.TrackedFiles, ", "), len(task.TrackedFiles)))
+	}
+
+	if len(commits) > 0 {
+		shown := commits
+		if len(shown) > 10 {
+			shown = shown[:10]
+		}
+		b.WriteString(fmt.Sprintf("\nCommits before cancellation: %s (%d commit(s))",
+			strings.Join(shown, ", "), len(commits)))
+	}
+
+	if len(task.LinkedNodes) > 0 {
+		names := make([]string, 0, len(task.LinkedNodes))
+		for _, nid := range task.LinkedNodes {
+			parts := strings.SplitN(nid, "::", 3)
+			if len(parts) == 3 && parts[2] != "" {
+				names = append(names, parts[2])
+				if len(names) == 10 {
+					break
+				}
+			}
+		}
+		if len(names) > 0 {
+			b.WriteString("\nEntities involved: ")
+			b.WriteString(strings.Join(names, ", "))
+		}
+	}
+
+	// Session history last — may contain the cancellation reason.
+	if task.Notes != "" {
+		b.WriteString("\nSession history: ")
+		b.WriteString(task.Notes)
 	}
 
 	return b.String()

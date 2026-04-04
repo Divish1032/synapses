@@ -180,7 +180,7 @@ func (s *Server) handleTasksDispatch(
 ) (*mcp.CallToolResult, error) {
 	action, _ := req.GetArguments()["action"].(string)
 	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: create_plan, list_plans, pending, update, save_state, get_state, link_nodes, update_spec_item, set_tracked_files)"), nil
+		return mcp.NewToolResultError("action is required (valid: create_plan, list_plans, pending, get, update, save_state, get_state, link_nodes, update_spec_item, set_tracked_files)"), nil
 	}
 	switch action {
 	case "create_plan":
@@ -189,6 +189,9 @@ func (s *Server) handleTasksDispatch(
 		return s.handleGetPlans(ctx, req)
 	case "pending":
 		return s.handleGetPendingTasks(ctx, req)
+	// Sprint 29.7 (Concern 3): fetch a single task with prior learning memories.
+	case "get":
+		return s.handleGetTask(ctx, req)
 	case "update":
 		return s.handleUpdateTask(ctx, req)
 	case "save_state":
@@ -204,8 +207,56 @@ func (s *Server) handleTasksDispatch(
 	case "set_tracked_files":
 		return s.handleSetTrackedFiles(ctx, req)
 	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown tasks action: %q (valid: create_plan, list_plans, pending, update, save_state, get_state, link_nodes, update_spec_item, set_tracked_files)", action)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("unknown tasks action: %q (valid: create_plan, list_plans, pending, get, update, save_state, get_state, link_nodes, update_spec_item, set_tracked_files)", action)), nil
 	}
+}
+
+// handleGetTask returns a single task by ID including up to 2 prior learning
+// memories. Agents use this to review what a previous session accomplished or
+// attempted before starting new work. Introduced in Sprint 29.7 (Concern 3).
+//
+// Required: task_id
+func (s *Server) handleGetTask(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.store == nil {
+		return mcp.NewToolResultError("task memory unavailable: run 'synapses start' or 'synapses index' to create a persistent store"), nil
+	}
+	taskID := stringArg(req, "task_id")
+	if taskID == "" {
+		return mcp.NewToolResultError("task_id is required"), nil
+	}
+	task, err := s.store.GetTask(taskID)
+	if err != nil || task == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("task %q not found", taskID)), nil
+	}
+
+	result := map[string]interface{}{
+		"task": task,
+	}
+
+	// Attach prior learnings when they exist. Cap at 2 entries, each at 500 runes,
+	// so the response stays usable without overwhelming the context window.
+	if mems, merr := s.store.GetMemoriesByTaskID(taskID); merr == nil && len(mems) > 0 {
+		type learningEntry struct {
+			Content   string `json:"content"`
+			CreatedAt string `json:"created_at"`
+		}
+		limit := 2
+		if len(mems) < limit {
+			limit = len(mems)
+		}
+		entries := make([]learningEntry, limit)
+		for i := 0; i < limit; i++ {
+			content := mems[i].Content
+			if runes := []rune(content); len(runes) > 500 {
+				content = string(runes[:500]) + "…"
+			}
+			entries[i] = learningEntry{Content: content, CreatedAt: mems[i].CreatedAt}
+		}
+		result["prior_learnings"] = entries
+		result["prior_learnings_count"] = len(mems)
+	}
+
+	return jsonResult(result)
 }
 
 // Sprint 23.9: handleRulesDispatch removed — rules management merged into handleValidateDispatch.
