@@ -151,6 +151,74 @@ func worstActionRequired(secFindings []security.Violation, archViolations []conf
 	}
 }
 
+// extractBlockReason parses a validate tool result to check whether
+// action_required is "block". If so, it returns the first CRITICAL finding's
+// human-readable name (or a generic fallback) and true. Otherwise "", false.
+//
+// This is used by handleValidateDispatch (Sprint 30.3) to decide whether to
+// return an isError response instead of the normal JSON result.
+func extractBlockReason(result *mcp.CallToolResult) (string, bool) {
+	if len(result.Content) == 0 {
+		return "", false
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		return "", false
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(tc.Text), &m); err != nil {
+		return "", false
+	}
+	action, _ := m["action_required"].(string)
+	if action != "block" {
+		return "", false
+	}
+	// Find the first CRITICAL finding to use as the human-readable reason.
+	if findings, ok := m["security_findings"].([]interface{}); ok {
+		for _, f := range findings {
+			fm, ok := f.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if sev, _ := fm["severity"].(string); sev != "CRITICAL" {
+				continue
+			}
+			if name, _ := fm["pattern_name"].(string); name != "" {
+				return name, true
+			}
+			if pid, _ := fm["pattern_id"].(string); pid != "" {
+				return pid, true
+			}
+		}
+	}
+	return "CRITICAL security finding detected", true
+}
+
+// logCriticalOverride records an episode when an agent uses override=true to
+// bypass a CRITICAL security finding. The episode is fire-and-forget — an
+// episode store failure must never prevent the override from succeeding.
+func (s *Server) logCriticalOverride(ctx context.Context, req mcp.CallToolRequest, phase, reason string) {
+	if s.store == nil {
+		return
+	}
+	agentID, _ := req.GetArguments()["agent_id"].(string)
+	ep := store.Episode{
+		AgentID:     agentID,
+		ProjectID:   s.projectID,
+		EpisodeType: "security_override",
+		Outcome:     "override",
+		Trigger:     reason,
+		Decision:    fmt.Sprintf("override=true for validate(phase=%s): %s", phase, reason),
+		Tags:        `["security_override","critical","audit"]`,
+		Importance:  0.9,
+	}
+	s.goBackground(func() {
+		if _, err := s.store.RememberEpisode(ep); err != nil {
+			log.Printf("mcp: logCriticalOverride episode: %v", err)
+		}
+	})
+}
+
 // ProposedChange is a single entry in a validate_plan request.
 type ProposedChange struct {
 	File          string `json:"file"`

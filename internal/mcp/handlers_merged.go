@@ -114,6 +114,30 @@ func (s *Server) handleValidateDispatch(
 		s.injectValidateSuggestions(ctx, result, req)
 	}
 
+	// Sprint 30.3: CRITICAL enforcement — phases that run security scanning must
+	// block when action_required is "block" (i.e. ≥1 CRITICAL finding). The agent
+	// must pass override=true to proceed. Overrides are logged as episodes so there
+	// is an audit trail of every time a CRITICAL finding was bypassed.
+	//
+	// Only phases that produce security findings can block. Management and info
+	// phases (list, safety, upsert_rule, …) never block.
+	if err == nil && result != nil && !result.IsError {
+		blockingPhase := phase == "pre" || phase == "pre_write" || phase == "post" || phase == "full"
+		if blockingPhase {
+			if reason, isBlocked := extractBlockReason(result); isBlocked {
+				override, _ := req.GetArguments()["override"].(bool)
+				if !override {
+					return mcp.NewToolResultError(
+						fmt.Sprintf("BLOCKED: %s. Pass override=true to proceed.", reason),
+					), nil
+				}
+				// override=true: log an audit episode so the bypass is traceable, then let
+				// the normal result through. Episode failure must never block the override.
+				s.logCriticalOverride(ctx, req, phase, reason)
+			}
+		}
+	}
+
 	// Sprint 30.1: KV format — compact labeled output for validate responses.
 	if err == nil && result != nil && !result.IsError {
 		if format, _ := req.GetArguments()["format"].(string); format == "kv" {
