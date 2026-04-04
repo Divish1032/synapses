@@ -170,6 +170,9 @@ func (s *Store) SearchRejectedApproaches(agentID, projectID, query string, limit
 // Use since=0 to skip the lower bound. Used by the deterministic Archivist to
 // scope failures to the current session window.
 func (s *Store) GetRejectedApproachesInRange(agentID, projectID string, since, until int64, limit int) ([]RejectedApproach, error) {
+	if s.knowledgeDB == nil {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 20
 	}

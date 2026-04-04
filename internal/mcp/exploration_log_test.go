@@ -22,7 +22,7 @@ func makeTextResult(v any) *mcp.CallToolResult {
 // exploration set return nil — no capture produced.
 func TestExtractExplorationCapture_UnknownTool(t *testing.T) {
 	result := makeTextResult(map[string]any{"ok": true})
-	for _, tool := range []string{"session_init", "memory", "tasks", "end_session"} {
+	for _, tool := range []string{"session_init", "tasks", "end_session"} {
 		if c := extractExplorationCapture(tool, map[string]any{}, result); c != nil {
 			t.Errorf("expected nil for %q, got %+v", tool, c)
 		}
@@ -395,6 +395,73 @@ func TestExplorationLog_CompactionRecovery_IncludesExploredEntities(t *testing.T
 	}
 	if !foundFinding {
 		t.Errorf("expected at least one explored_entity with a finding, got %+v", explored)
+	}
+}
+
+// TestExtractExplorationCapture_MemorySave verifies that a memory(action=save)
+// call with a key and content produces a capture with the key as EntityQueried.
+func TestExtractExplorationCapture_MemorySave(t *testing.T) {
+	result := makeTextResult(map[string]any{"saved": true})
+	cap := extractExplorationCapture("memory", map[string]any{
+		"action":  "save",
+		"key":     "auth_pattern",
+		"content": "All handlers must validate the JWT before touching the DB",
+	}, result)
+	if cap == nil {
+		t.Fatal("expected non-nil capture for memory(action=save)")
+	}
+	if cap.EntityQueried != "auth_pattern" {
+		t.Errorf("EntityQueried: got %q, want %q", cap.EntityQueried, "auth_pattern")
+	}
+	if cap.QueryContext != "save" {
+		t.Errorf("QueryContext: got %q, want %q", cap.QueryContext, "save")
+	}
+	if !elogContains(cap.FindingSummary, "JWT") {
+		t.Errorf("FindingSummary should contain content: %q", cap.FindingSummary)
+	}
+}
+
+// TestExtractExplorationCapture_MemorySave_NoKey verifies key fallback to
+// "memory" when no key is provided.
+func TestExtractExplorationCapture_MemorySave_NoKey(t *testing.T) {
+	result := makeTextResult(map[string]any{"saved": true})
+	cap := extractExplorationCapture("memory", map[string]any{
+		"action":  "save",
+		"content": "Use read-committed isolation for all payment queries",
+	}, result)
+	if cap == nil {
+		t.Fatal("expected non-nil capture when key is absent")
+	}
+	if cap.EntityQueried != "memory" {
+		t.Errorf("EntityQueried fallback: got %q, want %q", cap.EntityQueried, "memory")
+	}
+}
+
+// TestExtractExplorationCapture_MemorySave_EmptyContent verifies that
+// memory(action=save) with no content returns nil (nothing to capture).
+func TestExtractExplorationCapture_MemorySave_EmptyContent(t *testing.T) {
+	result := makeTextResult(map[string]any{"saved": true})
+	cap := extractExplorationCapture("memory", map[string]any{
+		"action": "save",
+		"key":    "some_key",
+	}, result)
+	if cap != nil {
+		t.Errorf("expected nil for empty content, got %+v", cap)
+	}
+}
+
+// TestExtractExplorationCapture_MemoryNonSave verifies that memory actions
+// other than "save" (e.g. "list", "search") are not captured.
+func TestExtractExplorationCapture_MemoryNonSave(t *testing.T) {
+	result := makeTextResult(map[string]any{"memories": []any{}})
+	for _, action := range []string{"list", "search", "get", ""} {
+		cap := extractExplorationCapture("memory", map[string]any{
+			"action":  action,
+			"content": "should not be captured",
+		}, result)
+		if cap != nil {
+			t.Errorf("expected nil for memory(action=%q), got %+v", action, cap)
+		}
 	}
 }
 

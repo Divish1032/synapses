@@ -553,7 +553,9 @@ func (s *Server) handleEndSession(
 	// continues as async optional enrichment.
 	if synapseSessionID != "" {
 		elogEntries, elogErr := s.store.GetSessionExplorationLog(synapseSessionID, 200)
-		if elogErr == nil && len(elogEntries) > 0 {
+		if elogErr != nil {
+			logutil.Warn("synapses: deterministic archivist: get exploration log: %v\n", elogErr)
+		} else if len(elogEntries) > 0 {
 			// Fetch failed approaches created in this session window.
 			var failedApproaches []store.RejectedApproach
 			if !sessionStartedAt.IsZero() {

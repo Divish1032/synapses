@@ -198,6 +198,99 @@ func TestRejectedApproach_ProjectIsolation(t *testing.T) {
 	}
 }
 
+// TestRejectedApproach_GetInRange verifies time-range scoping for the
+// deterministic Archivist: only entries within [since, until] are returned.
+func TestRejectedApproach_GetInRange(t *testing.T) {
+	s := openTestStoreRej(t)
+
+	base := int64(1_700_000_000) // fixed epoch for determinism
+	for i, approach := range []string{"early", "mid", "late"} {
+		_, err := s.InsertRejectedApproach(store.RejectedApproach{
+			AgentID:       "agent-1",
+			ProjectID:     "proj-a",
+			Approach:      approach,
+			FailureReason: "failed",
+			CreatedAt:     base + int64(i*100),
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+
+	// Range [base+50, base+150] — should capture "mid" only.
+	results, err := s.GetRejectedApproachesInRange("agent-1", "proj-a", base+50, base+150, 20)
+	if err != nil {
+		t.Fatalf("GetRejectedApproachesInRange: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result in range, got %d", len(results))
+	}
+	if results[0].Approach != "mid" {
+		t.Errorf("expected \"mid\", got %q", results[0].Approach)
+	}
+
+	// Inclusive bounds: since=base+100 (exactly "mid"), until=base+200 (exactly "late").
+	results, err = s.GetRejectedApproachesInRange("agent-1", "proj-a", base+100, base+200, 20)
+	if err != nil {
+		t.Fatalf("GetRejectedApproachesInRange inclusive: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 inclusive results, got %d", len(results))
+	}
+}
+
+// TestRejectedApproach_GetInRange_SinceZero verifies since=0 skips the lower
+// bound and returns all entries up to until.
+func TestRejectedApproach_GetInRange_SinceZero(t *testing.T) {
+	s := openTestStoreRej(t)
+
+	base := int64(1_700_000_000)
+	for i, approach := range []string{"alpha", "beta"} {
+		_, err := s.InsertRejectedApproach(store.RejectedApproach{
+			AgentID:       "agent-1",
+			ProjectID:     "proj-a",
+			Approach:      approach,
+			FailureReason: "failed",
+			CreatedAt:     base + int64(i*10),
+		})
+		if err != nil {
+			t.Fatalf("InsertRejectedApproach[%d]: %v", i, err)
+		}
+	}
+
+	// since=0 — no lower bound, both entries fall before until.
+	results, err := s.GetRejectedApproachesInRange("agent-1", "proj-a", 0, base+100, 20)
+	if err != nil {
+		t.Fatalf("GetRejectedApproachesInRange since=0: %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results with since=0, got %d", len(results))
+	}
+}
+
+// TestRejectedApproach_GetInRange_Empty verifies no panic or error when no
+// entries fall within the specified range.
+func TestRejectedApproach_GetInRange_Empty(t *testing.T) {
+	s := openTestStoreRej(t)
+
+	_, _ = s.InsertRejectedApproach(store.RejectedApproach{
+		AgentID:       "agent-1",
+		ProjectID:     "proj-a",
+		Approach:      "something",
+		FailureReason: "failed",
+		CreatedAt:     1_000_000,
+	})
+
+	// Query a range far in the future — nothing should match.
+	results, err := s.GetRejectedApproachesInRange("agent-1", "proj-a", 9_000_000_000, 9_000_001_000, 20)
+	if err != nil {
+		t.Fatalf("GetRejectedApproachesInRange empty range: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for out-of-range query, got %d", len(results))
+	}
+}
+
 // TestRejectedApproach_ZeroLimit uses the default limit when limit <= 0.
 func TestRejectedApproach_ZeroLimit(t *testing.T) {
 	s := openTestStoreRej(t)
