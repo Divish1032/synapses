@@ -4,10 +4,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SynapsesOS/synapses/internal/pulse"
 	pulsestore "github.com/SynapsesOS/synapses/internal/pulse/pstore"
 	pulsetypes "github.com/SynapsesOS/synapses/internal/pulse/types"
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // floatPtr is a test helper that creates a *float64 from a literal.
@@ -439,5 +441,74 @@ func TestHandleEndSession_EffectivenessReport_KnowledgeGrowthInPrev7d(t *testing
 	kg, _ := prev7d["total_knowledge_growth"].(float64)
 	if kg != 7 {
 		t.Errorf("prev_7d.total_knowledge_growth: want 7 (from seeded session), got %v", kg)
+	}
+}
+
+// TestDeterministicArchivist_WiresEmbedding verifies Sprint 30.5: the Deterministic
+// Archivist must call QueueEmbedMemory after every InsertMemory so that session
+// learnings become semantically searchable in future sessions.
+// Regression target: if the QueueEmbedMemory call is removed, no embedding is stored.
+func TestDeterministicArchivist_WiresEmbedding(t *testing.T) {
+	srv := newTestServer(t)
+	srv.StartBackground()
+
+	// Wire a fast stub embedder — returns a non-nil vector immediately.
+	emb := &testEmbedder{vec: []float32{0.1, 0.2, 0.3}, model: "test-archivist-embed"}
+	srv.SetMemoryEmbedder(emb)
+
+	// Register a session so handleEndSession picks up the synapseSessionID.
+	_, err := srv.handleSessionInit(ctx, callTool(map[string]any{"agent_id": "archivist-embed-agent"}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+
+	sessID := srv.getSynapseSessionID(SessionIDFromContext(ctx))
+	if sessID == "" {
+		t.Fatal("synapseSessionID must be non-empty after session_init")
+	}
+
+	// Seed an exploration log entry — Bucket 4 (get_context) produces a memory
+	// when EntityQueried and FindingSummary are non-empty.
+	if err := srv.store.AppendExplorationEntry(store.ExplorationEntry{
+		SessionID:      sessID,
+		ProjectID:      srv.projectID,
+		ToolName:       "get_context",
+		EntityQueried:  "AuthService",
+		FindingSummary: "AuthService handles OAuth2 login and delegates JWT validation to TokenValidator",
+	}); err != nil {
+		t.Fatalf("AppendExplorationEntry: %v", err)
+	}
+
+	// End session — Deterministic Archivist runs, saves the memory, and
+	// (Sprint 30.5) calls QueueEmbedMemory on the saved memory ID.
+	res, err := srv.handleEndSession(ctx, callTool(map[string]any{"agent_id": "archivist-embed-agent"}))
+	if err != nil {
+		t.Fatalf("handleEndSession: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleEndSession returned error: %v", res.Content)
+	}
+
+	// Drain background workers — embedding is fire-and-forget via goBackground.
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify: at least one auto-captured project memory now has an embedding stored.
+	mems, err := srv.store.RecentMemoriesCtx(ctx, 20, 7, nil, false)
+	if err != nil {
+		t.Fatalf("RecentMemoriesCtx: %v", err)
+	}
+
+	embeddedCount := 0
+	for _, m := range mems {
+		if m.Source == store.SourceAuto && m.Tier == store.TierProject {
+			vec := srv.store.GetMemoryEmbedding(m.ID)
+			if len(vec) > 0 {
+				embeddedCount++
+			}
+		}
+	}
+
+	if embeddedCount == 0 {
+		t.Error("Sprint 30.5: Deterministic Archivist must call QueueEmbedMemory — no auto-captured memory has an embedding")
 	}
 }
