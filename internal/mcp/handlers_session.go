@@ -242,17 +242,17 @@ func (s *Server) handleSessionInit(
 	// Cross-connection resumes (hibernateCtx != nil) auto-inject the recovery packet
 	// because they are a concrete signal of context loss (see below, Sprint 24.2).
 
-	// Detect project-wide first session: count == 1 means this is the first
-	// session_init ever recorded for this project — surfaced as highlights.
+	// Detect project-wide session count for first-session highlights and
+	// learning-phase onboarding messages (Sessions 1-5).
 	// sessionResumed alone is insufficient: it is per-agent-session, not project-wide.
-	// Detect project-wide first session: count == 1 means this is the first
-	// session_init ever recorded for this project — surfaced as highlights.
 	// Guard s.projectID != "" prevents false matches when projectID was never
 	// set (e.g. unconfigured server or tests that don't call SetProjectID).
 	var isFirstProjectSession bool
+	var projectSessionCount int
 	if s.store != nil && !sessionResumed && s.projectID != "" {
-		if count, countErr := s.store.CountProjectSessions(s.projectID); countErr == nil && count == 1 {
-			isFirstProjectSession = true
+		if count, countErr := s.store.CountProjectSessions(s.projectID); countErr == nil {
+			projectSessionCount = count
+			isFirstProjectSession = (count == 1)
 		}
 	}
 
@@ -2182,8 +2182,13 @@ func (s *Server) handleSessionInit(
 	if !quickMode && !resumeMode {
 		if pc := s.getPulseClient(); pc != nil {
 			vm := pc.GetProjectValueMetrics(s.projectID, 30)
-			if vm.MemoryRetrievals > 0 || vm.ValidateBlocks > 0 || vm.FilesFromGraph > 0 {
-				resp["project_value_metrics"] = map[string]interface{}{
+			// Sprint 30.7: include feedback_count when agents have flagged corrections.
+			feedbackCount := 0
+			if s.store != nil && s.projectID != "" {
+				feedbackCount = s.store.CountUserFeedback(s.projectID)
+			}
+			if vm.MemoryRetrievals > 0 || vm.ValidateBlocks > 0 || vm.FilesFromGraph > 0 || feedbackCount > 0 {
+				m := map[string]interface{}{
 					"days":              vm.Days,
 					"memory_retrievals": vm.MemoryRetrievals,
 					"validate_blocks":   vm.ValidateBlocks,
@@ -2191,8 +2196,46 @@ func (s *Server) handleSessionInit(
 					"summary": fmt.Sprintf("%dd: %d memory retrievals, %d validate blocks, %d files served from graph",
 						vm.Days, vm.MemoryRetrievals, vm.ValidateBlocks, vm.FilesFromGraph),
 				}
+				if feedbackCount > 0 {
+					m["feedback_count"] = feedbackCount
+				}
+				resp["project_value_metrics"] = m
 			}
 		}
+	}
+
+	// Sprint 30.7: onboarding — first-session and learning-phase messaging.
+	// Sessions 1-5 get a tailored message so new projects feel welcoming and agents
+	// understand Synapses is building up its knowledge. Fires in ALL scope modes
+	// except resume (one-shot like first_session_highlights — must not be suppressed
+	// or the first session permanently misses it). Omitted after session 5.
+	if !resumeMode && projectSessionCount >= 1 && projectSessionCount <= 5 {
+		entityCount := 0
+		if s.graph != nil {
+			entityCount = s.graph.NodeCount()
+		}
+		memoryCount := 0
+		if s.store != nil {
+			memoryCount = s.store.CountActiveMemories()
+		}
+
+		var onboardingMsg string
+		switch projectSessionCount {
+		case 1:
+			if entityCount > 0 {
+				onboardingMsg = fmt.Sprintf("FIRST SESSION | Indexed %d entities | No memories yet — I'll learn from this session", entityCount)
+			} else {
+				onboardingMsg = "FIRST SESSION | No memories yet — I'll learn from this session"
+			}
+		default:
+			// Sessions 2-5: learning phase.
+			if memoryCount > 0 {
+				onboardingMsg = fmt.Sprintf("Learning phase (session %d of 5) | %d memories recorded so far — conventions forming", projectSessionCount, memoryCount)
+			} else {
+				onboardingMsg = fmt.Sprintf("Learning phase (session %d of 5) | Building knowledge from your workflow", projectSessionCount)
+			}
+		}
+		resp["onboarding"] = onboardingMsg
 	}
 
 	// _summary: one-line template-based digest — no LLM, negligible tokens.
@@ -2377,11 +2420,21 @@ func renderSessionInitKV(resp map[string]interface{}, sessionID, detailLevel str
 		fields = append(fields, KVField{Key: "Warning", Value: scopeWarn, Important: true})
 	}
 
+	// --- Onboarding (sessions 1-5, all detail levels) ---
+	// Sprint 30.7: first-session and learning-phase messaging. Always included
+	// when present — same one-shot logic as first_session_highlights.
+	if ob, ok := resp["onboarding"].(string); ok && ob != "" {
+		fields = append(fields, KVField{Key: "Onboarding", Value: ob, Important: true})
+	}
+
 	// --- Project value metrics (summary + full levels) ---
 	// Sprint 30.6: one compact line: "30d: 47 memory retrievals | 3 validate blocks | 340 files from graph"
 	if detailLevel != "signal" {
 		if vm, ok := resp["project_value_metrics"].(map[string]interface{}); ok {
 			summary, _ := vm["summary"].(string)
+			if fc, _ := vm["feedback_count"].(int); fc > 0 {
+				summary = fmt.Sprintf("%s | %d correction(s) recorded", summary, fc)
+			}
 			if summary != "" {
 				fields = append(fields, KVField{Key: "ProjectValue", Value: summary})
 			}

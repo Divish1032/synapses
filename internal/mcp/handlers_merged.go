@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/SynapsesOS/synapses/internal/store"
 )
 
 // ── Merge 1: search + find_entity ──────────────────────────────────────────
@@ -165,7 +167,7 @@ func (s *Server) handleMemoryDispatch(
 ) (*mcp.CallToolResult, error) {
 	action, _ := req.GetArguments()["action"].(string)
 	if action == "" {
-		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses, decide, list_decisions, abandon, list_rejected)"), nil
+		return mcp.NewToolResultError("action is required (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses, decide, list_decisions, abandon, list_rejected, feedback)"), nil
 	}
 	switch action {
 	case "save":
@@ -207,9 +209,12 @@ func (s *Server) handleMemoryDispatch(
 		return s.handleAbandon(ctx, req)
 	case "list_rejected":
 		return s.handleListRejectedApproaches(ctx, req)
+	// Sprint 30.7: agent corrections — "Synapses is wrong about X".
+	case "feedback":
+		return s.handleMemoryFeedback(ctx, req)
 	default:
 		return mcp.NewToolResultError(fmt.Sprintf(
-			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses, decide, list_decisions, abandon, list_rejected)", action)), nil
+			"unknown memory action: %q (valid: save, search, list, annotate, annotate_web, add_gap, list_gaps, history, hypothesize, list_hypotheses, decide, list_decisions, abandon, list_rejected, feedback)", action)), nil
 	}
 }
 
@@ -297,6 +302,70 @@ func (s *Server) handleGetTask(_ context.Context, req mcp.CallToolRequest) (*mcp
 		result["prior_learnings_count"] = len(mems)
 	}
 
+	return jsonResult(result)
+}
+
+// handleMemoryFeedback records an agent correction ("Synapses is wrong about X")
+// as a user_feedback session observation.  Two effects:
+//  1. Suppression entry: the feedback is stored so future sessions can avoid
+//     re-surfacing the flagged intelligence.
+//  2. Quality metric: store.CountUserFeedback aggregates these for value tracking.
+//
+// Required: content — what Synapses got wrong.
+// Optional: target   — entity name, file path, or memory reference being corrected.
+// Optional: agent_id — agent providing the correction.
+func (s *Server) handleMemoryFeedback(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	content := stringArg(req, "content")
+	if content == "" {
+		return mcp.NewToolResultError("content is required — describe what Synapses got wrong"), nil
+	}
+	target := stringArg(req, "target")    // optional: entity / file / memory_id
+	agentID := stringArg(req, "agent_id") // optional
+
+	// Resolve the current Synapses session ID from context.
+	mcpSessID := SessionIDFromContext(ctx)
+	sessID := s.getSynapseSessionID(mcpSessID)
+	if sessID == "" {
+		sessID = "no-session"
+	}
+
+	if s.store == nil {
+		return jsonResult(map[string]interface{}{
+			"stored":  false,
+			"warning": "no persistent store available — run 'synapses start' to enable durable feedback storage",
+			"note":    "Feedback noted for this session only.",
+		})
+	}
+
+	key := "general"
+	if target != "" {
+		key = target
+	}
+	obs := store.SessionObservation{
+		SessionID:  sessID,
+		ProjectID:  s.projectID,
+		AgentID:    agentID,
+		Category:   store.ObsCategoryUserFeedback,
+		Key:        key,
+		Value:      content,
+		Confidence: 1.0, // agent explicitly flagged this
+	}
+	if _, err := s.store.InsertSessionObservation(obs); err != nil {
+		// Non-fatal: surface a warning but don't fail the call.
+		return jsonResult(map[string]interface{}{
+			"stored":  false,
+			"warning": fmt.Sprintf("could not persist feedback: %v", err),
+			"note":    "Feedback noted for this session but could not be stored durably.",
+		})
+	}
+
+	result := map[string]interface{}{
+		"stored": true,
+		"note":   "Feedback recorded. Synapses will use this to avoid re-surfacing the flagged intelligence.",
+	}
+	if target != "" {
+		result["target"] = target
+	}
 	return jsonResult(result)
 }
 

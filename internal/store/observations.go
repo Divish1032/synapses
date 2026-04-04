@@ -15,6 +15,7 @@ const (
 	ObsCategoryApproachOutcome = "approach_outcome" // Session success/failure signal
 	ObsCategoryFilePattern     = "file_pattern"     // Architectural layer / directory patterns
 	ObsCategoryUserPref        = "user_preference"  // User preference signals from memory saves (Sprint 29.6)
+	ObsCategoryUserFeedback    = "user_feedback"    // Agent corrections: "Synapses is wrong about X" (Sprint 30.7)
 )
 
 // MaxSessionObservationsRows is the per-project row cap for session_observations.
@@ -226,6 +227,21 @@ func scanObservation(row observationScanner) (*SessionObservation, error) {
 		return nil, nil
 	}
 	return &o, err
+}
+
+// CountUserFeedback returns the total number of user-feedback observations for a
+// project. Used to surface the feedback quality metric in session_init (Sprint 30.7).
+// Returns 0 on any error so callers never need a nil-check.
+func (s *Store) CountUserFeedback(projectID string) int {
+	if s.knowledgeDB == nil {
+		return 0
+	}
+	var count int
+	_ = s.knowledgeDB.QueryRow(
+		`SELECT COUNT(*) FROM session_observations WHERE project_id = ? AND category = ?`,
+		projectID, ObsCategoryUserFeedback,
+	).Scan(&count)
+	return count
 }
 
 func scanObservations(rows *sql.Rows) ([]SessionObservation, error) {

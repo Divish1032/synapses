@@ -248,6 +248,21 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 }
 
 // QueryMemories retrieves memories matching the given filters.
+// CountActiveMemories returns the number of non-stale, non-expired memory rows.
+// Used for the learning-phase onboarding message in session_init (Sprint 30.7).
+// Returns 0 on any error so callers never need a nil-check.
+func (s *Store) CountActiveMemories() int {
+	if s.knowledgeDB == nil {
+		return 0
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	var count int
+	_ = s.knowledgeDB.QueryRow(
+		`SELECT COUNT(*) FROM memories WHERE expires_at > ? AND stale = 0`, now,
+	).Scan(&count)
+	return count
+}
+
 // All filter params are optional (empty string = no filter applied for that field).
 // NOTE: passing empty entityID does NOT filter by entity — it returns all entities.
 // Use QueryMemoriesForEntities for multi-entity batched lookups.
