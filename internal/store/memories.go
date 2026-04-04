@@ -526,6 +526,31 @@ func (s *Store) GetPeerHandoffs(projectID, excludeAgentID string, windowHours, l
 	return scanMemories(rows)
 }
 
+// GetMemoriesByTaskID returns all active (non-stale, non-expired) memories that
+// are linked to a specific task ID. Used by Sprint 29.7 tests to verify that
+// task-completion learning memories were written.
+//
+// Returns nil (not an error) when knowledgeDB is unavailable or taskID is empty.
+func (s *Store) GetMemoriesByTaskID(taskID string) ([]Memory, error) {
+	if s.knowledgeDB == nil || taskID == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rows, err := s.knowledgeDB.Query(
+		`SELECT id, tier, content, entity_id, agent_id, task_id, tags,
+		        created_at, expires_at, last_accessed_at, source, importance, access_count, source_project
+		 FROM memories
+		 WHERE task_id = ? AND expires_at > ? AND stale = 0
+		 ORDER BY created_at DESC`,
+		taskID, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get memories by task_id: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
 // GetMemoryContent returns the content of a memory by ID. Returns ("", false) if not found.
 func (s *Store) GetMemoryContent(id string) (string, bool) {
 	var content string

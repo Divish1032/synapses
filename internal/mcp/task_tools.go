@@ -677,7 +677,13 @@ func (s *Server) handleUpdateTask(
 		taskID := id
 		aid := agentID
 		n := notes
+		c := capturedCommits
 		s.goBackground(func() { s.writeRetrospectiveAnnotations(taskID, aid, n) })
+		// Sprint 29.7: auto-capture task completion learnings as project memories
+		// so future sessions can recall what approach worked, what patterns were
+		// used, and what the codebase impact was. Tier 1 auto-capture — no agent
+		// initiative required.
+		s.goBackground(func() { s.saveTaskCompletionLearning(taskID, aid, n, c) })
 	}
 
 	result := map[string]interface{}{
@@ -758,6 +764,122 @@ func (s *Server) writeRetrospectiveAnnotations(taskID, agentID, completionNotes 
 			log.Printf("mcp: add system annotation: %v", err)
 		}
 	}
+}
+
+// saveTaskCompletionLearning auto-captures what was accomplished when a task
+// is marked done. Persists a TierProject memory (SourceAuto) so future sessions
+// can recall the approach, patterns, and codebase impact without re-exploring.
+//
+// Sprint 29.7 — Tier 1 auto-capture. Runs in a background goroutine after
+// handleUpdateTask returns so it never delays the response. All errors are
+// silently discarded (fail-silent contract matching writeRetrospectiveAnnotations).
+func (s *Server) saveTaskCompletionLearning(taskID, agentID, notes string, commits []string) {
+	if s.store == nil {
+		return
+	}
+	task, err := s.store.GetTask(taskID)
+	if err != nil || task == nil {
+		return
+	}
+
+	content := buildTaskLearningContent(task, notes, commits)
+	if content == "" {
+		return
+	}
+
+	_, _ = s.store.InsertMemory(store.Memory{
+		Tier:    store.TierProject,
+		Content: content,
+		AgentID: agentID,
+		TaskID:  taskID,
+		Source:  store.SourceAuto,
+		Tags:    `["task_completion","auto"]`,
+	})
+}
+
+// buildTaskLearningContent produces the natural-language memory content for a
+// completed task. Returns "" when the task has no title (nothing meaningful to
+// record). Extracted as a pure function to enable unit testing without a store.
+//
+// Content format (each section omitted when empty):
+//
+//	Task completed: "title"
+//	Goal: description
+//	Approach / notes: agent notes
+//	Spec coverage: N/M items completed
+//	Files modified: file1, file2 (N file(s))
+//	Commits: sha1, sha2 (N commit(s))
+//	Entities involved: FuncA, TypeB
+func buildTaskLearningContent(task *store.Task, notes string, commits []string) string {
+	if task == nil || task.Title == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("Task completed: \"")
+	b.WriteString(task.Title)
+	b.WriteByte('"')
+
+	if task.Description != "" {
+		b.WriteString("\nGoal: ")
+		b.WriteString(task.Description)
+	}
+
+	if notes != "" {
+		b.WriteString("\nApproach / notes: ")
+		b.WriteString(notes)
+	}
+
+	// Spec item coverage — gives future sessions a sense of task scope.
+	if len(task.SpecItems) > 0 {
+		done := 0
+		for _, si := range task.SpecItems {
+			if si.Done {
+				done++
+			}
+		}
+		b.WriteString(fmt.Sprintf("\nSpec coverage: %d/%d items completed", done, len(task.SpecItems)))
+	}
+
+	// Files modified — lets future sessions know which files this task touched.
+	if len(task.TrackedFiles) > 0 {
+		b.WriteString(fmt.Sprintf("\nFiles modified: %s (%d file(s))",
+			strings.Join(task.TrackedFiles, ", "), len(task.TrackedFiles)))
+	}
+
+	// Commits — links the learning to the actual code change.
+	// Cap at 10 to avoid unbounded content size when tasks span many commits.
+	if len(commits) > 0 {
+		shown := commits
+		if len(shown) > 10 {
+			shown = shown[:10]
+		}
+		b.WriteString(fmt.Sprintf("\nCommits: %s (%d commit(s))",
+			strings.Join(shown, ", "), len(commits)))
+	}
+
+	// Entity names extracted from linked node IDs (format: repo::file::name).
+	// Only the name segment is surfaced — enough for a future session to
+	// understand what codebase entities were involved without raw IDs.
+	// Capped at 10 to avoid unbounded content size on tasks with many linked nodes.
+	if len(task.LinkedNodes) > 0 {
+		names := make([]string, 0, len(task.LinkedNodes))
+		for _, nid := range task.LinkedNodes {
+			parts := strings.SplitN(nid, "::", 3)
+			if len(parts) == 3 && parts[2] != "" {
+				names = append(names, parts[2])
+				if len(names) == 10 {
+					break
+				}
+			}
+		}
+		if len(names) > 0 {
+			b.WriteString("\nEntities involved: ")
+			b.WriteString(strings.Join(names, ", "))
+		}
+	}
+
+	return b.String()
 }
 
 // handleUpdateSpecItem marks a spec item within a task as done or not-done.
