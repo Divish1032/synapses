@@ -500,6 +500,52 @@ func gitDiffExcludeBenchFiles(repoDir string) (string, error) {
 	return cleaned.String(), nil
 }
 
+func gitRevParseHead(repoDir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitDiffFromCommit captures all changes (committed + uncommitted) since the
+// given commit hash, excluding benchmark config files.
+func gitDiffFromCommit(repoDir, fromCommit string) (string, error) {
+	if fromCommit == "" {
+		return gitDiffExcludeBenchFiles(repoDir)
+	}
+
+	// First, get committed changes since fromCommit.
+	cmd2 := exec.Command("git", "diff", fromCommit+"..HEAD", "--no-ext-diff",
+		"--", ".", ":!.mcp.json", ":!.claude", ":!synapses.json")
+	cmd2.Dir = repoDir
+	commitDiff, err := cmd2.Output()
+	if err != nil {
+		return "", err
+	}
+
+	// Also get uncommitted changes.
+	cmd3 := exec.Command("git", "diff", "HEAD", "--no-ext-diff",
+		"--", ".", ":!.mcp.json", ":!.claude", ":!synapses.json")
+	cmd3.Dir = repoDir
+	uncommittedDiff, _ := cmd3.Output()
+
+	combined := string(commitDiff) + string(uncommittedDiff)
+
+	// Strip "index <hash>..<hash>" lines.
+	var cleaned strings.Builder
+	for _, line := range strings.Split(combined, "\n") {
+		if strings.HasPrefix(line, "index ") {
+			continue
+		}
+		cleaned.WriteString(line)
+		cleaned.WriteByte('\n')
+	}
+	return cleaned.String(), nil
+}
+
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
 func countToolCalls(m map[string]int) int {

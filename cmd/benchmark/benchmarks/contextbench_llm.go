@@ -154,9 +154,19 @@ func RunLLMContextBench(opts LLMContextBenchOptions) (*reporter.LLMContextBenchR
 	return buildLLMContextBenchReport(opts.Mode, opts.Model, results), nil
 }
 
-// checkMCPConnected parses the stream-json init message and returns true
-// if the synapses MCP server connected successfully.
+// checkMCPConnected parses the stream-json output and returns true
+// if the synapses MCP server was configured and available.
+// Claude CLI 2.1+ reports "pending" at init (async connection), so we
+// accept both "connected" and "pending" in the init message. We also
+// check whether any mcp__synapses tool calls appear in the output —
+// if they do, MCP definitely worked regardless of init status.
 func checkMCPConnected(streamJSON string) bool {
+	// Fast path: if any mcp__synapses tool call appears, MCP was connected.
+	if strings.Contains(streamJSON, "mcp__synapses") {
+		return true
+	}
+
+	// Check init message for MCP server presence.
 	idx := strings.Index(streamJSON, "\n")
 	firstLine := streamJSON
 	if idx > 0 {
@@ -176,7 +186,7 @@ func checkMCPConnected(streamJSON string) bool {
 		return false
 	}
 	for _, s := range msg.MCPServers {
-		if s.Name == "synapses" && s.Status == "connected" {
+		if s.Name == "synapses" && (s.Status == "connected" || s.Status == "pending") {
 			return true
 		}
 	}

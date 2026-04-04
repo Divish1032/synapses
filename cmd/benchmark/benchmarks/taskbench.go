@@ -39,6 +39,8 @@ type TaskBenchOptions struct {
 	Eval        bool     // run Docker eval (default: true)
 	DaemonPort  string   // Synapses daemon port (default: "11435")
 	InstanceIDs []string // optional instance ID filter
+	Dataset     string   // eval dataset name (default: SWE-bench_Verified, or LiberCoders/FeatureBench)
+	IsFeature   bool     // true for feature implementation tasks (FeatureBench), false for bug fixes
 }
 
 // TaskBenchTaskResult holds per-task metrics.
@@ -207,6 +209,9 @@ func runTaskBenchTask(claudeBin string, task BenchTask, opts TaskBenchOptions) T
 		result.Duration = time.Since(start).String()
 		return result
 	}
+	// Save the test-baseline commit hash — we'll diff against this after the
+	// agent runs because the agent may create additional commits.
+	preAgentHash, _ := gitRevParseHead(repoDir)
 
 	// 3. Mode-specific setup.
 	if opts.Mode == "synapses" {
@@ -219,7 +224,12 @@ func runTaskBenchTask(claudeBin string, task BenchTask, opts TaskBenchOptions) T
 	}
 
 	// 4. Build prompt.
-	prompt := buildTaskBenchPrompt(task)
+	var prompt string
+	if opts.IsFeature {
+		prompt = buildFeatureBenchPrompt(task)
+	} else {
+		prompt = buildTaskBenchPrompt(task)
+	}
 
 	// 5. Configure tools.
 	allowedTools := "Bash Read Write Edit Grep Glob"
@@ -227,7 +237,7 @@ func runTaskBenchTask(claudeBin string, task BenchTask, opts TaskBenchOptions) T
 	systemPrompt := ""
 
 	if opts.Mode == "synapses" {
-		allowedTools = "Bash Read Write Edit mcp__synapses__*"
+		allowedTools = "Bash Read Write Edit mcp__synapses__session_init mcp__synapses__search mcp__synapses__get_context mcp__synapses__get_impact mcp__synapses__validate mcp__synapses__memory mcp__synapses__end_session mcp__synapses__tasks"
 		disallowedTools = "Grep,Glob"
 		systemPrompt = taskBenchSynapsesPrompt
 	}
@@ -293,7 +303,8 @@ func runTaskBenchTask(claudeBin string, task BenchTask, opts TaskBenchOptions) T
 	}
 
 	// 9. Capture model patch — diff relative to test baseline commit.
-	result.ModelPatch, _ = gitDiffExcludeBenchFiles(repoDir)
+	// Use preAgentHash because the agent may have created additional commits.
+	result.ModelPatch, _ = gitDiffFromCommit(repoDir, preAgentHash)
 
 	// 10. Reset for next task.
 	resetToCommit(repoDir, task.BaseCommit)
@@ -385,7 +396,34 @@ func buildTaskBenchPrompt(task BenchTask) string {
 Make the smallest change that correctly fixes the issue. Do not refactor unrelated code.`, task.Repo, task.ProblemStatement)
 }
 
-const taskBenchSynapsesPrompt = `Synapses MCP tools are available with indexed codebase. Start with mcp__synapses__get_context(mode="investigate", problem="<issue summary>") for ranked code with source. Then mcp__synapses__search for symbol lookup, mcp__synapses__get_impact before editing.`
+func buildFeatureBenchPrompt(task BenchTask) string {
+	return fmt.Sprintf(`You are an expert software engineer. Implement the following feature in the %s repository.
+
+## Feature Request
+
+%s
+
+## Instructions
+
+1. Read the relevant source code to understand the architecture and existing patterns
+2. Implement the feature following the project's coding conventions
+3. Write clean, well-structured code using Write/Edit
+4. Ensure your implementation does not break existing functionality
+5. Do NOT modify test files — the tests define the expected behavior
+
+Implement the feature completely. Follow the project's patterns for naming, structure, and error handling.`, task.Repo, task.ProblemStatement)
+}
+
+const taskBenchSynapsesPrompt = `IMPORTANT: You have Synapses MCP tools connected. You MUST use them before writing any code.
+
+REQUIRED workflow:
+1. FIRST call mcp__synapses__session_init to get project context and conventions
+2. THEN call mcp__synapses__search to find relevant symbols and code locations
+3. THEN call mcp__synapses__get_context for each entity you plan to modify — this gives you relationships, callers, and constraints you won't see from reading the file alone
+4. Call mcp__synapses__get_impact before making changes to understand blast radius
+5. After writing code, call mcp__synapses__validate to check for violations
+
+Do NOT skip these tools. They provide cross-file intelligence (callers, imports, patterns) that file reading alone misses. Using Bash for grep/find instead of mcp__synapses__search defeats the purpose.`
 
 // ─── Synapses Setup ─────────────────────────────────────────────────────────
 
@@ -449,7 +487,8 @@ func setupTaskBenchSynapses(repoDir, port string) {
 
 // EvalTaskBench runs SWE-bench Docker evaluation on predictions.
 // Updates each result's Resolved field in-place.
-func EvalTaskBench(results []TaskBenchTaskResult, outputDir string) error {
+// dataset overrides the default SWE-bench dataset (e.g. "LiberCoders/FeatureBench").
+func EvalTaskBench(results []TaskBenchTaskResult, outputDir, dataset string) error {
 	predPath := filepath.Join(outputDir, "taskbench_predictions_eval.jsonl")
 
 	// Write predictions JSONL.
@@ -472,9 +511,14 @@ func EvalTaskBench(results []TaskBenchTaskResult, outputDir string) error {
 
 	// Run eval script.
 	scriptPath := findScript("eval_swebench.py")
-	cmd := exec.Command("python3", scriptPath,
+	evalArgs := []string{scriptPath,
 		"--predictions", predPath,
-		"--run-id", "taskbench-eval")
+		"--run-id", "taskbench-eval",
+	}
+	if dataset != "" {
+		evalArgs = append(evalArgs, "--dataset", dataset)
+	}
+	cmd := exec.Command("python3", evalArgs...)
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
 	if err != nil {

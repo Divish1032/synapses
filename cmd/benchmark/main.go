@@ -72,8 +72,10 @@ func main() {
 		tbTimeout    = flag.Int("tb-timeout", 600, "Timeout per TaskBench task in seconds")
 		tbEval       = flag.Bool("tb-eval", true, "Run Docker eval after all tasks")
 		tbBothModes  = flag.Bool("tb-both-modes", false, "Run baseline + synapses, compute delta")
-		tbInstanceIDs = flag.String("tb-instance-ids", "", "Comma-separated SWE-bench instance IDs")
+		tbInstanceIDs = flag.String("tb-instance-ids", "", "Comma-separated instance IDs to filter")
 		tbDebug      = flag.Bool("tb-debug", false, "Dump raw stream-json per task")
+		tbDataset    = flag.String("tb-dataset", "", "Eval dataset (default: SWE-bench_Verified, or LiberCoders/FeatureBench)")
+		tbFeature    = flag.Bool("tb-feature", false, "Use feature implementation prompt (FeatureBench) instead of bug-fix prompt")
 	)
 	flag.Parse()
 
@@ -253,6 +255,8 @@ func main() {
 				Eval:        *tbEval,
 				DaemonPort:  "11435",
 				InstanceIDs: splitComma(*tbInstanceIDs),
+				Dataset:     *tbDataset,
+				IsFeature:   *tbFeature,
 			}
 			results, err := benchmarks.RunTaskBench(tbOpts)
 			if err != nil {
@@ -260,7 +264,7 @@ func main() {
 			}
 			// Run eval if enabled.
 			if *tbEval {
-				if evalErr := benchmarks.EvalTaskBench(results, *outputDir); evalErr != nil {
+				if evalErr := benchmarks.EvalTaskBench(results, *outputDir, *tbDataset); evalErr != nil {
 					log.Printf("WARNING: eval failed: %v (results still available without resolve status)", evalErr)
 				}
 			}

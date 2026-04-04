@@ -22,7 +22,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--predictions", required=True, help="Path to predictions JSONL")
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified",
-                        help="SWE-bench dataset name")
+                        help="Dataset name (SWE-bench or FeatureBench)")
+    parser.add_argument("--split", default="test",
+                        help="Dataset split (e.g. test, fast, lite, full)")
     parser.add_argument("--run-id", default="taskbench", help="Run identifier")
     parser.add_argument("--max-workers", type=int, default=1, help="Parallel eval workers")
     parser.add_argument("--timeout", type=int, default=300, help="Per-instance eval timeout (seconds)")
@@ -39,17 +41,27 @@ def main():
         print(json.dumps({"error": "no predictions found", "results": []}))
         sys.exit(0)
 
+    # Determine split for the dataset.
+    split = args.split
+    if "FeatureBench" in args.dataset and split == "test":
+        split = "fast"  # FeatureBench default
+
     # Try using the swebench CLI.
     try:
+        eval_args = [
+            sys.executable, "-m", "swebench.harness.run_evaluation",
+            "-p", args.predictions,
+            "-d", args.dataset,
+            "-id", args.run_id,
+            "--max_workers", str(args.max_workers),
+            "-t", str(args.timeout),
+        ]
+        # FeatureBench requires --split for non-default splits.
+        if split != "test":
+            eval_args.extend(["--split", split])
+
         result = subprocess.run(
-            [
-                sys.executable, "-m", "swebench.harness.run_evaluation",
-                "-p", args.predictions,
-                "-d", args.dataset,
-                "-id", args.run_id,
-                "--max_workers", str(args.max_workers),
-                "-t", str(args.timeout),
-            ],
+            eval_args,
             capture_output=True,
             text=True,
             timeout=args.timeout * pred_count + 120,  # total timeout
