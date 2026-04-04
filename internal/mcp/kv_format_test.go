@@ -383,6 +383,38 @@ func TestToolParamDocs_UnknownTool(t *testing.T) {
 }
 
 // kvExtractText pulls the text content from a CallToolResult for test assertions.
+// TestRenderSessionInitKV_ProjectValueMetrics verifies that the ProjectValue
+// field appears in summary/full modes and is absent in signal mode.
+func TestRenderSessionInitKV_ProjectValueMetrics(t *testing.T) {
+	resp := map[string]interface{}{
+		"project_value_metrics": map[string]interface{}{
+			"days":              30,
+			"memory_retrievals": 47,
+			"validate_blocks":   3,
+			"files_from_graph":  340,
+			"summary":           "30d: 47 memory retrievals, 3 validate blocks, 340 files served from graph",
+		},
+	}
+
+	var tracker sessionDeliveredTracker
+
+	// summary mode: ProjectValue field must be present.
+	out := renderSessionInitKV(resp, "sess-pvm", "summary", 500, &tracker)
+	if !strings.Contains(out, "ProjectValue:") {
+		t.Errorf("summary mode: expected ProjectValue field, got:\n%s", out)
+	}
+	if !strings.Contains(out, "47 memory retrievals") {
+		t.Errorf("summary mode: expected metric counts in ProjectValue, got:\n%s", out)
+	}
+
+	// signal mode: ProjectValue must NOT appear (signal is status+warnings only).
+	var tracker2 sessionDeliveredTracker
+	outSignal := renderSessionInitKV(resp, "sess-pvm-sig", "signal", 500, &tracker2)
+	if strings.Contains(outSignal, "ProjectValue:") {
+		t.Errorf("signal mode: ProjectValue should be absent, got:\n%s", outSignal)
+	}
+}
+
 func kvExtractText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
 	if result == nil {

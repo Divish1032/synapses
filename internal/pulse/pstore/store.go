@@ -3987,6 +3987,89 @@ func (s *Store) GetAbandonmentRate(day string) float64 {
 }
 
 // ---------------------------------------------------------------------------
+// Sprint 30.6: user-facing value metrics
+// ---------------------------------------------------------------------------
+
+// ProjectValueMetrics holds the three measurable proxies for Synapses value
+// on a per-project basis. All counters are totals for the requested window.
+//
+// The ROADMAP architectural note (30.6) explicitly replaces "tokens saved"
+// (which requires an unobservable counterfactual) with these proxies:
+//   - MemoryRetrievals: times a recall_hit or cross_session_hit was served
+//   - ValidateBlocks:   validate calls that returned at least one violation
+//   - FilesFromGraph:   context deliveries where the agent did NOT need to
+//     re-read the file (refetched=0 means first-fetch = graph served it)
+type ProjectValueMetrics struct {
+	Days              int `json:"days"`
+	MemoryRetrievals  int `json:"memory_retrievals"`
+	ValidateBlocks    int `json:"validate_blocks"`
+	FilesFromGraph    int `json:"files_from_graph"`
+}
+
+// GetProjectValueMetrics returns value proxy metrics for projectID over the
+// last days calendar days.  All queries are read-only and use indexed columns.
+// Returns a zero-value struct (not nil) on any error so callers never need
+// a nil-check — they just see zeroes when analytics data is unavailable.
+func (s *Store) GetProjectValueMetrics(projectID string, days int) ProjectValueMetrics {
+	if days <= 0 {
+		days = 30
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	m := ProjectValueMetrics{Days: days}
+
+	// Memory retrievals: recall_hit and cross_session_hit rows for this project.
+	var memRow *sql.Row
+	if projectID != "" {
+		memRow = s.execer().QueryRow(
+			`SELECT COUNT(*) FROM memory_ops
+			 WHERE operation IN ('recall_hit','cross_session_hit')
+			   AND project_id = ?
+			   AND created_at >= ?`, projectID, since)
+	} else {
+		memRow = s.execer().QueryRow(
+			`SELECT COUNT(*) FROM memory_ops
+			 WHERE operation IN ('recall_hit','cross_session_hit')
+			   AND created_at >= ?`, since)
+	}
+	_ = memRow.Scan(&m.MemoryRetrievals)
+
+	// Validate blocks: events where at least one violation was found.
+	var valRow *sql.Row
+	if projectID != "" {
+		valRow = s.execer().QueryRow(
+			`SELECT COUNT(*) FROM validation_events
+			 WHERE violation_count > 0
+			   AND project_id = ?
+			   AND created_at >= ?`, projectID, since)
+	} else {
+		valRow = s.execer().QueryRow(
+			`SELECT COUNT(*) FROM validation_events
+			 WHERE violation_count > 0
+			   AND created_at >= ?`, since)
+	}
+	_ = valRow.Scan(&m.ValidateBlocks)
+
+	// Files from graph: context deliveries where refetched=0 (served from graph,
+	// agent did not re-read the file).
+	var cdRow *sql.Row
+	if projectID != "" {
+		cdRow = s.execer().QueryRow(
+			`SELECT COUNT(*) FROM context_deliveries
+			 WHERE refetched = 0
+			   AND project_id = ?
+			   AND created_at >= ?`, projectID, since)
+	} else {
+		cdRow = s.execer().QueryRow(
+			`SELECT COUNT(*) FROM context_deliveries
+			 WHERE refetched = 0
+			   AND created_at >= ?`, since)
+	}
+	_ = cdRow.Scan(&m.FilesFromGraph)
+
+	return m
+}
+
+// ---------------------------------------------------------------------------
 // Bug 21 — DQ-G.2: per-project rollup helpers
 // ---------------------------------------------------------------------------
 

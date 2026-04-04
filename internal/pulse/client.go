@@ -1474,3 +1474,17 @@ func (c *Client) GetDecliningTools(days, minCallThreshold int) []pulsestore.Decl
 	}
 	return c.store.GetDecliningTools(days, minCallThreshold)
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 30.6: user-facing value metrics
+// ---------------------------------------------------------------------------
+
+// GetProjectValueMetrics returns the three measurable value proxies for a
+// project over the last days calendar days.  Always returns a valid struct —
+// never nil — so callers can read fields without a nil-check.
+func (c *Client) GetProjectValueMetrics(projectID string, days int) pulsestore.ProjectValueMetrics {
+	if c == nil {
+		return pulsestore.ProjectValueMetrics{Days: days}
+	}
+	return c.store.GetProjectValueMetrics(projectID, days)
+}

@@ -2175,6 +2175,26 @@ func (s *Server) handleSessionInit(
 		resp["_briefing"] = briefing
 	}
 
+	// Sprint 30.6: project_value_metrics — surface measurable value proxies so
+	// agents see Synapses' contribution at a glance.  Only in full mode (not
+	// quick/resume) to respect token budget.  Graceful: omitted when pulse is nil
+	// or when all metrics are zero (first session with no prior activity).
+	if !quickMode && !resumeMode {
+		if pc := s.getPulseClient(); pc != nil {
+			vm := pc.GetProjectValueMetrics(s.projectID, 30)
+			if vm.MemoryRetrievals > 0 || vm.ValidateBlocks > 0 || vm.FilesFromGraph > 0 {
+				resp["project_value_metrics"] = map[string]interface{}{
+					"days":              vm.Days,
+					"memory_retrievals": vm.MemoryRetrievals,
+					"validate_blocks":   vm.ValidateBlocks,
+					"files_from_graph":  vm.FilesFromGraph,
+					"summary": fmt.Sprintf("%dd: %d memory retrievals, %d validate blocks, %d files served from graph",
+						vm.Days, vm.MemoryRetrievals, vm.ValidateBlocks, vm.FilesFromGraph),
+				}
+			}
+		}
+	}
+
 	// _summary: one-line template-based digest — no LLM, negligible tokens.
 	// Helps agents scan response content without parsing every nested field.
 	// Format: "{N} pending tasks, {M} recent changes, {V} violations. {federation_status}."
@@ -2355,6 +2375,17 @@ func renderSessionInitKV(resp map[string]interface{}, sessionID, detailLevel str
 	}
 	if scopeWarn, ok := resp["scope_warning"].(string); ok && scopeWarn != "" {
 		fields = append(fields, KVField{Key: "Warning", Value: scopeWarn, Important: true})
+	}
+
+	// --- Project value metrics (summary + full levels) ---
+	// Sprint 30.6: one compact line: "30d: 47 memory retrievals | 3 validate blocks | 340 files from graph"
+	if detailLevel != "signal" {
+		if vm, ok := resp["project_value_metrics"].(map[string]interface{}); ok {
+			summary, _ := vm["summary"].(string)
+			if summary != "" {
+				fields = append(fields, KVField{Key: "ProjectValue", Value: summary})
+			}
+		}
 	}
 
 	// --- Tasks (signal + summary levels) ---

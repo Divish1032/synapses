@@ -1031,3 +1031,117 @@ func TestGetLastIndexTime(t *testing.T) {
 		t.Errorf("timestamp %v out of range [%v, %v]", ts, before, after)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 30.6: GetProjectValueMetrics
+// ---------------------------------------------------------------------------
+
+func TestGetProjectValueMetrics_Empty(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	m := s.GetProjectValueMetrics("proj-a", 30)
+	if m.Days != 30 {
+		t.Errorf("Days: got %d, want 30", m.Days)
+	}
+	if m.MemoryRetrievals != 0 || m.ValidateBlocks != 0 || m.FilesFromGraph != 0 {
+		t.Errorf("expected all-zero metrics on empty store, got %+v", m)
+	}
+}
+
+func TestGetProjectValueMetrics_CountsCorrectly(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	const projA = "proj-a"
+	const projB = "proj-b"
+
+	// Memory retrievals: 2 recall_hit + 1 cross_session_hit for projA, 1 for projB.
+	for i := 0; i < 2; i++ {
+		if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+			Operation: "recall_hit", ProjectID: projA,
+		}); err != nil {
+			t.Fatalf("InsertMemoryOp recall_hit: %v", err)
+		}
+	}
+	if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+		Operation: "cross_session_hit", ProjectID: projA,
+	}); err != nil {
+		t.Fatalf("InsertMemoryOp cross_session_hit: %v", err)
+	}
+	// A recall_miss for projA must NOT count.
+	if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+		Operation: "recall_miss", ProjectID: projA,
+	}); err != nil {
+		t.Fatalf("InsertMemoryOp recall_miss: %v", err)
+	}
+	// projB recall — must NOT show up in projA query.
+	if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+		Operation: "recall_hit", ProjectID: projB,
+	}); err != nil {
+		t.Fatalf("InsertMemoryOp projB: %v", err)
+	}
+
+	// Validate blocks: 2 with violations for projA, 1 with violation_count=0 (no block).
+	for _, vc := range []int{3, 1, 0} {
+		if err := s.InsertValidationEvent(pulsetypes.ValidationEvent{
+			ToolName:       "validate",
+			ViolationCount: vc,
+			ProjectID:      projA,
+		}); err != nil {
+			t.Fatalf("InsertValidationEvent: %v", err)
+		}
+	}
+
+	// Files from graph: 2 with refetched=0 for projA, 1 with refetched=1.
+	for _, refetched := range []bool{false, false, true} {
+		if err := s.InsertContextDelivery(pulsetypes.ContextDeliveryEvent{
+			ToolName:  "get_context",
+			ProjectID: projA,
+			Refetched: refetched,
+		}); err != nil {
+			t.Fatalf("InsertContextDelivery: %v", err)
+		}
+	}
+
+	m := s.GetProjectValueMetrics(projA, 30)
+
+	if m.MemoryRetrievals != 3 {
+		t.Errorf("MemoryRetrievals: got %d, want 3 (2 recall_hit + 1 cross_session_hit)", m.MemoryRetrievals)
+	}
+	if m.ValidateBlocks != 2 {
+		t.Errorf("ValidateBlocks: got %d, want 2 (violation_count>0 only)", m.ValidateBlocks)
+	}
+	if m.FilesFromGraph != 2 {
+		t.Errorf("FilesFromGraph: got %d, want 2 (refetched=0 only)", m.FilesFromGraph)
+	}
+}
+
+func TestGetProjectValueMetrics_EmptyProjectID(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	// Insert data without project scoping.
+	if err := s.InsertMemoryOp(pulsetypes.MemoryOperationEvent{
+		Operation: "recall_hit",
+	}); err != nil {
+		t.Fatalf("InsertMemoryOp: %v", err)
+	}
+
+	// Empty projectID should aggregate across all projects.
+	m := s.GetProjectValueMetrics("", 30)
+	if m.MemoryRetrievals != 1 {
+		t.Errorf("empty projectID: MemoryRetrievals got %d, want 1", m.MemoryRetrievals)
+	}
+}
+
+func TestGetProjectValueMetrics_DefaultDays(t *testing.T) {
+	t.Parallel()
+	s := testStore(t)
+
+	// days=0 should use default (30).
+	m := s.GetProjectValueMetrics("proj-x", 0)
+	if m.Days != 30 {
+		t.Errorf("days=0 default: got %d, want 30", m.Days)
+	}
+}
