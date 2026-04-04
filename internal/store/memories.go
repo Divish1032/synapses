@@ -247,7 +247,6 @@ func (s *Store) InsertMemory(m Memory) (string, error) {
 	return m.ID, nil
 }
 
-// QueryMemories retrieves memories matching the given filters.
 // CountActiveMemories returns the number of non-stale, non-expired memory rows.
 // Used for the learning-phase onboarding message in session_init (Sprint 30.7).
 // Returns 0 on any error so callers never need a nil-check.
@@ -263,6 +262,7 @@ func (s *Store) CountActiveMemories() int {
 	return count
 }
 
+// QueryMemories retrieves memories matching the given filters.
 // All filter params are optional (empty string = no filter applied for that field).
 // NOTE: passing empty entityID does NOT filter by entity — it returns all entities.
 // Use QueryMemoriesForEntities for multi-entity batched lookups.

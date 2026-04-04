@@ -164,6 +164,26 @@ func TestMemoryFeedback_UnknownActionFails(t *testing.T) {
 	}
 }
 
+// TestMemoryFeedback_NilStore verifies that feedback without a persistent store
+// returns stored=false and a warning, but does not return an error.
+func TestMemoryFeedback_NilStore(t *testing.T) {
+	srv := newTestServer(t)
+	srv.store = nil // simulate no persistent store
+
+	result, err := srv.handleMemoryDispatch(ctx, callTool(map[string]any{
+		"action":  "feedback",
+		"content": "The entity count is always wrong",
+	}))
+	m := mustResult(t, result, err)
+
+	if stored, _ := m["stored"].(bool); stored {
+		t.Error("expected stored=false when store is nil")
+	}
+	if _, ok := m["warning"].(string); !ok {
+		t.Error("expected warning string when store is nil")
+	}
+}
+
 // ── Part B: session_init onboarding ───────────────────────────────────────────
 
 // newOnboardingServer creates a server with a given projectID that has N prior
