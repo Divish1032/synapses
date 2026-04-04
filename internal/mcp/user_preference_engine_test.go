@@ -323,3 +323,64 @@ func TestRunUserPrefExtraction_IsIdempotent(t *testing.T) {
 		t.Errorf("expected exactly 1 preference after two runs, got %d", len(prefs))
 	}
 }
+
+// ── maybeRecordUserPrefObs integration ────────────────────────────────────────
+
+// TestMaybeRecordUserPrefObs_WritesToStore verifies that a memory(action=save)
+// call whose decision text contains a preference signal creates a
+// user_preference session observation in the store.
+//
+// This test exercises the full wiring path:
+//
+//	handleMemoryDispatch(action=save) → maybeRecordUserPrefObs → InsertSessionObservation
+//
+// It calls handleSessionInit first so that a Synapses session UUID is
+// registered under the "stdio" key — required by InsertSessionObservation.
+func TestMaybeRecordUserPrefObs_WritesToStore(t *testing.T) {
+	srv := newTestServer(t)
+	const projID = "proj-maybe-pref"
+	srv.SetProjectID(projID)
+
+	// Register a Synapses session so getSynapseSessionID returns a non-empty ID.
+	_, err := srv.handleSessionInit(ctx, callTool(map[string]any{
+		"agent_id": "implementer",
+	}))
+	if err != nil {
+		t.Fatalf("handleSessionInit: %v", err)
+	}
+
+	// Save a memory whose decision text contains a preference signal.
+	res, err := srv.handleMemoryDispatch(ctx, callTool(map[string]any{
+		"action":   "save",
+		"agent_id": "implementer",
+		"decision": "User prefers single bundled PRs for all refactors in this sprint.",
+		"outcome":  "success",
+	}))
+	if err != nil {
+		t.Fatalf("handleMemoryDispatch save: %v", err)
+	}
+	if res != nil && res.IsError {
+		t.Fatalf("handleMemoryDispatch save returned tool error: %v", res.Content)
+	}
+
+	// Verify the observation was recorded.
+	counts, err := srv.store.GetObservationKeyCounts(projID, store.ObsCategoryUserPref)
+	if err != nil {
+		t.Fatalf("GetObservationKeyCounts: %v", err)
+	}
+	if len(counts) == 0 {
+		t.Fatal("expected at least 1 user_preference observation, got 0")
+	}
+
+	// Confirm the normalized key contains the expected phrase prefix.
+	found := false
+	for k := range counts {
+		if strings.Contains(k, "single bundled prs") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected observation key containing 'single bundled prs', got keys: %v", counts)
+	}
+}
