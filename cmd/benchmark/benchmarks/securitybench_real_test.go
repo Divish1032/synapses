@@ -174,9 +174,10 @@ func TestSecurityBench_RealRepo_SecDevLabs_Go(t *testing.T) {
 
 // TestSecurityBench_RealRepo_NodeExpress tests against Node.js Express vulnerable apps.
 func TestSecurityBench_RealRepo_NodeExpress(t *testing.T) {
-	repoDir := "/tmp/synbench_repos/node-express-bench"
+	// Use express4 subdirectory — it's a focused Express app.
+	repoDir := "/tmp/synbench_repos/node-express-bench/express4"
 	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
-		t.Skip("NodeTestBenches not found")
+		t.Skip("NodeTestBenches/express4 not found")
 	}
 
 	g, err := parseRepo(repoDir)
@@ -185,15 +186,45 @@ func TestSecurityBench_RealRepo_NodeExpress(t *testing.T) {
 	}
 	t.Logf("Parsed: %d nodes, %d edges", g.NodeCount(), g.EdgeCount())
 
+	// Debug: check imports for index.js
+	indexFile := filepath.Join(repoDir, "index.js")
+	if resolved, err := filepath.EvalSymlinks(indexFile); err == nil {
+		indexFile = resolved
+	}
+	nodes := g.FindByFile(indexFile)
+	t.Logf("FindByFile(index.js) = %d nodes", len(nodes))
+	for _, n := range nodes {
+		if n.Type == graph.NodeFile {
+			for _, e := range g.OutEdges(n.ID) {
+				if e.Type == graph.EdgeImports {
+					imp := g.GetNode(e.To)
+					if imp != nil {
+						t.Logf("  IMPORT: %s", imp.Name)
+					}
+				}
+			}
+		}
+		if n.Type == graph.NodeFunction || n.Type == graph.NodeMethod {
+			if uc, ok := n.Metadata["unresolved_callees"]; ok && uc != "" {
+				t.Logf("  FN %s unresolved: %s", n.Name, uc[:min(100, len(uc))])
+			}
+		}
+	}
+
 	engine := security.DefaultEngine()
 
-	// Find Express route files.
+	// Check all JS files in express4.
 	routeFiles := findFiles(repoDir, "*.js")
 	totalViolations := 0
+	expressFiles := 0
 	for _, f := range routeFiles {
 		content, _ := os.ReadFile(f)
 		if !strings.Contains(string(content), "express") {
 			continue
+		}
+		expressFiles++
+		if resolved, err := filepath.EvalSymlinks(f); err == nil {
+			f = resolved
 		}
 		violations := engine.CheckFile(g, f, content)
 		if len(violations) > 0 {
@@ -205,7 +236,7 @@ func TestSecurityBench_RealRepo_NodeExpress(t *testing.T) {
 			totalViolations += len(violations)
 		}
 	}
-	t.Logf("Total Express violations: %d across %d files scanned", totalViolations, len(routeFiles))
+	t.Logf("Express files scanned: %d, violations: %d", expressFiles, totalViolations)
 }
 
 // TestSecurityBench_RealRepo_VAmPI tests against a real vulnerable Flask app.
