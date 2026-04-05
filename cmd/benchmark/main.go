@@ -339,6 +339,20 @@ func main() {
 		}
 		rep.PrintRecallBenchSummary(rbResult)
 
+	case "securitybench", "security-bench", "security_bench":
+		sbData := "securitybench.jsonl"
+		if *cbDataFile != "contextbench.jsonl" {
+			sbData = *cbDataFile // allow override via --cb-data (reuse flag)
+		}
+		sbResult, err := benchmarks.RunSecurityBench(sbData)
+		if err != nil {
+			log.Fatalf("securitybench failed: %v", err)
+		}
+		if err := rep.WriteSecurityBench(sbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintSecurityBenchSummary(sbResult)
+
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)
 	}
