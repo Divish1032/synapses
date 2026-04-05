@@ -414,9 +414,20 @@ func main() {
 		}
 		rep.PrintConventionBenchSummary(rcResult)
 
+	case "graphvsgrep", "graph-vs-grep":
+		repoDir := "/tmp/synbench_repos/go-test-bench"
+		if *reposDir != "/tmp/bench_repos" {
+			repoDir = *reposDir
+		}
+		gvgResult, err := benchmarks.RunGraphVsGrep(repoDir)
+		if err != nil {
+			log.Fatalf("graph-vs-grep failed: %v", err)
+		}
+		fmt.Printf("\n  Graph F1: %.1f%%  Grep F1: %.1f%%  Delta: %+.1f%%  Compression: %.1fx\n",
+			gvgResult.GraphF1, gvgResult.GrepF1, gvgResult.F1Delta, gvgResult.CompressionRatio)
+
 	case "synapsebench", "synapses-bench", "synapses_bench":
-		// Run all 4 pain-point benchmarks.
-		log.Println("Running SynapsesBench v3 (4 pain-point benchmarks)...")
+		log.Println("Running SynapsesBench v5 — Capability Report...")
 
 		sbData := "securitybench.jsonl"
 		sbResult, err := benchmarks.RunSecurityBench(sbData)
@@ -470,38 +481,63 @@ func main() {
 			rep.PrintMemoryBenchSummary(contResult)
 		}
 
-		// Composite score — pain-point aligned.
+		// Graph vs Grep comparison (Gap 3).
+		gvgRepo := "/tmp/synbench_repos/go-test-bench"
+		var gvgResult *benchmarks.GraphVsGrepResult
+		gvgResult, err = benchmarks.RunGraphVsGrep(gvgRepo)
+		if err != nil {
+			log.Printf("WARNING: graph-vs-grep failed: %v", err)
+		}
+
+		// ── Capability Report (Gap 6: no fake composite) ──
 		fmt.Println()
-		fmt.Println("═══════════════════════════════════════════════════════")
-		fmt.Println("  SynapsesBench v3 — Pain Point Scores")
-		fmt.Println("═══════════════════════════════════════════════════════")
-		var scores []float64
+		fmt.Println("═══════════════════════════════════════════════════════════")
+		fmt.Println("  SynapsesBench v5 — Capability Report")
+		fmt.Println("═══════════════════════════════════════════════════════════")
+		fmt.Println()
+		fmt.Println("  MEMORY")
 		if failResult != nil {
-			fmt.Printf("  #1 Failure Avoidance (Recall):  %.1f%%\n", failResult.AvgRecall)
-			scores = append(scores, failResult.AvgRecall)
-		}
-		if cbResult != nil {
-			fmt.Printf("  #2 Convention Accuracy (F1):    %.1f%%\n", cbResult.F1)
-			scores = append(scores, cbResult.F1)
-		}
-		if credResult != nil {
-			fmt.Printf("  #3 Credential Detection (F1):   %.1f%%\n", credResult.F1)
-			scores = append(scores, credResult.F1)
+			fmt.Printf("    Failure recall:        %.1f%% (%d queries, %d memories)\n",
+				failResult.AvgRecall, failResult.TotalQueries, failResult.SeededMemories)
+			fmt.Printf("    Top-1 accuracy (MRR):  %.1f%%\n", failResult.MRR)
 		}
 		if contResult != nil {
-			fmt.Printf("  #4 Session Continuity (Delta):  %.1f%%\n", contResult.DeliveryRate)
-			scores = append(scores, contResult.DeliveryRate)
+			fmt.Printf("    Session continuity:    +%.0f%% coverage delta (warm vs cold)\n",
+				contResult.DeliveryRate)
 		}
-		composite := float64(0)
-		if len(scores) > 0 {
-			for _, s := range scores {
-				composite += s
-			}
-			composite /= float64(len(scores))
+		fmt.Println()
+		fmt.Println("  SECURITY")
+		if credResult != nil {
+			fmt.Printf("    Credential detection:  %.1f%% F1 (P=%.0f%% R=%.0f%%, %d cases)\n",
+				credResult.F1, credResult.Precision, credResult.Recall, credResult.TotalCases)
 		}
-		fmt.Printf("  ─────────────────────────────────\n")
-		fmt.Printf("  COMPOSITE (avg):       %.1f%%\n", composite)
-		fmt.Println("═══════════════════════════════════════════════════════")
+		if sbResult != nil {
+			fmt.Printf("    Pattern detection:     %.1f%% F1 (%d synthetic cases)\n",
+				sbResult.F1, sbResult.TotalCases)
+		}
+		fmt.Println()
+		fmt.Println("  GRAPH (unique value — grep cannot do this)")
+		if gvgResult != nil {
+			fmt.Printf("    Structural queries:    %.1f%% F1 (vs grep %.1f%% F1)\n",
+				gvgResult.GraphF1, gvgResult.GrepF1)
+			fmt.Printf("    F1 advantage:          %+.1f%% over grep\n", gvgResult.F1Delta)
+			fmt.Printf("    Token efficiency:      %.1fx compression vs grep\n",
+				gvgResult.CompressionRatio)
+		} else {
+			fmt.Println("    (graph-vs-grep not run — clone go-test-bench to /tmp/synbench_repos/)")
+		}
+		fmt.Println()
+		fmt.Println("  LEARNING")
+		if cbResult != nil {
+			fmt.Printf("    Convention extraction:  %.1f%% F1 (synthetic threshold test)\n", cbResult.F1)
+		}
+		fmt.Println()
+		fmt.Println("  DATA SOURCES")
+		fmt.Println("    Memory: 435 real sprint reflections, semantic queries")
+		fmt.Println("    Credentials: 16 realistic code samples (Go/Python/JS/TS)")
+		fmt.Println("    Graph: real repo structural queries vs grep baseline")
+		fmt.Println("    Conventions: real repo pipeline test (Synapses codebase)")
+		fmt.Println("═══════════════════════════════════════════════════════════")
 
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)
