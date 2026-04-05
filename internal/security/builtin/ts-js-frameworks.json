@@ -10,26 +10,59 @@
       "description": "A TypeScript file using Express registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible without authentication. Secure routes with app.use(authMiddleware) globally, or use router-level middleware: router.use(authenticate). Express middleware is applied via use() on the app instance or Router objects. Common patterns: passport.authenticate(), jwt(), requireAuth(), ensureAuthenticated().",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["express"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "jwtVerify*",
-          "RequireAuth*", "requireAuth*", "checkToken*",
-          "Authorize*", "authorize*",
-          "BearerAuth*", "bearerAuth*",
-          "BasicAuth*", "basicAuth*",
-          "TokenAuth*", "validateToken*", "ValidateToken*",
-          "verifyToken*", "VerifyToken*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "passport*", "protect",
-          "sessionAuth*", "SessionAuth*",
-          "withAuth*", "checkAuth*"
+        "framework_identifiers": [
+          "express"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "jwtVerify*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "Authorize*",
+          "authorize*",
+          "BearerAuth*",
+          "bearerAuth*",
+          "BasicAuth*",
+          "basicAuth*",
+          "TokenAuth*",
+          "validateToken*",
+          "ValidateToken*",
+          "verifyToken*",
+          "VerifyToken*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "passport*",
+          "protect",
+          "sessionAuth*",
+          "SessionAuth*",
+          "withAuth*",
+          "checkAuth*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Express routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply app.use(authMiddleware) or router.use(authMiddleware) before route registration.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "ts-express-missing-rate-limit",
@@ -41,22 +74,45 @@
       "description": "A TypeScript file using Express registers HTTP routes without rate limiting middleware. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Apply rate limiting via app.use(rateLimit({...})) using express-rate-limit or a similar library. Note: if rate limiting is enforced at the infrastructure layer (nginx, load balancer, API gateway, Cloudflare), this finding can be suppressed.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["express"],
+        "framework_identifiers": [
+          "express"
+        ],
         "required_call_patterns": [
-          "RateLimit*", "rateLimit*", "rateLimiter*",
-          "Throttle*", "throttle*",
+          "RateLimit*",
+          "rateLimit*",
+          "rateLimiter*",
+          "Throttle*",
+          "throttle*",
           "slowDown*",
-          "createLimiter*", "createRateLimiter*",
-          "limiter*", "LimitKey*",
-          "PerSecond*", "PerMinute*",
+          "createLimiter*",
+          "createRateLimiter*",
+          "limiter*",
+          "LimitKey*",
+          "PerSecond*",
+          "PerMinute*",
           "expressRateLimit*"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Express routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add express-rate-limit via app.use(rateLimit({...})) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "ts-express-missing-csrf",
@@ -68,21 +124,36 @@
       "description": "A TypeScript file using Express registers POST, PUT, DELETE, or PATCH routes without CSRF protection middleware. CSRF protection is required for web applications that use session cookies for authentication. If this is a JSON API using token-based auth (JWT, Bearer), CSRF protection is not needed and this finding can be suppressed. Use csurf, csrf-csrf (doubleCsrfProtection), or lusca for CSRF protection.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["express"],
+        "framework_identifiers": [
+          "express"
+        ],
         "required_call_patterns": [
-          "csrf*", "*Csrf*", "*CSRF*",
+          "csrf*",
+          "*Csrf*",
+          "*CSRF*",
           "doubleCsrf*",
           "csurf*",
           "lusca*",
           "csrfProtection*",
           "csrfMiddleware*"
         ],
-        "route_node_names": ["post", "put", "delete", "patch"],
-        "middleware_node_names": ["use"],
+        "route_node_names": [
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Express mutation routes (POST/PUT/DELETE/PATCH) without CSRF protection. {count}/{total} other file(s) in this package use CSRF protection. Apply csrf protection via app.use(csrfProtection()) or suppress if using token-based auth.",
-      "tags": ["owasp-a01", "csrf", "session-security"]
+      "tags": [
+        "owasp-a01",
+        "csrf",
+        "session-security"
+      ]
     },
     {
       "id": "ts-fastify-missing-auth",
@@ -94,24 +165,56 @@
       "description": "A TypeScript file using Fastify registers HTTP routes but does not apply authentication. All routes in this file are publicly accessible without authentication. Secure routes using Fastify hooks: fastify.addHook('preHandler', async (request) => { await request.jwtVerify() }) globally or per-route. Register auth plugins via fastify.register(fastifyJWT, { secret }) or fastify.register(fastifyAuth). The jwtVerify() method from @fastify/jwt is the canonical Fastify JWT auth pattern.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["fastify"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "jwtVerify*", "verifyJWT*",
-          "RequireAuth*", "requireAuth*", "checkToken*",
-          "Authorize*", "authorize*",
-          "BearerAuth*", "bearerAuth*",
-          "TokenAuth*", "validateToken*", "ValidateToken*",
-          "verifyToken*", "VerifyToken*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "checkAuth*", "withAuth*",
-          "sessionAuth*", "SessionAuth*"
+        "framework_identifiers": [
+          "fastify"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options"],
-        "middleware_node_names": ["register", "addHook"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "jwtVerify*",
+          "verifyJWT*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "Authorize*",
+          "authorize*",
+          "BearerAuth*",
+          "bearerAuth*",
+          "TokenAuth*",
+          "validateToken*",
+          "ValidateToken*",
+          "verifyToken*",
+          "VerifyToken*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "checkAuth*",
+          "withAuth*",
+          "sessionAuth*",
+          "SessionAuth*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options"
+        ],
+        "middleware_node_names": [
+          "register",
+          "addHook"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Fastify routes without authentication. {count}/{total} other file(s) in this package use auth. Apply fastify.addHook('preHandler', authenticate) globally or use request.jwtVerify() per-route.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "ts-fastify-missing-rate-limit",
@@ -123,20 +226,43 @@
       "description": "A TypeScript file using Fastify registers HTTP routes without rate limiting. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Apply rate limiting via @fastify/rate-limit: fastify.register(fastifyRateLimit, { max: 100, timeWindow: '1 minute' }). Note: if rate limiting is enforced at the infrastructure layer, this finding can be suppressed.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["fastify"],
-        "required_call_patterns": [
-          "RateLimit*", "rateLimit*", "rateLimiter*",
-          "Throttle*", "throttle*",
-          "createLimiter*", "createRateLimiter*",
-          "limiter*", "LimitKey*",
-          "PerSecond*", "PerMinute*"
+        "framework_identifiers": [
+          "fastify"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options"],
-        "middleware_node_names": ["register", "addHook"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "rateLimit*",
+          "rateLimiter*",
+          "Throttle*",
+          "throttle*",
+          "createLimiter*",
+          "createRateLimiter*",
+          "limiter*",
+          "LimitKey*",
+          "PerSecond*",
+          "PerMinute*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options"
+        ],
+        "middleware_node_names": [
+          "register",
+          "addHook"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Fastify routes without rate limiting. {count}/{total} other file(s) in this package apply rate limiting. Register @fastify/rate-limit via fastify.register(fastifyRateLimit, {...}) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "ts-fastify-missing-csrf",
@@ -148,19 +274,35 @@
       "description": "A TypeScript file using Fastify registers POST, PUT, DELETE, or PATCH routes without CSRF protection. CSRF protection is required for web applications using session cookies. If this is a JSON API using JWT or Bearer token auth, CSRF is not needed and this finding can be suppressed. Use @fastify/csrf-protection: fastify.register(fastifyCsrfProtection).",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["fastify"],
+        "framework_identifiers": [
+          "fastify"
+        ],
         "required_call_patterns": [
-          "csrf*", "*Csrf*", "*CSRF*",
+          "csrf*",
+          "*Csrf*",
+          "*CSRF*",
           "doubleCsrf*",
           "csrfProtection*",
           "csrfMiddleware*"
         ],
-        "route_node_names": ["post", "put", "delete", "patch"],
-        "middleware_node_names": ["register", "addHook"],
+        "route_node_names": [
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ],
+        "middleware_node_names": [
+          "register",
+          "addHook"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Fastify mutation routes (POST/PUT/DELETE/PATCH) without CSRF protection. {count}/{total} other file(s) in this package use CSRF protection. Register @fastify/csrf-protection or suppress if using token-based auth.",
-      "tags": ["owasp-a01", "csrf", "session-security"]
+      "tags": [
+        "owasp-a01",
+        "csrf",
+        "session-security"
+      ]
     },
     {
       "id": "ts-koa-missing-auth",
@@ -172,26 +314,61 @@
       "description": "A TypeScript file using Koa registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible. Secure routes with app.use(authMiddleware) globally, or apply per-route using @koa/router: router.use(authenticate) or router.get('/path', authenticate, handler). Common Koa auth libraries: koa-jwt, koa-passport, @koa/jwt.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["koa", "@koa/router", "koa-router"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "jwtVerify*",
-          "RequireAuth*", "requireAuth*", "checkToken*",
-          "Authorize*", "authorize*",
-          "BearerAuth*", "bearerAuth*",
-          "BasicAuth*", "basicAuth*",
-          "TokenAuth*", "validateToken*", "ValidateToken*",
-          "verifyToken*", "VerifyToken*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "passport*", "protect",
-          "sessionAuth*", "SessionAuth*",
-          "withAuth*", "checkAuth*"
+        "framework_identifiers": [
+          "koa",
+          "@koa/router",
+          "koa-router"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "jwtVerify*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "Authorize*",
+          "authorize*",
+          "BearerAuth*",
+          "bearerAuth*",
+          "BasicAuth*",
+          "basicAuth*",
+          "TokenAuth*",
+          "validateToken*",
+          "ValidateToken*",
+          "verifyToken*",
+          "VerifyToken*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "passport*",
+          "protect",
+          "sessionAuth*",
+          "SessionAuth*",
+          "withAuth*",
+          "checkAuth*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Koa routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply router.use(authMiddleware) or app.use(authMiddleware) before route handling.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "ts-koa-missing-rate-limit",
@@ -203,20 +380,45 @@
       "description": "A TypeScript file using Koa registers HTTP routes without rate limiting middleware. Apply rate limiting via koa-ratelimit or koa2-ratelimit: app.use(ratelimit({ db, duration, max })). Note: if rate limiting is enforced at the infrastructure layer, this finding can be suppressed.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["koa", "@koa/router", "koa-router"],
-        "required_call_patterns": [
-          "RateLimit*", "rateLimit*", "rateLimiter*",
-          "Throttle*", "throttle*",
-          "createLimiter*", "createRateLimiter*",
-          "limiter*", "LimitKey*",
-          "PerSecond*", "PerMinute*"
+        "framework_identifiers": [
+          "koa",
+          "@koa/router",
+          "koa-router"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "rateLimit*",
+          "rateLimiter*",
+          "Throttle*",
+          "throttle*",
+          "createLimiter*",
+          "createRateLimiter*",
+          "limiter*",
+          "LimitKey*",
+          "PerSecond*",
+          "PerMinute*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Koa routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add rate limiting via app.use(ratelimit({...})) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "ts-koa-missing-csrf",
@@ -228,19 +430,36 @@
       "description": "A TypeScript file using Koa registers POST, PUT, DELETE, or PATCH routes without CSRF protection. CSRF protection is required for web applications using session cookies. If this is a JSON API using JWT or Bearer token auth, CSRF is not needed and this finding can be suppressed. Use koa-csrf: app.use(new CSRF()).",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["koa", "@koa/router", "koa-router"],
+        "framework_identifiers": [
+          "koa",
+          "@koa/router",
+          "koa-router"
+        ],
         "required_call_patterns": [
-          "csrf*", "*Csrf*", "*CSRF*",
+          "csrf*",
+          "*Csrf*",
+          "*CSRF*",
           "doubleCsrf*",
           "csrfProtection*",
           "csrfMiddleware*"
         ],
-        "route_node_names": ["post", "put", "delete", "patch"],
-        "middleware_node_names": ["use"],
+        "route_node_names": [
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Koa mutation routes (POST/PUT/DELETE/PATCH) without CSRF protection. {count}/{total} other file(s) in this package use CSRF protection. Use koa-csrf or suppress if using token-based auth.",
-      "tags": ["owasp-a01", "csrf", "session-security"]
+      "tags": [
+        "owasp-a01",
+        "csrf",
+        "session-security"
+      ]
     },
     {
       "id": "ts-nextjs-api-missing-auth",
@@ -249,20 +468,32 @@
       "framework": "next.js",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A Next.js API route handler file does not call any authentication function. In Next.js App Router, route.ts files export GET/POST handlers that execute server-side — they must validate the caller's identity explicitly. In Pages Router, pages/api/*.ts handlers are similarly unprotected. Auth can be handled via: getServerSession() from next-auth, auth() from Auth.js v5, currentUser() from Clerk, or a custom authenticate() function. Note: if auth is enforced globally via middleware.ts using withAuth or similar, this per-route finding can be suppressed. Note: no framework_identifiers gate is used — the route.ts and pages/api/*.ts file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
+      "description": "A Next.js API route handler file does not call any authentication function. In Next.js App Router, route.ts files export GET/POST handlers that execute server-side \u2014 they must validate the caller's identity explicitly. In Pages Router, pages/api/*.ts handlers are similarly unprotected. Auth can be handled via: getServerSession() from next-auth, auth() from Auth.js v5, currentUser() from Clerk, or a custom authenticate() function. Note: if auth is enforced globally via middleware.ts using withAuth or similar, this per-route finding can be suppressed. Note: no framework_identifiers gate is used \u2014 the route.ts and pages/api/*.ts file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
       "detection": {
         "check_type": "missing_annotation",
         "framework_identifiers": [],
         "annotation_patterns": [
-          "getServerSession", "getSession", "auth",
-          "withAuth*", "currentUser*", "currentUserId*",
-          "Auth*", "authenticate*",
-          "JWT*", "jwtVerify*",
-          "verifyToken*", "VerifyToken*",
-          "RequireAuth*", "requireAuth*",
-          "checkToken*", "checkAuth*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "clerkClient*", "getAuth*", "verifySession*"
+          "getServerSession",
+          "getSession",
+          "auth",
+          "withAuth*",
+          "currentUser*",
+          "currentUserId*",
+          "Auth*",
+          "authenticate*",
+          "JWT*",
+          "jwtVerify*",
+          "verifyToken*",
+          "VerifyToken*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "checkAuth*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "clerkClient*",
+          "getAuth*",
+          "verifySession*"
         ],
         "handler_file_patterns": [
           "*/route.ts",
@@ -271,7 +502,12 @@
         "scope": "file"
       },
       "message": "Next.js API route {file} does not call any authentication function. Use getServerSession(), auth(), currentUser(), or a custom authenticate() to verify caller identity. Suppress if auth is enforced globally via middleware.ts.",
-      "tags": ["owasp-a01", "auth", "next.js", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "next.js",
+        "production-critical"
+      ]
     },
     {
       "id": "ts-nextjs-missing-rate-limit",
@@ -280,18 +516,23 @@
       "framework": "next.js",
       "pattern_type": "rate_limiting",
       "severity": "HIGH",
-      "description": "A Next.js API route handler (TypeScript) does not apply rate limiting. App Router route.ts files and Pages Router pages/api/*.ts handlers are exposed to the internet and are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion without rate limiting. The primary pattern is per-route rate limiting via @upstash/ratelimit: import { Ratelimit } from '@upstash/ratelimit' and call ratelimit.limit() in the handler. Alternative libraries: next-rate-limit, express-rate-limit (via custom wrappers), or infrastructure-level limiting (Cloudflare, AWS WAF). Note: if rate limiting is enforced globally at the infrastructure layer for Vercel-deployed projects or via a CDN/load balancer, this per-route finding can be suppressed. Note: no framework_identifiers gate is used — the route.ts and pages/api/*.ts file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
+      "description": "A Next.js API route handler (TypeScript) does not apply rate limiting. App Router route.ts files and Pages Router pages/api/*.ts handlers are exposed to the internet and are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion without rate limiting. The primary pattern is per-route rate limiting via @upstash/ratelimit: import { Ratelimit } from '@upstash/ratelimit' and call ratelimit.limit() in the handler. Alternative libraries: next-rate-limit, express-rate-limit (via custom wrappers), or infrastructure-level limiting (Cloudflare, AWS WAF). Note: if rate limiting is enforced globally at the infrastructure layer for Vercel-deployed projects or via a CDN/load balancer, this per-route finding can be suppressed. Note: no framework_identifiers gate is used \u2014 the route.ts and pages/api/*.ts file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
       "detection": {
         "check_type": "missing_annotation",
         "framework_identifiers": [],
         "annotation_patterns": [
-          "rateLimit*", "RateLimit*",
+          "rateLimit*",
+          "RateLimit*",
           "Ratelimit*",
-          "rateLimiter*", "RateLimiter*",
-          "Throttle*", "throttle*",
-          "upstashRatelimit*", "createRatelimit*",
+          "rateLimiter*",
+          "RateLimiter*",
+          "Throttle*",
+          "throttle*",
+          "upstashRatelimit*",
+          "createRatelimit*",
           "withRateLimit*",
-          "limiter*", "Limiter*",
+          "limiter*",
+          "Limiter*",
           "createRateLimiter*"
         ],
         "handler_file_patterns": [
@@ -301,7 +542,12 @@
         "scope": "file"
       },
       "message": "Next.js API route {file} does not apply rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Suppress if rate limiting is enforced at the infrastructure layer (Vercel, Cloudflare, AWS WAF, or similar).",
-      "tags": ["owasp-a04", "rate-limiting", "next.js", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "next.js",
+        "availability"
+      ]
     },
     {
       "id": "ts-direct-db-import",
@@ -314,26 +560,46 @@
       "detection": {
         "check_type": "direct_import",
         "handler_file_patterns": [
-          "*router*.ts", "*/router/*.ts", "*/routers/*.ts",
-          "*route*.ts", "*/routes/*.ts", "*/route/*.ts",
-          "*controller*.ts", "*/controller/*.ts", "*/controllers/*.ts",
-          "*/api/*.ts", "*handler*.ts", "*/handlers/*.ts"
+          "*router*.ts",
+          "*/router/*.ts",
+          "*/routers/*.ts",
+          "*route*.ts",
+          "*/routes/*.ts",
+          "*/route/*.ts",
+          "*controller*.ts",
+          "*/controller/*.ts",
+          "*/controllers/*.ts",
+          "*/api/*.ts",
+          "*handler*.ts",
+          "*/handlers/*.ts"
         ],
         "forbidden_import_patterns": [
-          "pg", "pg/*",
-          "mysql", "mysql2", "mysql2/*",
+          "pg",
+          "pg/*",
+          "mysql",
+          "mysql2",
+          "mysql2/*",
           "mongoose",
-          "typeorm", "typeorm/*",
-          "sequelize", "sequelize/*",
+          "typeorm",
+          "typeorm/*",
+          "sequelize",
+          "sequelize/*",
           "@prisma/client",
-          "mongodb", "mongodb/*",
-          "redis", "ioredis",
-          "better-sqlite3", "sqlite3"
+          "mongodb",
+          "mongodb/*",
+          "redis",
+          "ioredis",
+          "better-sqlite3",
+          "sqlite3"
         ],
         "scope": "file"
       },
       "message": "File {file} appears to be a route/controller but directly imports database package '{target}'. Access data through a repository or service layer instead.",
-      "tags": ["architecture", "layer-violation", "testability"]
+      "tags": [
+        "architecture",
+        "layer-violation",
+        "testability"
+      ]
     },
     {
       "id": "js-express-missing-auth",
@@ -345,26 +611,59 @@
       "description": "A JavaScript file using Express registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible without authentication. Secure routes with app.use(authMiddleware) globally, or use router-level middleware: router.use(authenticate).",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["express"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "jwtVerify*",
-          "RequireAuth*", "requireAuth*", "checkToken*",
-          "Authorize*", "authorize*",
-          "BearerAuth*", "bearerAuth*",
-          "BasicAuth*", "basicAuth*",
-          "TokenAuth*", "validateToken*", "ValidateToken*",
-          "verifyToken*", "VerifyToken*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "passport*", "protect",
-          "sessionAuth*", "SessionAuth*",
-          "withAuth*", "checkAuth*"
+        "framework_identifiers": [
+          "express"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "jwtVerify*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "Authorize*",
+          "authorize*",
+          "BearerAuth*",
+          "bearerAuth*",
+          "BasicAuth*",
+          "basicAuth*",
+          "TokenAuth*",
+          "validateToken*",
+          "ValidateToken*",
+          "verifyToken*",
+          "VerifyToken*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "passport*",
+          "protect",
+          "sessionAuth*",
+          "SessionAuth*",
+          "withAuth*",
+          "checkAuth*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Express routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply app.use(authMiddleware) or router.use(authMiddleware) before route registration.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "js-express-missing-rate-limit",
@@ -376,22 +675,45 @@
       "description": "A JavaScript file using Express registers HTTP routes without rate limiting middleware. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["express"],
+        "framework_identifiers": [
+          "express"
+        ],
         "required_call_patterns": [
-          "RateLimit*", "rateLimit*", "rateLimiter*",
-          "Throttle*", "throttle*",
+          "RateLimit*",
+          "rateLimit*",
+          "rateLimiter*",
+          "Throttle*",
+          "throttle*",
           "slowDown*",
-          "createLimiter*", "createRateLimiter*",
-          "limiter*", "LimitKey*",
-          "PerSecond*", "PerMinute*",
+          "createLimiter*",
+          "createRateLimiter*",
+          "limiter*",
+          "LimitKey*",
+          "PerSecond*",
+          "PerMinute*",
           "expressRateLimit*"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Express routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add express-rate-limit via app.use(rateLimit({...})) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "js-express-missing-csrf",
@@ -403,21 +725,36 @@
       "description": "A JavaScript file using Express registers POST, PUT, DELETE, or PATCH routes without CSRF protection middleware. CSRF protection is required for web applications that use session cookies. Suppress if using token-based auth (JWT, Bearer).",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["express"],
+        "framework_identifiers": [
+          "express"
+        ],
         "required_call_patterns": [
-          "csrf*", "*Csrf*", "*CSRF*",
+          "csrf*",
+          "*Csrf*",
+          "*CSRF*",
           "doubleCsrf*",
           "csurf*",
           "lusca*",
           "csrfProtection*",
           "csrfMiddleware*"
         ],
-        "route_node_names": ["post", "put", "delete", "patch"],
-        "middleware_node_names": ["use"],
+        "route_node_names": [
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Express mutation routes (POST/PUT/DELETE/PATCH) without CSRF protection. {count}/{total} other file(s) in this package use CSRF protection. Apply csrf protection or suppress if using token-based auth.",
-      "tags": ["owasp-a01", "csrf", "session-security"]
+      "tags": [
+        "owasp-a01",
+        "csrf",
+        "session-security"
+      ]
     },
     {
       "id": "js-fastify-missing-auth",
@@ -429,24 +766,56 @@
       "description": "A JavaScript file using Fastify registers HTTP routes but does not apply authentication. All routes in this file are publicly accessible. Secure routes using Fastify hooks or JWT verification: fastify.addHook('preHandler', authenticate) or request.jwtVerify().",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["fastify"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "jwtVerify*", "verifyJWT*",
-          "RequireAuth*", "requireAuth*", "checkToken*",
-          "Authorize*", "authorize*",
-          "BearerAuth*", "bearerAuth*",
-          "TokenAuth*", "validateToken*", "ValidateToken*",
-          "verifyToken*", "VerifyToken*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "checkAuth*", "withAuth*",
-          "sessionAuth*", "SessionAuth*"
+        "framework_identifiers": [
+          "fastify"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options"],
-        "middleware_node_names": ["register", "addHook"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "jwtVerify*",
+          "verifyJWT*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "Authorize*",
+          "authorize*",
+          "BearerAuth*",
+          "bearerAuth*",
+          "TokenAuth*",
+          "validateToken*",
+          "ValidateToken*",
+          "verifyToken*",
+          "VerifyToken*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "checkAuth*",
+          "withAuth*",
+          "sessionAuth*",
+          "SessionAuth*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options"
+        ],
+        "middleware_node_names": [
+          "register",
+          "addHook"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Fastify routes without authentication. {count}/{total} other file(s) in this package use auth. Apply fastify.addHook('preHandler', authenticate) globally or use request.jwtVerify() per-route.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "js-fastify-missing-rate-limit",
@@ -458,20 +827,43 @@
       "description": "A JavaScript file using Fastify registers HTTP routes without rate limiting. Apply rate limiting via @fastify/rate-limit or apply at the infrastructure layer.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["fastify"],
-        "required_call_patterns": [
-          "RateLimit*", "rateLimit*", "rateLimiter*",
-          "Throttle*", "throttle*",
-          "createLimiter*", "createRateLimiter*",
-          "limiter*", "LimitKey*",
-          "PerSecond*", "PerMinute*"
+        "framework_identifiers": [
+          "fastify"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options"],
-        "middleware_node_names": ["register", "addHook"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "rateLimit*",
+          "rateLimiter*",
+          "Throttle*",
+          "throttle*",
+          "createLimiter*",
+          "createRateLimiter*",
+          "limiter*",
+          "LimitKey*",
+          "PerSecond*",
+          "PerMinute*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options"
+        ],
+        "middleware_node_names": [
+          "register",
+          "addHook"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Fastify routes without rate limiting. {count}/{total} other file(s) in this package apply rate limiting. Register @fastify/rate-limit or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "js-fastify-missing-csrf",
@@ -483,19 +875,35 @@
       "description": "A JavaScript file using Fastify registers POST, PUT, DELETE, or PATCH routes without CSRF protection. CSRF protection is required for web applications using session cookies. Suppress if using token-based auth.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["fastify"],
+        "framework_identifiers": [
+          "fastify"
+        ],
         "required_call_patterns": [
-          "csrf*", "*Csrf*", "*CSRF*",
+          "csrf*",
+          "*Csrf*",
+          "*CSRF*",
           "doubleCsrf*",
           "csrfProtection*",
           "csrfMiddleware*"
         ],
-        "route_node_names": ["post", "put", "delete", "patch"],
-        "middleware_node_names": ["register", "addHook"],
+        "route_node_names": [
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ],
+        "middleware_node_names": [
+          "register",
+          "addHook"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Fastify mutation routes (POST/PUT/DELETE/PATCH) without CSRF protection. {count}/{total} other file(s) in this package use CSRF protection. Register @fastify/csrf-protection or suppress if using token-based auth.",
-      "tags": ["owasp-a01", "csrf", "session-security"]
+      "tags": [
+        "owasp-a01",
+        "csrf",
+        "session-security"
+      ]
     },
     {
       "id": "js-koa-missing-auth",
@@ -507,26 +915,61 @@
       "description": "A JavaScript file using Koa registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible. Secure routes with app.use(authMiddleware) or router.use(authenticate).",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["koa", "@koa/router", "koa-router"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "jwtVerify*",
-          "RequireAuth*", "requireAuth*", "checkToken*",
-          "Authorize*", "authorize*",
-          "BearerAuth*", "bearerAuth*",
-          "BasicAuth*", "basicAuth*",
-          "TokenAuth*", "validateToken*", "ValidateToken*",
-          "verifyToken*", "VerifyToken*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "passport*", "protect",
-          "sessionAuth*", "SessionAuth*",
-          "withAuth*", "checkAuth*"
+        "framework_identifiers": [
+          "koa",
+          "@koa/router",
+          "koa-router"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "jwtVerify*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "Authorize*",
+          "authorize*",
+          "BearerAuth*",
+          "bearerAuth*",
+          "BasicAuth*",
+          "basicAuth*",
+          "TokenAuth*",
+          "validateToken*",
+          "ValidateToken*",
+          "verifyToken*",
+          "VerifyToken*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "passport*",
+          "protect",
+          "sessionAuth*",
+          "SessionAuth*",
+          "withAuth*",
+          "checkAuth*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Koa routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply router.use(authMiddleware) or app.use(authMiddleware).",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "js-koa-missing-rate-limit",
@@ -538,20 +981,45 @@
       "description": "A JavaScript file using Koa registers HTTP routes without rate limiting middleware. Apply rate limiting via koa-ratelimit or at the infrastructure layer.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["koa", "@koa/router", "koa-router"],
-        "required_call_patterns": [
-          "RateLimit*", "rateLimit*", "rateLimiter*",
-          "Throttle*", "throttle*",
-          "createLimiter*", "createRateLimiter*",
-          "limiter*", "LimitKey*",
-          "PerSecond*", "PerMinute*"
+        "framework_identifiers": [
+          "koa",
+          "@koa/router",
+          "koa-router"
         ],
-        "route_node_names": ["get", "post", "put", "delete", "patch", "head", "options", "all"],
-        "middleware_node_names": ["use"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "rateLimit*",
+          "rateLimiter*",
+          "Throttle*",
+          "throttle*",
+          "createLimiter*",
+          "createRateLimiter*",
+          "limiter*",
+          "LimitKey*",
+          "PerSecond*",
+          "PerMinute*"
+        ],
+        "route_node_names": [
+          "get",
+          "post",
+          "put",
+          "delete",
+          "patch",
+          "head",
+          "options",
+          "all"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Koa routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add rate limiting via app.use(ratelimit({...})) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "js-koa-missing-csrf",
@@ -563,19 +1031,36 @@
       "description": "A JavaScript file using Koa registers POST, PUT, DELETE, or PATCH routes without CSRF protection. CSRF protection is required for web applications using session cookies. Suppress if using token-based auth.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["koa", "@koa/router", "koa-router"],
+        "framework_identifiers": [
+          "koa",
+          "@koa/router",
+          "koa-router"
+        ],
         "required_call_patterns": [
-          "csrf*", "*Csrf*", "*CSRF*",
+          "csrf*",
+          "*Csrf*",
+          "*CSRF*",
           "doubleCsrf*",
           "csrfProtection*",
           "csrfMiddleware*"
         ],
-        "route_node_names": ["post", "put", "delete", "patch"],
-        "middleware_node_names": ["use"],
+        "route_node_names": [
+          "post",
+          "put",
+          "delete",
+          "patch"
+        ],
+        "middleware_node_names": [
+          "use"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Koa mutation routes (POST/PUT/DELETE/PATCH) without CSRF protection. {count}/{total} other file(s) in this package use CSRF protection. Use koa-csrf or suppress if using token-based auth.",
-      "tags": ["owasp-a01", "csrf", "session-security"]
+      "tags": [
+        "owasp-a01",
+        "csrf",
+        "session-security"
+      ]
     },
     {
       "id": "js-nextjs-api-missing-auth",
@@ -584,20 +1069,32 @@
       "framework": "next.js",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A Next.js API route handler (JavaScript) does not call any authentication function. App Router route.js files and Pages Router pages/api/*.js handlers must validate caller identity. Use getServerSession(), auth(), currentUser(), or a custom authenticate() function. Suppress if auth is enforced globally via middleware.js. Note: no framework_identifiers gate is used — the route.js and pages/api/*.js file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
+      "description": "A Next.js API route handler (JavaScript) does not call any authentication function. App Router route.js files and Pages Router pages/api/*.js handlers must validate caller identity. Use getServerSession(), auth(), currentUser(), or a custom authenticate() function. Suppress if auth is enforced globally via middleware.js. Note: no framework_identifiers gate is used \u2014 the route.js and pages/api/*.js file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient and avoid false negatives on minimal handlers with no next/* imports.",
       "detection": {
         "check_type": "missing_annotation",
         "framework_identifiers": [],
         "annotation_patterns": [
-          "getServerSession", "getSession", "auth",
-          "withAuth*", "currentUser*", "currentUserId*",
-          "Auth*", "authenticate*",
-          "JWT*", "jwtVerify*",
-          "verifyToken*", "VerifyToken*",
-          "RequireAuth*", "requireAuth*",
-          "checkToken*", "checkAuth*",
-          "isAuthenticated*", "ensureAuthenticated*",
-          "clerkClient*", "getAuth*", "verifySession*"
+          "getServerSession",
+          "getSession",
+          "auth",
+          "withAuth*",
+          "currentUser*",
+          "currentUserId*",
+          "Auth*",
+          "authenticate*",
+          "JWT*",
+          "jwtVerify*",
+          "verifyToken*",
+          "VerifyToken*",
+          "RequireAuth*",
+          "requireAuth*",
+          "checkToken*",
+          "checkAuth*",
+          "isAuthenticated*",
+          "ensureAuthenticated*",
+          "clerkClient*",
+          "getAuth*",
+          "verifySession*"
         ],
         "handler_file_patterns": [
           "*/route.js",
@@ -606,7 +1103,12 @@
         "scope": "file"
       },
       "message": "Next.js API route {file} does not call any authentication function. Use getServerSession(), auth(), currentUser(), or a custom authenticate() to verify caller identity. Suppress if auth is enforced globally via middleware.js.",
-      "tags": ["owasp-a01", "auth", "next.js", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "next.js",
+        "production-critical"
+      ]
     },
     {
       "id": "js-nextjs-missing-rate-limit",
@@ -615,18 +1117,23 @@
       "framework": "next.js",
       "pattern_type": "rate_limiting",
       "severity": "HIGH",
-      "description": "A Next.js API route handler (JavaScript) does not apply rate limiting. App Router route.js files and Pages Router pages/api/*.js handlers are exposed to the internet and are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion without rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Note: if rate limiting is enforced at the infrastructure layer for Vercel-deployed projects or via a CDN/load balancer, this per-route finding can be suppressed. Note: no framework_identifiers gate is used — the route.js and pages/api/*.js file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient.",
+      "description": "A Next.js API route handler (JavaScript) does not apply rate limiting. App Router route.js files and Pages Router pages/api/*.js handlers are exposed to the internet and are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion without rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Note: if rate limiting is enforced at the infrastructure layer for Vercel-deployed projects or via a CDN/load balancer, this per-route finding can be suppressed. Note: no framework_identifiers gate is used \u2014 the route.js and pages/api/*.js file naming conventions are Next.js-specific, so the handler_file_patterns alone are sufficient.",
       "detection": {
         "check_type": "missing_annotation",
         "framework_identifiers": [],
         "annotation_patterns": [
-          "rateLimit*", "RateLimit*",
+          "rateLimit*",
+          "RateLimit*",
           "Ratelimit*",
-          "rateLimiter*", "RateLimiter*",
-          "Throttle*", "throttle*",
-          "upstashRatelimit*", "createRatelimit*",
+          "rateLimiter*",
+          "RateLimiter*",
+          "Throttle*",
+          "throttle*",
+          "upstashRatelimit*",
+          "createRatelimit*",
           "withRateLimit*",
-          "limiter*", "Limiter*",
+          "limiter*",
+          "Limiter*",
           "createRateLimiter*"
         ],
         "handler_file_patterns": [
@@ -636,7 +1143,12 @@
         "scope": "file"
       },
       "message": "Next.js API route {file} does not apply rate limiting. Apply per-route rate limiting via @upstash/ratelimit or a similar library. Suppress if rate limiting is enforced at the infrastructure layer (Vercel, Cloudflare, AWS WAF, or similar).",
-      "tags": ["owasp-a04", "rate-limiting", "next.js", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "next.js",
+        "availability"
+      ]
     },
     {
       "id": "js-direct-db-import",
@@ -649,26 +1161,126 @@
       "detection": {
         "check_type": "direct_import",
         "handler_file_patterns": [
-          "*router*.js", "*/router/*.js", "*/routers/*.js",
-          "*route*.js", "*/routes/*.js", "*/route/*.js",
-          "*controller*.js", "*/controller/*.js", "*/controllers/*.js",
-          "*/api/*.js", "*handler*.js", "*/handlers/*.js"
+          "*router*.js",
+          "*/router/*.js",
+          "*/routers/*.js",
+          "*route*.js",
+          "*/routes/*.js",
+          "*/route/*.js",
+          "*controller*.js",
+          "*/controller/*.js",
+          "*/controllers/*.js",
+          "*/api/*.js",
+          "*handler*.js",
+          "*/handlers/*.js"
         ],
         "forbidden_import_patterns": [
-          "pg", "pg/*",
-          "mysql", "mysql2", "mysql2/*",
+          "pg",
+          "pg/*",
+          "mysql",
+          "mysql2",
+          "mysql2/*",
           "mongoose",
-          "typeorm", "typeorm/*",
-          "sequelize", "sequelize/*",
+          "typeorm",
+          "typeorm/*",
+          "sequelize",
+          "sequelize/*",
           "@prisma/client",
-          "mongodb", "mongodb/*",
-          "redis", "ioredis",
-          "better-sqlite3", "sqlite3"
+          "mongodb",
+          "mongodb/*",
+          "redis",
+          "ioredis",
+          "better-sqlite3",
+          "sqlite3"
         ],
         "scope": "file"
       },
       "message": "File {file} appears to be a route/controller but directly imports database package '{target}'. Access data through a repository or service layer instead.",
-      "tags": ["architecture", "layer-violation", "testability"]
+      "tags": [
+        "architecture",
+        "layer-violation",
+        "testability"
+      ]
+    },
+    {
+      "id": "ts-nestjs-missing-auth",
+      "name": "NestJS controller missing authentication guard",
+      "language": "typescript",
+      "framework": "nestjs",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A TypeScript NestJS controller defines routes but does not apply authentication guards.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": [
+          "@nestjs/common",
+          "@nestjs/core"
+        ],
+        "route_node_names": [
+          "Get",
+          "Post",
+          "Put",
+          "Delete",
+          "Patch",
+          "Controller"
+        ],
+        "required_call_patterns": [
+          "UseGuards*",
+          "AuthGuard*",
+          "JwtAuthGuard*",
+          "RolesGuard*",
+          "Auth*",
+          "authenticate*",
+          "ApiBearerAuth*",
+          "ApiSecurity*"
+        ],
+        "scope": "file"
+      },
+      "message": "File {file} defines NestJS routes without authentication guards. Apply @UseGuards(AuthGuard) at controller or route level.",
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "production-critical"
+      ]
+    },
+    {
+      "id": "js-nestjs-missing-auth",
+      "name": "NestJS controller missing authentication guard (JavaScript)",
+      "language": "javascript",
+      "framework": "nestjs",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A JavaScript NestJS controller defines routes but does not apply authentication guards.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": [
+          "@nestjs/common",
+          "@nestjs/core"
+        ],
+        "route_node_names": [
+          "Get",
+          "Post",
+          "Put",
+          "Delete",
+          "Patch",
+          "Controller"
+        ],
+        "required_call_patterns": [
+          "UseGuards*",
+          "AuthGuard*",
+          "JwtAuthGuard*",
+          "RolesGuard*",
+          "Auth*",
+          "authenticate*"
+        ],
+        "scope": "file"
+      },
+      "message": "File {file} defines NestJS routes without authentication guards.",
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "production-critical"
+      ]
     }
   ]
 }

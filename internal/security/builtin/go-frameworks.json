@@ -10,18 +10,55 @@
       "description": "A file using the chi router registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible without authentication. Secure routes with r.Use(authMiddleware) for global coverage or r.With(authMiddleware).Get(...) per-route. The chi middleware chain (Use/Group/With) is the standard pattern for applying cross-cutting concerns like auth.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["github.com/go-chi/chi/v5", "github.com/go-chi/chi"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "RequireAuth*", "checkToken",
-          "Authorize*", "BearerAuth", "BasicAuth", "TokenAuth",
-          "ValidateToken*", "VerifyToken*", "ParseToken", "SessionAuth*", "Verifier"
+        "framework_identifiers": [
+          "github.com/go-chi/chi/v5",
+          "github.com/go-chi/chi"
         ],
-        "route_node_names": ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "Handle", "HandleFunc", "Method", "Connect", "Trace"],
-        "middleware_node_names": ["Use", "Group", "With", "Route"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "RequireAuth*",
+          "checkToken",
+          "Authorize*",
+          "BearerAuth",
+          "BasicAuth",
+          "TokenAuth",
+          "ValidateToken*",
+          "VerifyToken*",
+          "ParseToken",
+          "SessionAuth*",
+          "Verifier"
+        ],
+        "route_node_names": [
+          "Get",
+          "Post",
+          "Put",
+          "Delete",
+          "Patch",
+          "Head",
+          "Options",
+          "Handle",
+          "HandleFunc",
+          "Method",
+          "Connect",
+          "Trace"
+        ],
+        "middleware_node_names": [
+          "Use",
+          "Group",
+          "With",
+          "Route"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers chi routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply r.Use(authMiddleware) before route registration, or r.With(authMiddleware).Get(path, handler) per-route.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "go-chi-missing-rate-limit",
@@ -33,17 +70,46 @@
       "description": "A file using the chi router registers HTTP routes without rate limiting middleware. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Apply r.Use(httprate.LimitKeyFunc(...)) or equivalent before route registration. Note: if rate limiting is enforced at the infrastructure layer (nginx, load balancer, API gateway), this finding can be suppressed.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["github.com/go-chi/chi/v5", "github.com/go-chi/chi"],
-        "required_call_patterns": [
-          "RateLimit*", "Throttle*", "NewLimiter", "LimitKey*",
-          "PerSecond", "PerMinute", "LimitHandler*", "rateLimiter", "httprate*"
+        "framework_identifiers": [
+          "github.com/go-chi/chi/v5",
+          "github.com/go-chi/chi"
         ],
-        "route_node_names": ["Get", "Post", "Put", "Delete", "Patch", "Head", "Options", "Handle", "HandleFunc", "Method"],
-        "middleware_node_names": ["Use", "Group", "With"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "Throttle*",
+          "NewLimiter",
+          "LimitKey*",
+          "PerSecond",
+          "PerMinute",
+          "LimitHandler*",
+          "rateLimiter",
+          "httprate*"
+        ],
+        "route_node_names": [
+          "Get",
+          "Post",
+          "Put",
+          "Delete",
+          "Patch",
+          "Head",
+          "Options",
+          "Handle",
+          "HandleFunc",
+          "Method"
+        ],
+        "middleware_node_names": [
+          "Use",
+          "Group",
+          "With"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers chi routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add r.Use(httprate.LimitKeyFunc(...)) or apply rate limiting at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "go-gin-missing-auth",
@@ -55,18 +121,49 @@
       "description": "A file using the gin framework registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible without authentication. Secure routes with r.Use(authMiddleware) globally, or use router groups: r.Group('/api', authMiddleware).GET(...). Gin middleware is applied via Use() on the engine or router groups.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["github.com/gin-gonic/gin"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "RequireAuth*", "checkToken",
-          "Authorize*", "BearerAuth", "BasicAuth", "TokenAuth",
-          "ValidateToken*", "VerifyToken*", "ParseToken", "SessionAuth*", "Verifier"
+        "framework_identifiers": [
+          "github.com/gin-gonic/gin"
         ],
-        "route_node_names": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "Handle", "Any"],
-        "middleware_node_names": ["Use", "Group"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "RequireAuth*",
+          "checkToken",
+          "Authorize*",
+          "BearerAuth",
+          "BasicAuth",
+          "TokenAuth",
+          "ValidateToken*",
+          "VerifyToken*",
+          "ParseToken",
+          "SessionAuth*",
+          "Verifier"
+        ],
+        "route_node_names": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE",
+          "PATCH",
+          "HEAD",
+          "OPTIONS",
+          "Handle",
+          "Any"
+        ],
+        "middleware_node_names": [
+          "Use",
+          "Group"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers gin routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply r.Use(authMiddleware) globally or use r.Group('/protected', authMiddleware).",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "go-gin-missing-rate-limit",
@@ -78,17 +175,42 @@
       "description": "A file using the gin framework registers HTTP routes without rate limiting middleware. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Apply rate limiting via r.Use(rateLimiterMiddleware) before route registration. Note: if rate limiting is enforced at the infrastructure layer, this finding can be suppressed.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["github.com/gin-gonic/gin"],
-        "required_call_patterns": [
-          "RateLimit*", "Throttle*", "NewLimiter", "LimitKey*",
-          "PerSecond", "PerMinute", "LimitHandler*", "rateLimiter"
+        "framework_identifiers": [
+          "github.com/gin-gonic/gin"
         ],
-        "route_node_names": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "Handle", "Any"],
-        "middleware_node_names": ["Use", "Group"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "Throttle*",
+          "NewLimiter",
+          "LimitKey*",
+          "PerSecond",
+          "PerMinute",
+          "LimitHandler*",
+          "rateLimiter"
+        ],
+        "route_node_names": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE",
+          "PATCH",
+          "HEAD",
+          "OPTIONS",
+          "Handle",
+          "Any"
+        ],
+        "middleware_node_names": [
+          "Use",
+          "Group"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers gin routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add a rate limiting middleware via r.Use(...) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "go-echo-missing-auth",
@@ -100,18 +222,51 @@
       "description": "A file using the Echo framework registers HTTP routes but does not apply authentication middleware. All routes in this file are publicly accessible without authentication. Secure routes with e.Use(middleware.JWT(secret)) globally, or use route groups: g := e.Group('/admin'); g.Use(authMiddleware). Echo middleware is applied via Use() on the Echo instance or groups.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["github.com/labstack/echo/v4", "github.com/labstack/echo"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "RequireAuth*", "checkToken",
-          "Authorize*", "BearerAuth", "BasicAuth", "TokenAuth",
-          "ValidateToken*", "VerifyToken*", "ParseToken", "SessionAuth*", "Verifier"
+        "framework_identifiers": [
+          "github.com/labstack/echo/v4",
+          "github.com/labstack/echo"
         ],
-        "route_node_names": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "Any", "Match", "Add"],
-        "middleware_node_names": ["Use", "Group"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "RequireAuth*",
+          "checkToken",
+          "Authorize*",
+          "BearerAuth",
+          "BasicAuth",
+          "TokenAuth",
+          "ValidateToken*",
+          "VerifyToken*",
+          "ParseToken",
+          "SessionAuth*",
+          "Verifier"
+        ],
+        "route_node_names": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE",
+          "PATCH",
+          "HEAD",
+          "OPTIONS",
+          "Any",
+          "Match",
+          "Add"
+        ],
+        "middleware_node_names": [
+          "Use",
+          "Group"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Echo routes without calling any authentication middleware. {count}/{total} other file(s) in this package use auth. Apply e.Use(middleware.JWT(secret)) globally or use e.Group('/protected', authMiddleware).",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "go-echo-missing-rate-limit",
@@ -123,17 +278,44 @@
       "description": "A file using the Echo framework registers HTTP routes without rate limiting middleware. Routes without rate limiting are vulnerable to credential stuffing and resource exhaustion. Apply e.Use(middleware.RateLimiter(...)) before route registration. Note: if rate limiting is enforced at the infrastructure layer, this finding can be suppressed.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["github.com/labstack/echo/v4", "github.com/labstack/echo"],
-        "required_call_patterns": [
-          "RateLimit*", "Throttle*", "NewLimiter", "LimitKey*",
-          "PerSecond", "PerMinute", "LimitHandler*", "rateLimiter"
+        "framework_identifiers": [
+          "github.com/labstack/echo/v4",
+          "github.com/labstack/echo"
         ],
-        "route_node_names": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "Any", "Match", "Add"],
-        "middleware_node_names": ["Use", "Group"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "Throttle*",
+          "NewLimiter",
+          "LimitKey*",
+          "PerSecond",
+          "PerMinute",
+          "LimitHandler*",
+          "rateLimiter"
+        ],
+        "route_node_names": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE",
+          "PATCH",
+          "HEAD",
+          "OPTIONS",
+          "Any",
+          "Match",
+          "Add"
+        ],
+        "middleware_node_names": [
+          "Use",
+          "Group"
+        ],
         "scope": "file"
       },
       "message": "File {file} registers Echo routes without rate limiting middleware. {count}/{total} other file(s) in this package apply rate limiting. Add e.Use(middleware.RateLimiter(...)) or apply at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
     },
     {
       "id": "go-nethttp-missing-auth",
@@ -142,22 +324,44 @@
       "framework": "net/http",
       "pattern_type": "auth_middleware",
       "severity": "CRITICAL",
-      "description": "A file calls http.HandleFunc to register net/http routes without wrapping handlers in authentication middleware. All registered routes are publicly accessible. Note: http.Handle (not http.HandleFunc) is intentionally excluded from detection — chi, gin, and echo all expose a Handle() router method and universally import net/http, so detecting Handle would produce false positives on framework-based projects. Secure routes using handler wrapping: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))), or validate auth inside each handler.",
+      "description": "A file calls http.HandleFunc to register net/http routes without wrapping handlers in authentication middleware. All registered routes are publicly accessible. Note: http.Handle (not http.HandleFunc) is intentionally excluded from detection \u2014 chi, gin, and echo all expose a Handle() router method and universally import net/http, so detecting Handle would produce false positives on framework-based projects. Secure routes using handler wrapping: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))), or validate auth inside each handler.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["net/http"],
-        "required_call_patterns": [
-          "Auth*", "authenticate", "JWT*", "RequireAuth*", "checkToken",
-          "Authorize*", "BearerAuth", "BasicAuth", "TokenAuth",
-          "ValidateToken*", "VerifyToken*", "ParseToken", "SessionAuth*", "Verifier",
-          "isAuthenticated", "IsAuthenticated", "checkAuth"
+        "framework_identifiers": [
+          "net/http"
         ],
-        "route_node_names": ["HandleFunc"],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate",
+          "JWT*",
+          "RequireAuth*",
+          "checkToken",
+          "Authorize*",
+          "BearerAuth",
+          "BasicAuth",
+          "TokenAuth",
+          "ValidateToken*",
+          "VerifyToken*",
+          "ParseToken",
+          "SessionAuth*",
+          "Verifier",
+          "isAuthenticated",
+          "IsAuthenticated",
+          "checkAuth"
+        ],
+        "route_node_names": [
+          "HandleFunc"
+        ],
         "middleware_node_names": [],
         "scope": "file"
       },
       "message": "File {file} calls http.HandleFunc without any authentication wrapper. {count}/{total} other file(s) in this package use auth. Wrap handlers: http.Handle('/path', AuthMiddleware(http.HandlerFunc(handler))) or validate auth inside each handler.",
-      "tags": ["owasp-a01", "auth", "middleware", "production-critical"]
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "middleware",
+        "production-critical"
+      ]
     },
     {
       "id": "go-nethttp-missing-rate-limit",
@@ -166,20 +370,116 @@
       "framework": "net/http",
       "pattern_type": "rate_limiting",
       "severity": "HIGH",
-      "description": "A file calls http.HandleFunc to register net/http routes without rate limiting. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Use http.Handle('/path', RateLimitMiddleware(handler)) or apply rate limiting at the infrastructure layer (nginx, API gateway, load balancer). Detection uses HandleFunc only as the route discriminator — see go-nethttp-missing-auth for why http.Handle is excluded.",
+      "description": "A file calls http.HandleFunc to register net/http routes without rate limiting. Routes without rate limiting are vulnerable to credential stuffing, enumeration attacks, and resource exhaustion. Use http.Handle('/path', RateLimitMiddleware(handler)) or apply rate limiting at the infrastructure layer (nginx, API gateway, load balancer). Detection uses HandleFunc only as the route discriminator \u2014 see go-nethttp-missing-auth for why http.Handle is excluded.",
       "detection": {
         "check_type": "missing_middleware",
-        "framework_identifiers": ["net/http"],
-        "required_call_patterns": [
-          "RateLimit*", "Throttle*", "NewLimiter", "LimitKey*",
-          "PerSecond", "PerMinute", "LimitHandler*", "rateLimiter", "httprate*"
+        "framework_identifiers": [
+          "net/http"
         ],
-        "route_node_names": ["HandleFunc"],
+        "required_call_patterns": [
+          "RateLimit*",
+          "Throttle*",
+          "NewLimiter",
+          "LimitKey*",
+          "PerSecond",
+          "PerMinute",
+          "LimitHandler*",
+          "rateLimiter",
+          "httprate*"
+        ],
+        "route_node_names": [
+          "HandleFunc"
+        ],
         "middleware_node_names": [],
         "scope": "file"
       },
       "message": "File {file} calls http.HandleFunc without rate limiting. {count}/{total} other file(s) in this package apply rate limiting. Wrap handlers with a rate limiter or apply rate limiting at the infrastructure layer.",
-      "tags": ["owasp-a04", "rate-limiting", "availability"]
+      "tags": [
+        "owasp-a04",
+        "rate-limiting",
+        "availability"
+      ]
+    },
+    {
+      "id": "go-gorilla-missing-auth",
+      "name": "Gorilla Mux route registered without authentication middleware",
+      "language": "go",
+      "framework": "gorilla/mux",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A Go file using gorilla/mux registers HTTP routes but does not apply authentication middleware.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": [
+          "github.com/gorilla/mux"
+        ],
+        "route_node_names": [
+          "HandleFunc",
+          "Handle",
+          "Methods",
+          "Path",
+          "PathPrefix"
+        ],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate*",
+          "requireAuth*",
+          "JWT*",
+          "TokenAuth*",
+          "BearerAuth*",
+          "SessionAuth*",
+          "middleware.Auth*",
+          "authMiddleware*"
+        ],
+        "scope": "file"
+      },
+      "message": "File {file} registers gorilla/mux routes without calling any authentication middleware. Apply middleware via r.Use() or per-route middleware chains.",
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "production-critical"
+      ]
+    },
+    {
+      "id": "go-fiber-missing-auth",
+      "name": "Fiber route registered without authentication middleware",
+      "language": "go",
+      "framework": "fiber",
+      "pattern_type": "auth_middleware",
+      "severity": "CRITICAL",
+      "description": "A Go file using Fiber registers HTTP routes but does not apply authentication middleware.",
+      "detection": {
+        "check_type": "missing_middleware",
+        "framework_identifiers": [
+          "github.com/gofiber/fiber"
+        ],
+        "route_node_names": [
+          "Get",
+          "Post",
+          "Put",
+          "Delete",
+          "Patch",
+          "All"
+        ],
+        "required_call_patterns": [
+          "Auth*",
+          "authenticate*",
+          "JWT*",
+          "requireAuth*",
+          "BasicAuth*",
+          "BearerAuth*",
+          "middleware.Auth*",
+          "jwtware*",
+          "keyauth*"
+        ],
+        "scope": "file"
+      },
+      "message": "File {file} registers Fiber routes without calling any authentication middleware. Apply via app.Use() or route groups.",
+      "tags": [
+        "owasp-a01",
+        "auth",
+        "production-critical"
+      ]
     }
   ]
 }

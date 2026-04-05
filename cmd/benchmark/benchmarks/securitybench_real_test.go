@@ -154,9 +154,34 @@ func TestSecurityBench_RealRepo_SecDevLabs_Go(t *testing.T) {
 
 	engine := security.DefaultEngine()
 	serverFile := filepath.Join(repoDir, "app/server.go")
+	if resolved, err := filepath.EvalSymlinks(serverFile); err == nil {
+		serverFile = resolved
+	}
 	if _, err := os.Stat(serverFile); os.IsNotExist(err) {
 		t.Skip("server.go not found")
 	}
+
+	// Debug: check imports and callees for server.go
+	nodes := g.FindByFile(serverFile)
+	t.Logf("FindByFile = %d nodes", len(nodes))
+	for _, n := range nodes {
+		if n.Type == graph.NodeFile {
+			for _, e := range g.OutEdges(n.ID) {
+				if e.Type == graph.EdgeImports {
+					imp := g.GetNode(e.To)
+					if imp != nil {
+						t.Logf("  IMPORT: %s", imp.Name)
+					}
+				}
+			}
+		}
+		if (n.Type == graph.NodeFunction || n.Type == graph.NodeMethod) {
+			if uc, ok := n.Metadata["unresolved_callees"]; ok && uc != "" {
+				t.Logf("  FN %s unresolved: %s", n.Name, uc[:min(200, len(uc))])
+			}
+		}
+	}
+
 	content, _ := os.ReadFile(serverFile)
 	violations := engine.CheckFile(g, serverFile, content)
 	t.Logf("Violations in server.go: %d", len(violations))
