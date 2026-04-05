@@ -1239,6 +1239,78 @@ func (r *Reporter) PrintSecurityBenchSummary(result *SecurityBenchReport) {
 	fmt.Println("═══════════════════════════════════════════════════════")
 }
 
+// ── ConventionBench ───────────────────────────────────────────────────────
+
+// ConventionBenchReport holds results from the ConventionBench suite.
+type ConventionBenchReport struct {
+	Timestamp  string      `json:"timestamp"`
+	TotalCases int         `json:"total_cases"`
+	Precision  float64     `json:"precision"`
+	Recall     float64     `json:"recall"`
+	F1         float64     `json:"f1"`
+	Cases      interface{} `json:"cases"`
+}
+
+// WriteConventionBench writes JSON + Markdown results.
+func (r *Reporter) WriteConventionBench(result *ConventionBenchReport) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("conventionbench_%s.json", ts))
+	if err := writeJSON(jsonPath, result); err != nil {
+		return err
+	}
+	fmt.Printf("Results written: %s\n", jsonPath)
+	return nil
+}
+
+// PrintConventionBenchSummary prints a console summary.
+func (r *Reporter) PrintConventionBenchSummary(result *ConventionBenchReport) {
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Println("  ConventionBench  |  SynapsesBench Suite C")
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Printf("  Cases:     %d\n", result.TotalCases)
+	fmt.Printf("  Precision: %.1f%%\n", result.Precision)
+	fmt.Printf("  Recall:    %.1f%%\n", result.Recall)
+	fmt.Printf("  F1:        %.1f%%\n", result.F1)
+	fmt.Println("═══════════════════════════════════════════════════════")
+}
+
+// ── MemoryBench ───────────────────────────────────────────────────────────
+
+// MemoryBenchReport holds results from the MemoryBench suite.
+type MemoryBenchReport struct {
+	Timestamp    string      `json:"timestamp"`
+	TotalCases   int         `json:"total_cases"`
+	TotalWarm    int         `json:"total_warm"`
+	TotalCold    int         `json:"total_cold"`
+	DeliveryRate float64     `json:"delivery_rate"`
+	Cases        interface{} `json:"cases"`
+}
+
+// WriteMemoryBench writes JSON results.
+func (r *Reporter) WriteMemoryBench(result *MemoryBenchReport) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("memorybench_%s.json", ts))
+	if err := writeJSON(jsonPath, result); err != nil {
+		return err
+	}
+	fmt.Printf("Results written: %s\n", jsonPath)
+	return nil
+}
+
+// PrintMemoryBenchSummary prints a console summary.
+func (r *Reporter) PrintMemoryBenchSummary(result *MemoryBenchReport) {
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Println("  MemoryBench  |  SynapsesBench Suite B")
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Printf("  Scenarios:      %d\n", result.TotalCases)
+	fmt.Printf("  Warm hits:      %d\n", result.TotalWarm)
+	fmt.Printf("  Cold hits:      %d\n", result.TotalCold)
+	fmt.Printf("  Delivery rate:  %.1f%%\n", result.DeliveryRate)
+	fmt.Println("═══════════════════════════════════════════════════════")
+}
+
 func securityBenchMarkdown(result *SecurityBenchReport) string {
 	var sb strings.Builder
 	sb.WriteString("# SecurityBench Results\n\n")

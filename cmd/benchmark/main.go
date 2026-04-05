@@ -13,6 +13,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -342,7 +343,7 @@ func main() {
 	case "securitybench", "security-bench", "security_bench":
 		sbData := "securitybench.jsonl"
 		if *cbDataFile != "contextbench.jsonl" {
-			sbData = *cbDataFile // allow override via --cb-data (reuse flag)
+			sbData = *cbDataFile
 		}
 		sbResult, err := benchmarks.RunSecurityBench(sbData)
 		if err != nil {
@@ -352,6 +353,81 @@ func main() {
 			log.Fatalf("write results: %v", err)
 		}
 		rep.PrintSecurityBenchSummary(sbResult)
+
+	case "conventionbench", "convention-bench", "convention_bench":
+		cbResult, err := benchmarks.RunConventionBench()
+		if err != nil {
+			log.Fatalf("conventionbench failed: %v", err)
+		}
+		if err := rep.WriteConventionBench(cbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintConventionBenchSummary(cbResult)
+
+	case "memorybench", "memory-bench", "memory_bench":
+		mbResult, err := benchmarks.RunMemoryBench()
+		if err != nil {
+			log.Fatalf("memorybench failed: %v", err)
+		}
+		if err := rep.WriteMemoryBench(mbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintMemoryBenchSummary(mbResult)
+
+	case "synapsebench", "synapses-bench", "synapses_bench":
+		// Run all 3 suites.
+		log.Println("Running SynapsesBench (all 3 suites)...")
+
+		sbData := "securitybench.jsonl"
+		sbResult, err := benchmarks.RunSecurityBench(sbData)
+		if err != nil {
+			log.Printf("WARNING: securitybench failed: %v", err)
+		} else {
+			rep.WriteSecurityBench(sbResult)
+			rep.PrintSecurityBenchSummary(sbResult)
+		}
+
+		cbResult, err := benchmarks.RunConventionBench()
+		if err != nil {
+			log.Printf("WARNING: conventionbench failed: %v", err)
+		} else {
+			rep.WriteConventionBench(cbResult)
+			rep.PrintConventionBenchSummary(cbResult)
+		}
+
+		mbResult, err := benchmarks.RunMemoryBench()
+		if err != nil {
+			log.Printf("WARNING: memorybench failed: %v", err)
+		} else {
+			rep.WriteMemoryBench(mbResult)
+			rep.PrintMemoryBenchSummary(mbResult)
+		}
+
+		// Composite score.
+		fmt.Println()
+		fmt.Println("═══════════════════════════════════════════════════════")
+		fmt.Println("  SynapsesBench Composite Score")
+		fmt.Println("═══════════════════════════════════════════════════════")
+		secScore := float64(0)
+		memScore := float64(0)
+		convScore := float64(0)
+		if sbResult != nil {
+			secScore = sbResult.YoudenIndex
+			fmt.Printf("  Security (Youden):    %.1f%%\n", secScore)
+		}
+		if mbResult != nil {
+			memScore = mbResult.DeliveryRate
+			fmt.Printf("  Memory (Delivery):    %.1f%%\n", memScore)
+		}
+		if cbResult != nil {
+			convScore = cbResult.F1
+			fmt.Printf("  Convention (F1):      %.1f%%\n", convScore)
+		}
+		composite := 0.4*secScore + 0.3*memScore + 0.3*convScore
+		fmt.Printf("  ─────────────────────────────────\n")
+		fmt.Printf("  COMPOSITE:            %.1f%%\n", composite)
+		fmt.Printf("  (0.4×Security + 0.3×Memory + 0.3×Convention)\n")
+		fmt.Println("═══════════════════════════════════════════════════════")
 
 	default:
 		log.Fatalf("unknown benchmark %q", *benchmarkName)
