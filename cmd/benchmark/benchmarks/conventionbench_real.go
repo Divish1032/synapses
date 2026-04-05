@@ -235,28 +235,24 @@ func detectGoConventions(repoDir string) []DetectedConvention {
 	goFiles := findFiles(repoDir, "*.go")
 
 	testifyCount := countFilesContaining(testFiles, "testify")
-	gomockCount := countFilesContaining(testFiles, "gomock")
-	stdlibTestCount := countFilesContaining(testFiles, "testing.T")
 
+	// Testing pattern key from observation pipeline: "go_test_files_touched"
+	// (testingPatternObservations counts _test.go files, not specific libraries).
+	// Library-specific keys (uses_testify) come from libraryUsageObservations
+	// which requires graph import edges.
+	if len(testFiles) > 5 {
+		conventions = append(conventions, DetectedConvention{
+			Category: store.ObsCategoryTestingPattern,
+			Key:      "go_test_files_touched",
+			Evidence: fmt.Sprintf("%d test files in repo", len(testFiles)),
+		})
+	}
+	// testify is detected via libraryUsageObservations (import scanning).
 	if testifyCount > len(testFiles)/3 && testifyCount > 5 {
 		conventions = append(conventions, DetectedConvention{
-			Category: store.ObsCategoryTestingPattern,
+			Category: store.ObsCategoryLibraryUsage,
 			Key:      "uses_testify",
 			Evidence: fmt.Sprintf("%d/%d test files use testify", testifyCount, len(testFiles)),
-		})
-	}
-	if gomockCount > len(testFiles)/5 && gomockCount > 3 {
-		conventions = append(conventions, DetectedConvention{
-			Category: store.ObsCategoryTestingPattern,
-			Key:      "uses_gomock",
-			Evidence: fmt.Sprintf("%d/%d test files use gomock", gomockCount, len(testFiles)),
-		})
-	}
-	if stdlibTestCount > len(testFiles)/2 {
-		conventions = append(conventions, DetectedConvention{
-			Category: store.ObsCategoryTestingPattern,
-			Key:      "uses_stdlib_testing",
-			Evidence: fmt.Sprintf("%d/%d test files use stdlib testing", stdlibTestCount, len(testFiles)),
 		})
 	}
 
@@ -265,24 +261,25 @@ func detectGoConventions(repoDir string) []DetectedConvention {
 	ginCount := countFilesContaining(goFiles, "gin-gonic/gin")
 	echoCount := countFilesContaining(goFiles, "labstack/echo")
 
+	// Keys MUST match wellKnownLibraries in session_observations.go.
 	if chiCount > 3 {
 		conventions = append(conventions, DetectedConvention{
 			Category: store.ObsCategoryLibraryUsage,
-			Key:      "uses_chi",
+			Key:      "uses_chi_router",
 			Evidence: fmt.Sprintf("%d files import chi", chiCount),
 		})
 	}
 	if ginCount > 3 {
 		conventions = append(conventions, DetectedConvention{
 			Category: store.ObsCategoryLibraryUsage,
-			Key:      "uses_gin",
+			Key:      "uses_gin_router",
 			Evidence: fmt.Sprintf("%d files import gin", ginCount),
 		})
 	}
 	if echoCount > 3 {
 		conventions = append(conventions, DetectedConvention{
 			Category: store.ObsCategoryLibraryUsage,
-			Key:      "uses_echo",
+			Key:      "uses_echo_router",
 			Evidence: fmt.Sprintf("%d files import echo", echoCount),
 		})
 	}
