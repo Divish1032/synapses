@@ -381,6 +381,8 @@ func parseTaskBenchJSONL(data string, instanceIDs []string) ([]BenchTask, error)
 func buildTaskBenchPrompt(task BenchTask) string {
 	return fmt.Sprintf(`You are an expert software engineer. Fix the following issue in the %s repository.
 
+The repository is located in the CURRENT WORKING DIRECTORY. Do NOT look for /testbed/ or any other path. Use relative paths from the current directory.
+
 ## Issue
 
 %s
@@ -389,15 +391,18 @@ func buildTaskBenchPrompt(task BenchTask) string {
 
 1. Understand the problem by reading the relevant code
 2. Identify the root cause
-3. Make the minimal, targeted fix using Write/Edit
+3. Make the minimal, targeted fix using Write/Edit tools (NOT Bash echo/cat)
 4. Verify your fix makes sense — do NOT introduce regressions
 5. Do NOT modify test files
+6. Do NOT run git commit — leave changes as uncommitted modifications
 
 Make the smallest change that correctly fixes the issue. Do not refactor unrelated code.`, task.Repo, task.ProblemStatement)
 }
 
 func buildFeatureBenchPrompt(task BenchTask) string {
 	return fmt.Sprintf(`You are an expert software engineer. Implement the following feature in the %s repository.
+
+The repository is located in the CURRENT WORKING DIRECTORY. Do NOT look for /testbed/ or any other path. Use relative paths from the current directory.
 
 ## Feature Request
 
@@ -407,9 +412,10 @@ func buildFeatureBenchPrompt(task BenchTask) string {
 
 1. Read the relevant source code to understand the architecture and existing patterns
 2. Implement the feature following the project's coding conventions
-3. Write clean, well-structured code using Write/Edit
+3. Write clean, well-structured code using Write/Edit tools (NOT Bash echo/cat)
 4. Ensure your implementation does not break existing functionality
 5. Do NOT modify test files — the tests define the expected behavior
+6. Do NOT run git commit — leave changes as uncommitted modifications
 
 Implement the feature completely. Follow the project's patterns for naming, structure, and error handling.`, task.Repo, task.ProblemStatement)
 }
@@ -430,11 +436,32 @@ Do NOT skip these tools. They provide cross-file intelligence (callers, imports,
 func setupTaskBenchSynapses(repoDir, port string) {
 	synapsesBin := findSynapsesBin()
 
-	// Pre-warm: run `synapses start` once to register the project with the
-	// daemon and wait for indexing. This ensures the per-project Unix socket
-	// exists BEFORE Claude launches its MCP subprocess. Without this, Claude's
-	// MCP handshake times out while the daemon is still indexing.
-	log.Printf("  pre-warming Synapses for %s...", filepath.Base(repoDir))
+	// Index the project explicitly with a blocking CLI command.
+	// Without indexing, Synapses is in "knowledge mode" (no code graph) and
+	// search/get_context/get_impact tools are NOT AVAILABLE — the agent
+	// correctly falls back to Bash grep. The daemon's async indexing is too
+	// slow for benchmark use; `synapses index` is synchronous and reliable.
+	log.Printf("  indexing %s with Synapses...", filepath.Base(repoDir))
+	indexStart := time.Now()
+	indexCmd := exec.Command(synapsesBin, "index", "--path", repoDir)
+	indexOut, indexErr := indexCmd.CombinedOutput()
+	if indexErr != nil {
+		log.Printf("  index failed: %v (output: %s)", indexErr, string(indexOut)[:minStr(200, len(indexOut))])
+	} else {
+		log.Printf("  indexing complete in %s", time.Since(indexStart).Round(time.Second))
+	}
+
+	// Restart the daemon so it picks up the fresh index.
+	// The daemon caches project graphs in memory. If it was accessed before
+	// indexing (e.g., from a previous run), it holds an empty graph. A restart
+	// forces it to reload from the now-populated SQLite DB.
+	log.Printf("  restarting daemon to load fresh index...")
+	restartDaemonForBench()
+	time.Sleep(5 * time.Second)
+
+	// Pre-warm MCP: register the project with the daemon so the per-project
+	// server exists BEFORE Claude launches its MCP subprocess.
+	log.Printf("  pre-warming MCP connection...")
 	warmCmd := exec.Command(synapsesBin, "start", "--path", repoDir)
 	warmCmd.Stdin = strings.NewReader(
 		"{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"id\":1,\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"bench-warmup\",\"version\":\"1.0\"}}}\n")
@@ -447,11 +474,20 @@ func setupTaskBenchSynapses(repoDir, port string) {
 	select {
 	case <-warmDone:
 		log.Printf("  pre-warm complete")
-	case <-time.After(90 * time.Second):
+	case <-time.After(30 * time.Second):
 		if warmCmd.Process != nil {
 			warmCmd.Process.Kill()
 		}
-		log.Printf("  pre-warm timed out (90s) — continuing anyway")
+		log.Printf("  pre-warm timed out (30s) — continuing")
+	}
+
+	// Verify the project is in full mode (not knowledge mode).
+	daemonURL := fmt.Sprintf("http://127.0.0.1:%s", port)
+	files := checkIndexedFiles(daemonURL, repoDir)
+	if files > 0 {
+		log.Printf("  verified: daemon sees %d files (full mode)", files)
+	} else {
+		log.Printf("  WARNING: daemon reports 0 files — may be in knowledge mode")
 	}
 
 	// .mcp.json — stdio transport.
@@ -466,10 +502,59 @@ func setupTaskBenchSynapses(repoDir, port string) {
 }`, synapsesBin, repoDir)
 	os.WriteFile(filepath.Join(repoDir, ".mcp.json"), []byte(mcpJSON), 0o644)
 
-	// .claude/settings.json — auto-approve tools.
+	// ── Hook scripts ──────────────────────────────────────────────────────
 	claudeDir := filepath.Join(repoDir, ".claude")
-	os.MkdirAll(claudeDir, 0o755)
-	settingsJSON := `{
+	hooksDir := filepath.Join(claudeDir, "hooks")
+	os.MkdirAll(hooksDir, 0o755)
+
+	// 1. PreToolUse gate: block first Grep/Glob call, redirect to Synapses search.
+	// Matches the codebase-memory-mcp "block once, then allow" pattern.
+	gateScript := `#!/usr/bin/env bash
+# Synapses discovery gate — blocks first Grep/Glob per session,
+# redirects agent to mcp__synapses__search.
+GATE_FILE="/tmp/synapses-gate-$PPID"
+if [ ! -f "$GATE_FILE" ]; then
+  touch "$GATE_FILE"
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"STOP: Use mcp__synapses__search or mcp__synapses__get_context instead of Grep/Glob. Synapses tools provide cross-file relationships, callers, and security constraints that grep cannot. Call mcp__synapses__search(query=\"your search terms\") first. After that, Grep/Glob will be allowed."}}' >&2
+  exit 2
+fi
+exit 0
+`
+	gatePath := filepath.Join(hooksDir, "synapses-discovery-gate")
+	os.WriteFile(gatePath, []byte(gateScript), 0o755)
+
+	// 2. SessionStart hook: inject tool protocol into Claude's context.
+	// stdout from SessionStart hooks goes directly into Claude's visible context.
+	sessionScript := `#!/usr/bin/env bash
+cat << 'PROTOCOL'
+## Synapses Code Intelligence — ACTIVE
+
+You have Synapses MCP tools connected. They provide cross-file intelligence that file reading alone cannot.
+
+**REQUIRED workflow for this task:**
+1. FIRST: mcp__synapses__session_init(agent_id="implementer", intent="feature implementation") — project context
+2. SEARCH: mcp__synapses__search(query="...") — Use INSTEAD OF Grep/Glob for finding code
+3. CONTEXT: mcp__synapses__get_context(entity="Name", intent="modify") — relationships, callers, signatures
+4. IMPACT: mcp__synapses__get_impact(symbol="Name") — blast radius before editing
+5. VALIDATE: mcp__synapses__validate(phase="post", files_written="[...]") — check after editing
+
+Do NOT skip step 1. Do NOT use Grep/Glob when mcp__synapses__search is available.
+PROTOCOL
+`
+	sessionPath := filepath.Join(hooksDir, "synapses-session-start")
+	os.WriteFile(sessionPath, []byte(sessionScript), 0o755)
+
+	// 3. PostToolUse hook: validate after Write/Edit (if synapses binary works).
+	postScript := fmt.Sprintf(`#!/usr/bin/env bash
+# Run Synapses post-write validation. Always exit 0 (never block Claude).
+%s validate --scope post_write --path %q < /dev/stdin 2>/dev/null || true
+exit 0
+`, synapsesBin, repoDir)
+	postPath := filepath.Join(hooksDir, "synapses-post-write")
+	os.WriteFile(postPath, []byte(postScript), 0o755)
+
+	// ── .claude/settings.json — permissions + hooks ───────────────────────
+	settingsJSON := fmt.Sprintf(`{
   "permissions": {
     "allow": [
       "mcp__synapses__*",
@@ -478,9 +563,104 @@ func setupTaskBenchSynapses(repoDir, port string) {
       "Write(*)",
       "Edit(*)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "%s"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "%s"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "%s"
+          }
+        ]
+      }
+    ]
   }
-}`
+}`, gatePath, sessionPath, postPath)
 	os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settingsJSON), 0o644)
+
+	// ── .claude/CLAUDE.md — tool guidance ─────────────────────────────────
+	claudeMD := `# Synapses Code Intelligence
+
+## Tools Available (Use INSTEAD OF native tools)
+
+| Instead of | Use | Why |
+|-----------|-----|-----|
+| Grep/Glob | mcp__synapses__search | Returns ranked results with relationships, not just text matches |
+| Reading many files | mcp__synapses__get_context | Gives entity signatures, callers, and constraints in one call |
+| Manual impact analysis | mcp__synapses__get_impact | Shows blast radius across entire codebase |
+
+## Workflow
+
+1. Start with mcp__synapses__session_init
+2. Use mcp__synapses__search for discovery
+3. Use mcp__synapses__get_context for each entity you modify
+4. Use mcp__synapses__get_impact before changes
+5. Use mcp__synapses__validate after changes
+`
+	os.WriteFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte(claudeMD), 0o644)
+}
+
+// checkIndexedFiles queries session_init to check how many files are indexed.
+// Returns 0 if the project is in knowledge mode (no graph).
+func checkIndexedFiles(daemonURL, repoDir string) int {
+	body := `{"agent_id":"bench-poll","intent":"check","scope":"full"}`
+	reqURL := fmt.Sprintf("%s/v1/tools/session_init?project=%s",
+		daemonURL, strings.ReplaceAll(repoDir, " ", "%20"))
+	resp, err := http.Post(reqURL, "application/json", strings.NewReader(body))
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&result) != nil || len(result.Content) == 0 {
+		return 0
+	}
+
+	// Parse the JSON text looking for "files" count in knowledge_graph section.
+	var parsed map[string]interface{}
+	if json.Unmarshal([]byte(result.Content[0].Text), &parsed) != nil {
+		return 0
+	}
+	if kg, ok := parsed["knowledge_graph"].(map[string]interface{}); ok {
+		if f, ok := kg["files"].(float64); ok {
+			return int(f)
+		}
+	}
+	if gs, ok := parsed["graph_stats"].(map[string]interface{}); ok {
+		if f, ok := gs["files"].(float64); ok {
+			return int(f)
+		}
+	}
+	return 0
 }
 
 // ─── Eval ───────────────────────────────────────────────────────────────────
