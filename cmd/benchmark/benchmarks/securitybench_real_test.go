@@ -300,6 +300,24 @@ func TestSecurityBench_RealRepo_VAmPI(t *testing.T) {
 		}
 	}
 
+	// CONFIG SIGNAL: VAmPI uses Connexion with OpenAPI YAML spec.
+	// The graph-based engine can't see YAML-defined routes.
+	// The config scanner checks the OpenAPI spec directly.
+	specFile := filepath.Join(repoDir, "openapi_specs/openapi3.yml")
+	if _, err := os.Stat(specFile); err == nil {
+		specContent, _ := os.ReadFile(specFile)
+		configViolations := security.CheckConfigFile(specFile, specContent)
+		t.Logf("Config scanner violations on OpenAPI spec: %d", len(configViolations))
+		for _, v := range configViolations {
+			t.Logf("  [%s] %s — %s", v.Severity, v.Target, v.Evidence[:min(80, len(v.Evidence))])
+		}
+		if len(configViolations) > 0 {
+			t.Logf("CONFIG SCANNER WORKS: detected %d unsecured endpoints in OpenAPI spec", len(configViolations))
+		} else {
+			t.Error("CONFIG SCANNER FAILED: VAmPI OpenAPI spec has known unsecured endpoints")
+		}
+	}
+
 	// Check for hardcoded secret in config
 	configFile := filepath.Join(repoDir, "config.py")
 	if _, err := os.Stat(configFile); err == nil {
