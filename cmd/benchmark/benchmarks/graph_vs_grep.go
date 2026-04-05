@@ -210,25 +210,51 @@ func grepForFunction(repoDir, funcName string) map[string]bool {
 	files := map[string]bool{}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" {
-			files[line] = true
+		if line == "" {
+			continue
 		}
+		// Resolve symlinks to match graph paths (macOS /tmp → /private/tmp).
+		if resolved, err := filepath.EvalSymlinks(line); err == nil {
+			line = resolved
+		}
+		files[line] = true
 	}
 	return files
 }
 
+func init() {
+	// Ensure scoreResults also normalizes paths.
+}
+
+
 func scoreResults(found map[string]bool, expected map[string]bool) (tp, fp, fn int) {
-	for f := range found {
-		if expected[f] {
+	// Normalize all paths by resolving symlinks for fair comparison.
+	normFound := normalizePaths(found)
+	normExpected := normalizePaths(expected)
+
+	for f := range normFound {
+		if normExpected[f] {
 			tp++
 		} else {
 			fp++
 		}
 	}
-	for f := range expected {
-		if !found[f] {
+	for f := range normExpected {
+		if !normFound[f] {
 			fn++
 		}
 	}
 	return
+}
+
+func normalizePaths(paths map[string]bool) map[string]bool {
+	normalized := make(map[string]bool, len(paths))
+	for p := range paths {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			normalized[resolved] = true
+		} else {
+			normalized[p] = true
+		}
+	}
+	return normalized
 }
