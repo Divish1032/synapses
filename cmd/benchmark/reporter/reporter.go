@@ -1311,6 +1311,42 @@ func (r *Reporter) PrintMemoryBenchSummary(result *MemoryBenchReport) {
 	fmt.Println("═══════════════════════════════════════════════════════")
 }
 
+// ── FailureBench ──────────────────────────────────────────────────────────
+
+// FailureBenchReport holds results from the Failure Avoidance benchmark.
+type FailureBenchReport struct {
+	Timestamp      string      `json:"timestamp"`
+	TotalQueries   int         `json:"total_queries"`
+	SeededMemories int         `json:"seeded_memories"`
+	AvgRecall      float64     `json:"avg_recall"`
+	MRR            float64     `json:"mrr"`
+	Cases          interface{} `json:"cases"`
+}
+
+// WriteFailureBench writes JSON results.
+func (r *Reporter) WriteFailureBench(result *FailureBenchReport) error {
+	ts := strings.ReplaceAll(result.Timestamp, ":", "-")
+	jsonPath := filepath.Join(r.dir, fmt.Sprintf("failurebench_%s.json", ts))
+	if err := writeJSON(jsonPath, result); err != nil {
+		return err
+	}
+	fmt.Printf("Results written: %s\n", jsonPath)
+	return nil
+}
+
+// PrintFailureBenchSummary prints a console summary.
+func (r *Reporter) PrintFailureBenchSummary(result *FailureBenchReport) {
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Println("  FailureBench  |  Pain Point #1: Agent Repeats Mistakes")
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Printf("  Queries:          %d\n", result.TotalQueries)
+	fmt.Printf("  Seeded memories:  %d (from real sprint reflections)\n", result.SeededMemories)
+	fmt.Printf("  Avg Recall:       %.1f%%\n", result.AvgRecall)
+	fmt.Printf("  MRR (top-1 hit):  %.1f%%\n", result.MRR)
+	fmt.Println("═══════════════════════════════════════════════════════")
+}
+
 func securityBenchMarkdown(result *SecurityBenchReport) string {
 	var sb strings.Builder
 	sb.WriteString("# SecurityBench Results\n\n")

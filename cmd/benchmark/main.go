@@ -354,6 +354,16 @@ func main() {
 		}
 		rep.PrintSecurityBenchSummary(sbResult)
 
+	case "failurebench", "failure-bench", "failure_bench":
+		fbResult, err := benchmarks.RunFailureBench()
+		if err != nil {
+			log.Fatalf("failurebench failed: %v", err)
+		}
+		if err := rep.WriteFailureBench(fbResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintFailureBenchSummary(fbResult)
+
 	case "conventionbench", "convention-bench", "convention_bench":
 		cbResult, err := benchmarks.RunConventionBench()
 		if err != nil {
@@ -374,9 +384,39 @@ func main() {
 		}
 		rep.PrintMemoryBenchSummary(mbResult)
 
+	case "credentialbench", "credential-bench", "credential_bench":
+		crResult, err := benchmarks.RunCredentialBench()
+		if err != nil {
+			log.Fatalf("credentialbench failed: %v", err)
+		}
+		if err := rep.WriteSecurityBench(crResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintSecurityBenchSummary(crResult)
+
+	case "continuitybench", "continuity-bench", "continuity_bench":
+		ctResult, err := benchmarks.RunContinuityBench()
+		if err != nil {
+			log.Fatalf("continuitybench failed: %v", err)
+		}
+		if err := rep.WriteMemoryBench(ctResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintMemoryBenchSummary(ctResult)
+
+	case "realconventionbench", "real-convention-bench":
+		rcResult, err := benchmarks.RunRealConventionBench()
+		if err != nil {
+			log.Fatalf("realconventionbench failed: %v", err)
+		}
+		if err := rep.WriteConventionBench(rcResult); err != nil {
+			log.Fatalf("write results: %v", err)
+		}
+		rep.PrintConventionBenchSummary(rcResult)
+
 	case "synapsebench", "synapses-bench", "synapses_bench":
-		// Run all 3 suites.
-		log.Println("Running SynapsesBench (all 3 suites)...")
+		// Run all 4 pain-point benchmarks.
+		log.Println("Running SynapsesBench v3 (4 pain-point benchmarks)...")
 
 		sbData := "securitybench.jsonl"
 		sbResult, err := benchmarks.RunSecurityBench(sbData)
@@ -403,30 +443,64 @@ func main() {
 			rep.PrintMemoryBenchSummary(mbResult)
 		}
 
-		// Composite score.
+		// Pain Point #1: Failure Avoidance
+		failResult, err := benchmarks.RunFailureBench()
+		if err != nil {
+			log.Printf("WARNING: failurebench failed: %v", err)
+		} else {
+			rep.WriteFailureBench(failResult)
+			rep.PrintFailureBenchSummary(failResult)
+		}
+
+		// Pain Point #3: Credential Detection
+		credResult, err := benchmarks.RunCredentialBench()
+		if err != nil {
+			log.Printf("WARNING: credentialbench failed: %v", err)
+		} else {
+			rep.WriteSecurityBench(credResult)
+			rep.PrintSecurityBenchSummary(credResult)
+		}
+
+		// Pain Point #4: Session Continuity
+		contResult, err := benchmarks.RunContinuityBench()
+		if err != nil {
+			log.Printf("WARNING: continuitybench failed: %v", err)
+		} else {
+			rep.WriteMemoryBench(contResult)
+			rep.PrintMemoryBenchSummary(contResult)
+		}
+
+		// Composite score — pain-point aligned.
 		fmt.Println()
 		fmt.Println("═══════════════════════════════════════════════════════")
-		fmt.Println("  SynapsesBench Composite Score")
+		fmt.Println("  SynapsesBench v3 — Pain Point Scores")
 		fmt.Println("═══════════════════════════════════════════════════════")
-		secScore := float64(0)
-		memScore := float64(0)
-		convScore := float64(0)
-		if sbResult != nil {
-			secScore = sbResult.YoudenIndex
-			fmt.Printf("  Security (Youden):    %.1f%%\n", secScore)
-		}
-		if mbResult != nil {
-			memScore = mbResult.DeliveryRate
-			fmt.Printf("  Memory (Delivery):    %.1f%%\n", memScore)
+		var scores []float64
+		if failResult != nil {
+			fmt.Printf("  #1 Failure Avoidance (Recall):  %.1f%%\n", failResult.AvgRecall)
+			scores = append(scores, failResult.AvgRecall)
 		}
 		if cbResult != nil {
-			convScore = cbResult.F1
-			fmt.Printf("  Convention (F1):      %.1f%%\n", convScore)
+			fmt.Printf("  #2 Convention Accuracy (F1):    %.1f%%\n", cbResult.F1)
+			scores = append(scores, cbResult.F1)
 		}
-		composite := 0.4*secScore + 0.3*memScore + 0.3*convScore
+		if credResult != nil {
+			fmt.Printf("  #3 Credential Detection (F1):   %.1f%%\n", credResult.F1)
+			scores = append(scores, credResult.F1)
+		}
+		if contResult != nil {
+			fmt.Printf("  #4 Session Continuity (Delta):  %.1f%%\n", contResult.DeliveryRate)
+			scores = append(scores, contResult.DeliveryRate)
+		}
+		composite := float64(0)
+		if len(scores) > 0 {
+			for _, s := range scores {
+				composite += s
+			}
+			composite /= float64(len(scores))
+		}
 		fmt.Printf("  ─────────────────────────────────\n")
-		fmt.Printf("  COMPOSITE:            %.1f%%\n", composite)
-		fmt.Printf("  (0.4×Security + 0.3×Memory + 0.3×Convention)\n")
+		fmt.Printf("  COMPOSITE (avg):       %.1f%%\n", composite)
 		fmt.Println("═══════════════════════════════════════════════════════")
 
 	default:
