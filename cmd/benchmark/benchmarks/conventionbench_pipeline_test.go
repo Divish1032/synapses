@@ -55,31 +55,37 @@ func TestConventionPipeline_RealRepo(t *testing.T) {
 	// Simulate by adding file nodes with import edges for known libraries.
 	simulateGraphImports(g, repoDir, goFiles[:min(50, len(goFiles))])
 
-	// Simulate 5 sessions, each touching different files from the repo.
+	// Simulate 5 sessions, each touching DIVERSE files from the repo.
+	// Include files from handlers, store, tests, and files that import known libraries.
+	// This ensures library_usage observations are generated.
 	for session := 0; session < 5; session++ {
 		sessionID := fmt.Sprintf("sim-sess-%d", session)
 
-		// Pick files for this session (different slice per session).
-		start := session * 10
-		end := start + 10
-		if end > len(goFiles) {
-			end = len(goFiles)
-		}
-		if start >= end {
-			start = 0
-			end = min(10, len(goFiles))
-		}
-		sessionFiles := goFiles[start:end]
+		// Pick a diverse mix: source files + test files + handler files.
+		var sessionFiles []string
 
-		// Also include some test files.
-		testStart := session * 5
-		testEnd := testStart + 5
+		// Add test files (different slice per session) — triggers testing_pattern.
+		testStart := session * 8
+		testEnd := testStart + 8
 		if testEnd > len(testFiles) {
 			testEnd = len(testFiles)
 		}
 		if testStart < testEnd {
 			sessionFiles = append(sessionFiles, testFiles[testStart:testEnd]...)
 		}
+
+		// Add source files that import known libraries (for library_usage detection).
+		// Scan a different range per session to get diverse imports.
+		srcStart := session * 15
+		srcEnd := srcStart + 15
+		if srcEnd > len(goFiles) {
+			srcEnd = len(goFiles)
+		}
+		if srcStart >= srcEnd {
+			srcStart = 0
+			srcEnd = min(15, len(goFiles))
+		}
+		sessionFiles = append(sessionFiles, goFiles[srcStart:srcEnd]...)
 
 		// Make paths relative (like the real observation pipeline expects).
 		var relFiles []string

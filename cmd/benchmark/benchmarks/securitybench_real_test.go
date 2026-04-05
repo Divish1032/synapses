@@ -8,6 +8,7 @@ import (
 
 	"github.com/SynapsesOS/synapses/internal/graph"
 	"github.com/SynapsesOS/synapses/internal/parser"
+	"github.com/SynapsesOS/synapses/internal/resolver"
 	"github.com/SynapsesOS/synapses/internal/security"
 )
 
@@ -98,14 +99,31 @@ func TestSecurityBench_RealRepo_GoTestBench(t *testing.T) {
 		}
 	}
 
-	// KNOWN GAP: Security engine requires CALLS edges (function → callee) to detect
-	// missing middleware. The parser extracts DEFINES edges but NOT call-site edges
-	// for Go files. Until Sprint 31.3 (call resolution) ships, this is expected.
+	// KNOWN GAP: The resolver creates CALLS edges only for package-qualified calls
+	// (e.g., foo.Bar()). Method calls on local variables (r.Get(), r.Post()) are
+	// parsed as raw call sites but NOT resolved into CALLS edges.
+	//
+	// Verify raw call sites exist (parser does extract them):
+	rawCalls := g.PeekCallSites()
+	chiRouteCalls := 0
+	for _, cs := range rawCalls {
+		if strings.HasSuffix(cs.CallerFile, "servechi.go") {
+			if cs.FuncName == "Get" || cs.FuncName == "Post" || cs.FuncName == "Use" ||
+				cs.FuncName == "Handle" || cs.FuncName == "Route" {
+				chiRouteCalls++
+			}
+		}
+	}
+	t.Logf("Raw call sites for chi route methods: %d (parser sees them, resolver can't resolve)", chiRouteCalls)
+
 	if !hasAuthFinding {
-		t.Log("KNOWN GAP: go-chi-missing-auth not detected — parser missing call-site edges (Sprint 31.3)")
+		t.Log("KNOWN GAP: go-chi-missing-auth — resolver can't resolve r.Get() method calls. Sprint 31.3 needed.")
 	}
 	if !hasRateLimitFinding {
-		t.Log("KNOWN GAP: go-chi-missing-rate-limit not detected — parser missing call-site edges (Sprint 31.3)")
+		t.Log("KNOWN GAP: go-chi-missing-rate-limit — same root cause.")
+	}
+	if chiRouteCalls > 0 {
+		t.Logf("PARSER WORKS: %d route method calls parsed but not resolved into CALLS edges", chiRouteCalls)
 	}
 
 	// Also check files that SHOULDN'T fire (true negatives).
@@ -203,5 +221,12 @@ func parseRepo(repoDir string) (*graph.Graph, error) {
 	if _, err := w.WalkDir(g, absDir); err != nil {
 		return nil, err
 	}
+
+	// CRITICAL: resolve call edges. Without this, only DEFINES edges exist.
+	// The security engine needs CALLS edges to detect missing middleware
+	// (e.g., RegisterRoutes → Get/Post but NOT → Use/AuthMiddleware).
+	n := resolver.ResolveCallEdges(g)
+	_ = n // used for logging if needed
+
 	return g, nil
 }

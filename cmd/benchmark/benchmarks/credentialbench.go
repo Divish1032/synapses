@@ -149,16 +149,16 @@ var jwtSecret = []byte("super_secret_jwt_signing_key_2024")`,
 
 		{ID: "db-url-python", Language: "python", File: "/project/settings.py",
 			Content: `DATABASE_URL = "postgresql://admin:p@ssw0rd@production-db.example.com:5432/myapp"`,
-			HasCreds: true},
+			HasCreds: true}, // NOTE: DB URL credential detection requires pattern for connection strings
 
 		{ID: "private-key-go", Language: "go", File: "/project/crypto.go",
 			Content: `package crypto
 var privateKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA..."`,
-			HasCreds: true},
+			HasCreds: true}, // NOTE: PEM key detection requires pattern for -----BEGIN
 
 		{ID: "slack-webhook-py", Language: "python", File: "/project/notify.py",
 			Content: `SLACK_WEBHOOK = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"`,
-			HasCreds: true},
+			HasCreds: true}, // NOTE: Slack webhook detection requires URL-based pattern
 
 		// ── True Negatives: safe patterns ────────────────────────
 		{ID: "env-var-go", Language: "go", File: "/project/config.go",
