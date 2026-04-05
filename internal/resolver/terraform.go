@@ -61,7 +61,7 @@ func ResolveTerraformRefs(g *graph.Graph) int {
 //   - "data.aws_ami.ubuntu"    for data source nodes
 //   - "module.vpc"             for module nodes
 func buildTerraformRefIndex(g *graph.Graph) map[string]graph.NodeID {
-	nodes := g.AllNodes()
+	nodes := g.AllNodesUnsorted()
 	index := make(map[string]graph.NodeID, len(nodes)/4)
 	for _, n := range nodes {
 		if n.Domain != graph.DomainInfra {

@@ -58,6 +58,13 @@ func ResolveCallEdges(g *graph.Graph) int {
 	methodIndex := buildMethodIndex(pkgIndex) // derived from pkgIndex, no graph scan
 	nameIdx := buildPkgNameIndex(pkgIndex)    // O(1) name lookup per package
 
+	// Global name registry: funcName → []NodeID across ALL packages.
+	// Used as a last-resort fallback for C/C++ where import-based resolution
+	// fails because #include creates file→header edges, not directory-level
+	// package edges. Guarded by isCLike() to avoid false positives in
+	// languages with proper module systems.
+	globalNameRegistry := buildGlobalNameRegistry(pkgIndex)
+
 	// RTA: collect which types are explicitly instantiated across the project.
 	// nil means no instantiation data (e.g. pure Go project) — CHA behavior used.
 	instantiated := g.GetInstantiatedTypes()
@@ -67,9 +74,25 @@ func ResolveCallEdges(g *graph.Graph) int {
 	// fallback: if child.method() is not found, try parent.method().
 	inheritanceMap := buildInheritanceMap(g)
 
-	// Track edges added in this batch. Existing edges checked via g.HasEdge.
+	// Pre-transitivize: for each class, compute the full list of ancestors
+	// (transitive closure). This turns findByInheritedMethod from BFS per
+	// call site into a simple slice iteration — O(ancestors) not O(depth×BFS).
+	transitiveAncestors := buildTransitiveAncestors(inheritanceMap)
+
+	// Track edges added in this batch. Collected into a slice and bulk-inserted
+	// at the end to minimise lock acquisitions on the graph.
 	type edgeKey struct{ from, to graph.NodeID }
 	seen := make(map[edgeKey]bool)
+
+	// Pre-populate seen from existing CALLS edges so we don't double-count
+	// edges that were already in the graph before this resolver pass.
+	g.IterateEdges(func(e *graph.Edge) {
+		if e.Type == graph.EdgeCalls {
+			seen[edgeKey{e.From, e.To}] = true
+		}
+	})
+
+	var pendingEdges []*graph.Edge
 	resolved := 0
 
 	for _, site := range sites {
@@ -108,14 +131,14 @@ func ResolveCallEdges(g *graph.Graph) int {
 					isSuperCall := site.PkgAlias == "super" || originalAlias == "super"
 					if isSuperCall {
 						// super.method() — skip the current class, start from parent.
-						if id := findByInheritedMethod(methodIndex, inheritanceMap, className, site.FuncName, true); id != "" {
+						if id := findByInheritedMethod(methodIndex, transitiveAncestors, className, site.FuncName, true); id != "" {
 							targets = []graph.NodeID{id}
 						}
 					} else {
 						// this.method() — try current class first, then walk parents.
 						if id := findByTypedMethod(methodIndex, className, site.FuncName); id != "" {
 							targets = []graph.NodeID{id}
-						} else if id := findByInheritedMethod(methodIndex, inheritanceMap, className, site.FuncName, false); id != "" {
+						} else if id := findByInheritedMethod(methodIndex, transitiveAncestors, className, site.FuncName, false); id != "" {
 							targets = []graph.NodeID{id}
 						}
 					}
@@ -159,7 +182,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 							break
 						}
 						// Inheritance fallback: type may inherit the method from a parent.
-						if id := findByInheritedMethod(methodIndex, inheritanceMap, typeName, site.FuncName, false); id != "" {
+						if id := findByInheritedMethod(methodIndex, transitiveAncestors, typeName, site.FuncName, false); id != "" {
 							targets = []graph.NodeID{id}
 							break
 						}
@@ -187,7 +210,7 @@ func ResolveCallEdges(g *graph.Graph) int {
 							targets = []graph.NodeID{id}
 							break
 						}
-						if id := findByInheritedMethod(methodIndex, inheritanceMap, typeName, site.FuncName, false); id != "" {
+						if id := findByInheritedMethod(methodIndex, transitiveAncestors, typeName, site.FuncName, false); id != "" {
 							targets = []graph.NodeID{id}
 							break
 						}
@@ -266,13 +289,23 @@ func ResolveCallEdges(g *graph.Graph) int {
 			}
 		}
 
+		// C/C++ global registry fallback: if import-based and package-based
+		// resolution found nothing, and the caller is a C/C++ file, try the
+		// global name registry. This catches cross-directory calls common in
+		// C codebases (e.g. kernel/sched.c calling a function defined in mm/page_alloc.c
+		// that was declared in include/linux/mm.h).
+		if len(targets) == 0 && isCLikeFile(site.CallerFile) &&
+			!ambiguousUnqualified[strings.ToLower(site.FuncName)] {
+			targets = globalNameRegistry[site.FuncName]
+		}
+
 		for _, targetID := range targets {
 			key := edgeKey{site.CallerID, targetID}
-			if seen[key] || g.HasEdge(site.CallerID, targetID, graph.EdgeCalls) {
+			if seen[key] {
 				continue // deduplicate: same function may call the same target multiple times
 			}
 			seen[key] = true
-			g.AddEdge(&graph.Edge{
+			pendingEdges = append(pendingEdges, &graph.Edge{
 				From: site.CallerID,
 				To:   targetID,
 				Type: graph.EdgeCalls,
@@ -280,6 +313,9 @@ func ResolveCallEdges(g *graph.Graph) int {
 			resolved++
 		}
 	}
+
+	// Bulk-insert all resolved edges in a single lock acquisition.
+	g.BulkAddEdges(pendingEdges)
 
 	return resolved
 }
@@ -483,12 +519,13 @@ func findByTypedMethod(methodIndex map[string]graph.NodeID, typeName, methodName
 func buildInheritanceMap(g *graph.Graph) map[string][]string {
 	result := make(map[string][]string)
 	seen := make(map[string]map[string]bool) // dedup parents per class name
-	for _, n := range g.AllNodes() {
+	// Use IterateNodes (O(N), no alloc/sort) instead of AllNodes (O(N log N)).
+	g.IterateNodes(func(n *graph.Node) {
 		if n.Type != graph.NodeStruct && n.Type != graph.NodeInterface {
-			continue
+			return
 		}
 		if n.Metadata == nil {
-			continue
+			return
 		}
 		var parents []string
 		if ext := n.Metadata["heritage_extends"]; ext != "" {
@@ -498,7 +535,7 @@ func buildInheritanceMap(g *graph.Graph) map[string][]string {
 			parents = append(parents, strings.Split(impl, ",")...)
 		}
 		if len(parents) == 0 {
-			continue
+			return
 		}
 		if seen[n.Name] == nil {
 			seen[n.Name] = make(map[string]bool)
@@ -506,49 +543,117 @@ func buildInheritanceMap(g *graph.Graph) map[string][]string {
 		for _, p := range parents {
 			p = strings.TrimSpace(p)
 			if p == "" || p == n.Name {
-				continue // skip self-references and empty
+				return // skip self-references and empty
 			}
 			if !seen[n.Name][p] {
 				seen[n.Name][p] = true
 				result[n.Name] = append(result[n.Name], p)
 			}
 		}
+	})
+	return result
+}
+
+// buildTransitiveAncestors pre-computes the full ancestor list for each class
+// in the inheritance hierarchy. This is a one-time O(classes × avgDepth) pass
+// that replaces per-call-site BFS in findByInheritedMethod.
+func buildTransitiveAncestors(inheritanceMap map[string][]string) map[string][]string {
+	result := make(map[string][]string, len(inheritanceMap))
+	// Memoized DFS with cycle detection.
+	var resolve func(name string, visited map[string]bool) []string
+	resolve = func(name string, visited map[string]bool) []string {
+		if cached, ok := result[name]; ok {
+			return cached
+		}
+		if visited[name] {
+			return nil // cycle
+		}
+		visited[name] = true
+		parents := inheritanceMap[name]
+		if len(parents) == 0 {
+			result[name] = nil
+			return nil
+		}
+		var all []string
+		seen := make(map[string]bool)
+		for _, p := range parents {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			all = append(all, p)
+			for _, gp := range resolve(p, visited) {
+				if !seen[gp] {
+					seen[gp] = true
+					all = append(all, gp)
+				}
+			}
+		}
+		result[name] = all
+		return all
+	}
+	for name := range inheritanceMap {
+		resolve(name, make(map[string]bool))
 	}
 	return result
 }
 
-// findByInheritedMethod walks the inheritance chain to find a method defined
-// on a parent class. If skipSelf is true (super.method() calls), starts from
-// the parents directly; otherwise tries the class itself first (already done
-// by caller) then walks parents.
-// Guards against circular inheritance with a visited set (max depth 10).
+// findByInheritedMethod uses the pre-computed transitive ancestor list to find
+// a method defined on a parent class. O(ancestors) per call instead of BFS.
+// If skipSelf is true (super.method() calls), starts from the parents directly.
 func findByInheritedMethod(
 	methodIndex map[string]graph.NodeID,
-	inheritanceMap map[string][]string,
+	transitiveAncestors map[string][]string,
 	className, methodName string,
 	skipSelf bool,
 ) graph.NodeID {
-	visited := make(map[string]bool)
-	if skipSelf {
-		visited[className] = true
+	ancestors := transitiveAncestors[className]
+	if !skipSelf {
+		// Caller already checked className.methodName — just walk ancestors.
+		_ = skipSelf
 	}
-	// BFS through inheritance chain.
-	queue := inheritanceMap[className]
-	for depth := 0; len(queue) > 0 && depth < 10; depth++ {
-		var next []string
-		for _, parent := range queue {
-			if visited[parent] {
-				continue
-			}
-			visited[parent] = true
-			if id := methodIndex[parent+"."+methodName]; id != "" {
-				return id
-			}
-			next = append(next, inheritanceMap[parent]...)
+	for _, parent := range ancestors {
+		if id := methodIndex[parent+"."+methodName]; id != "" {
+			return id
 		}
-		queue = next
 	}
 	return ""
+}
+
+// buildGlobalNameRegistry builds a funcName → []NodeID map across ALL packages.
+// This is the "registry" approach used by codebase-memory-mcp: every function
+// definition is indexed by its bare name, enabling cross-directory resolution
+// for C/C++ where the import system doesn't carry package-level information.
+//
+// Only plain function names (no dots/colons) are indexed — method-style names
+// are already handled by the method index. Returns at most 3 targets per name
+// to limit false positives on common names.
+func buildGlobalNameRegistry(pkgIndex map[string][]*graph.Node) map[string][]graph.NodeID {
+	registry := make(map[string][]graph.NodeID)
+	for _, nodes := range pkgIndex {
+		for _, n := range nodes {
+			// Skip qualified names (methods) — handled by methodIndex.
+			if strings.ContainsAny(n.Name, ".:") {
+				continue
+			}
+			name := n.Name
+			if existing := registry[name]; len(existing) < 3 {
+				registry[name] = append(existing, n.ID)
+			}
+		}
+	}
+	return registry
+}
+
+// isCLikeFile returns true for C, C++, and Objective-C files where
+// the global registry fallback is appropriate.
+func isCLikeFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm":
+		return true
+	}
+	return false
 }
 
 // ResolveGoMethodDefinesEdges adds DEFINES edges from struct nodes to their

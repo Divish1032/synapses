@@ -125,12 +125,12 @@ func resolveGoTypesCalls(g *graph.Graph, fset *token.FileSet, pkgs []*packages.P
 		line int
 	}
 	posToNode := make(map[posKey]graph.NodeID, g.NodeCount())
-	for _, n := range g.AllNodes() {
+	g.IterateNodes(func(n *graph.Node) {
 		switch n.Type {
 		case graph.NodeFunction, graph.NodeMethod:
 			posToNode[posKey{n.File, n.Line}] = n.ID
 		}
-	}
+	})
 
 	type edgeKey struct{ from, to graph.NodeID }
 	seen := make(map[edgeKey]bool)
@@ -216,7 +216,7 @@ func resolveGoTypesImplements(g *graph.Graph, fset *token.FileSet, pkgs []*packa
 	ifaceByQual := make(map[string]graph.NodeID)
 	ifaceByName := make(map[string]graph.NodeID)
 
-	for _, n := range g.AllNodes() {
+	g.IterateNodes(func(n *graph.Node) {
 		switch n.Type {
 		case graph.NodeStruct:
 			posToStruct[posKey{n.File, n.Line}] = n.ID
@@ -228,7 +228,7 @@ func resolveGoTypesImplements(g *graph.Graph, fset *token.FileSet, pkgs []*packa
 				ifaceByQual[n.Package+"."+n.Name] = n.ID
 			}
 		}
-	}
+	})
 
 	// Collect all interface types found in the loaded packages.
 	type ifaceEntry struct {

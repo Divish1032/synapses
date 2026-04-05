@@ -119,6 +119,115 @@ func New(repoID string) *Graph {
 	}
 }
 
+// NewLightweight creates a minimal Graph for per-file parsing. It skips the
+// subgraph cache and stable-ID storage that are only needed on the main graph.
+// Use MergeFileGraph to fold a lightweight graph into the main graph after parsing.
+func NewLightweight(repoID string) *Graph {
+	return &Graph{
+		repoID:   repoID,
+		nodes:    make(map[NodeID]*Node, 64),
+		outEdges: make(map[NodeID][]*Edge, 64),
+		inEdges:  make(map[NodeID][]*Edge, 64),
+		edgeSet:  make(map[edgeKey]struct{}, 64),
+	}
+}
+
+// MergeFileGraph merges a per-file lightweight graph into the main graph in a
+// single lock acquisition. This is the fast path for parallel parsing: each
+// goroutine writes to its own mini-graph (zero contention), then merges here.
+// The other graph must NOT be used concurrently — no locking is done on it.
+func (g *Graph) MergeFileGraph(other *Graph) {
+	if len(other.nodes) == 0 {
+		return
+	}
+
+	// Dedup strings and generate stable IDs outside the lock.
+	for _, n := range other.nodes {
+		if n.StableID == "" {
+			n.StableID = generateStableID()
+		}
+		dedupNodeStrings(n)
+	}
+
+	g.mu.Lock()
+
+	// Merge nodes.
+	for id, n := range other.nodes {
+		g.nodes[id] = n
+	}
+
+	// Merge edges.
+	for _, edges := range other.outEdges {
+		for _, e := range edges {
+			ek := edgeKey{From: e.From, To: e.To, Type: e.Type}
+			if _, exists := g.edgeSet[ek]; exists {
+				continue
+			}
+			if _, ok := g.nodes[e.From]; !ok {
+				continue
+			}
+			if _, ok := g.nodes[e.To]; !ok {
+				continue
+			}
+			g.edgeSet[ek] = struct{}{}
+			g.outEdges[e.From] = append(g.outEdges[e.From], e)
+			g.inEdges[e.To] = append(g.inEdges[e.To], e)
+		}
+	}
+
+	// Merge call sites.
+	if len(other.callSites) > 0 {
+		g.callSites = append(g.callSites, other.callSites...)
+	}
+
+	// Merge terraform refs.
+	if len(other.terraformRefs) > 0 {
+		g.terraformRefs = append(g.terraformRefs, other.terraformRefs...)
+	}
+
+	// Merge varTypes.
+	for file, vars := range other.varTypes {
+		if g.varTypes == nil {
+			g.varTypes = make(map[string]map[string]string)
+		}
+		if g.varTypes[file] == nil {
+			g.varTypes[file] = make(map[string]string, len(vars))
+		}
+		for k, v := range vars {
+			g.varTypes[file][k] = v
+		}
+	}
+
+	// Merge importAliases.
+	for file, aliases := range other.importAliases {
+		if g.importAliases == nil {
+			g.importAliases = make(map[string]map[string]string)
+		}
+		if g.importAliases[file] == nil {
+			g.importAliases[file] = make(map[string]string, len(aliases))
+		}
+		for k, v := range aliases {
+			g.importAliases[file][k] = v
+		}
+	}
+
+	// Merge instantiatedTypes.
+	for file, types := range other.instantiatedTypes {
+		if g.instantiatedTypes == nil {
+			g.instantiatedTypes = make(map[string]map[string]bool)
+		}
+		if g.instantiatedTypes[file] == nil {
+			g.instantiatedTypes[file] = make(map[string]bool, len(types))
+		}
+		for k := range types {
+			g.instantiatedTypes[file][k] = true
+		}
+	}
+
+	g.piCache = nil
+	g.mu.Unlock()
+}
+
 // RepoID returns the repository identifier this graph was built for.
 func (g *Graph) RepoID() string {
 	return g.repoID
@@ -964,7 +1073,9 @@ func (g *Graph) GetInstantiatedTypes() map[string]bool {
 	return result
 }
 
-// AllNodes returns a snapshot of every node in the graph.
+// AllNodes returns a snapshot of every node in the graph, sorted by NodeID
+// for deterministic output. Prefer IterateNodes or AllNodesUnsorted on hot
+// paths where ordering does not matter — this method is O(N log N).
 func (g *Graph) AllNodes() []*Node {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -973,6 +1084,18 @@ func (g *Graph) AllNodes() []*Node {
 		out = append(out, n)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// AllNodesUnsorted returns a snapshot of every node without sorting.
+// O(N) — use this instead of AllNodes when deterministic order is not needed.
+func (g *Graph) AllNodesUnsorted() []*Node {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make([]*Node, 0, len(g.nodes))
+	for _, n := range g.nodes {
+		out = append(out, n)
+	}
 	return out
 }
 
@@ -1092,6 +1215,18 @@ func (g *Graph) AllEdges() []*Edge {
 		}
 		return out[i].Type < out[j].Type
 	})
+	return out
+}
+
+// AllEdgesUnsorted returns a snapshot of every edge without sorting.
+// O(E) — use this instead of AllEdges when deterministic order is not needed.
+func (g *Graph) AllEdgesUnsorted() []*Edge {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var out []*Edge
+	for _, edges := range g.outEdges {
+		out = append(out, edges...)
+	}
 	return out
 }
 
@@ -1433,8 +1568,9 @@ func (g *Graph) EdgeCountsByType() map[EdgeType]int {
 // main graph.
 func (g *Graph) MergeFrom(other *Graph) {
 	// Snapshot other under its read lock, then release before acquiring g's write lock.
-	nodes := other.AllNodes()
-	edges := other.AllEdges()
+	// Use unsorted snapshots — order doesn't matter for merging, saves O(N log N).
+	nodes := other.AllNodesUnsorted()
+	edges := other.AllEdgesUnsorted()
 
 	// Snapshot varTypes and instantiatedTypes under other's read lock.
 	other.mu.RLock()

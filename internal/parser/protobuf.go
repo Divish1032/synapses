@@ -260,7 +260,7 @@ func (v *protoExtractor) walkElements(elements []eproto.Visitee, enclosing strin
 // Must be called after all proto files in the project are parsed.
 func ResolveProtoTypeRefs(g *graph.Graph) int {
 	resolved := 0
-	for _, n := range g.AllNodes() {
+	for _, n := range g.AllNodesUnsorted() {
 		if n.Metadata == nil || n.Metadata["kind"] != "field" && n.Metadata["kind"] != "oneof_field" && n.Metadata["kind"] != "rpc" {
 			continue
 		}

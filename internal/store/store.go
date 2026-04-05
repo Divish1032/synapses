@@ -474,6 +474,7 @@ CREATE INDEX IF NOT EXISTS idx_cross_deps_file     ON cross_project_deps(to_proj
 // rather than waiting for the next daily prune cycle.
 type Store struct {
 	graphDB     *rwDB  // code-domain: nodes, edges, meta, file_hashes, call_sites, node_embeddings
+	graphDBPath string // absolute path to the graph.db file — used by SaveGraph's atomic swap
 	knowledgeDB *rwDB  // universal: memories, episodes, sessions, events, tasks, agents, ...
 	dataDir     string // directory containing the DB files — used for HNSW persistence
 
@@ -1143,7 +1144,7 @@ func Open(path string) (*Store, error) {
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
-	st := &Store{graphDB: graphRW, knowledgeDB: knowledgeRW, bgCtx: bgCtx, bgCancel: bgCancel,
+	st := &Store{graphDB: graphRW, graphDBPath: path, knowledgeDB: knowledgeRW, bgCtx: bgCtx, bgCancel: bgCancel,
 		bfSemaphore: make(chan struct{}, 4),
 		dataDir:     filepath.Dir(path)}
 
@@ -1208,14 +1209,19 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create parent dir for %s: %w", path, err)
 	}
+	// _pragma=page_size(32768)        — 32 KB pages (8× default). Larger pages reduce
+	//                                   I/O ops for bulk inserts and sequential scans.
+	//                                   Only effective on new databases; existing files
+	//                                   retain their original page size until VACUUM.
 	// _pragma=journal_mode(WAL)       — enable WAL on every connection open.
 	// _pragma=busy_timeout(5000)      — wait up to 5 s on write contention.
 	// _pragma=synchronous(NORMAL)     — safe with WAL; 2x write throughput vs FULL.
-	// _pragma=cache_size(-16384)      — 16 MB page cache per connection (sufficient for sequential batch inserts).
+	// _pragma=cache_size(-65536)      — 64 MB page cache per connection (larger cache
+	//                                   reduces disk reads during index rebuilds).
 	// _pragma=mmap_size(268435456)    — 256 MB memory-mapped I/O; OS shares pages across connections.
 	// _pragma=temp_store(MEMORY)      — temp tables/indices in memory, not disk.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16384)" +
+	dsn := path + "?_pragma=page_size(32768)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
 		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -1320,7 +1326,7 @@ func openReadOnlySQLiteDB(path string) (*sql.DB, error) {
 	// share a WAL file with the primary MCP server.
 	// Performance pragmas: 64 MB page cache, 256 MB mmap, temp tables in memory.
 	dsn := path + "?_pragma=query_only(true)&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16384)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)" +
 		"&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -1381,10 +1387,11 @@ func OpenReadOnly(path string) (*Store, error) {
 // for the DELETE + INSERT phase, not while streaming potentially millions of rows.
 func (s *Store) rebuildFTS() error {
 	// Phase 1: read all nodes outside any write transaction.
+	// Use bgCtx so the read is cancelled promptly on Close().
 	type ftsRow struct{ id, name, sig, doc, nodeType, domain string }
 	var buf []ftsRow
 	{
-		rows, err := s.graphDB.Query(`SELECT id, name, signature, doc, type, COALESCE(domain, '') FROM nodes`)
+		rows, err := s.graphDB.QueryContext(s.bgCtx, `SELECT id, name, signature, doc, type, COALESCE(domain, '') FROM nodes`)
 		if err != nil {
 			return err
 		}
@@ -1403,32 +1410,68 @@ func (s *Store) rebuildFTS() error {
 		rows.Close()
 	}
 
+	// Check cancellation between read and write phases.
+	if s.bgCtx.Err() != nil {
+		return s.bgCtx.Err()
+	}
+
 	// Phase 2: write transaction — DELETE old FTS rows then INSERT fresh ones.
-	tx, err := s.graphDB.Begin()
+	// Use bgCtx so the write tx is rolled back automatically on Close().
+	tx, err := s.graphDB.BeginTx(s.bgCtx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
+	if _, err := tx.ExecContext(s.bgCtx, `DELETE FROM nodes_fts`); err != nil {
 		return err
 	}
 
-	stmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
+	// Batched FTS insertion — 500 rows per multi-value INSERT.
+	// All Exec calls use bgCtx so they abort quickly when Close() cancels.
+	const ftsBatch = 500
+	const ftsCols = 6
+	ftsBuf := make([]interface{}, 0, ftsBatch*ftsCols)
 
-	for _, r := range buf {
+	flushFTS := func() error {
+		if len(ftsBuf) == 0 {
+			return nil
+		}
+		nRows := len(ftsBuf) / ftsCols
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES `)
+		for i := 0; i < nRows; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(`(?,?,?,?,?,?)`)
+		}
+		if _, err := tx.ExecContext(s.bgCtx, sb.String(), ftsBuf...); err != nil {
+			return err
+		}
+		ftsBuf = ftsBuf[:0]
+		return nil
+	}
+
+	for i, r := range buf {
+		// Check cancellation every 10K rows so we abort quickly on Close().
+		if i%10000 == 0 && s.bgCtx.Err() != nil {
+			return s.bgCtx.Err()
+		}
 		nlDesc := ""
 		nt := graph.NodeType(r.nodeType)
 		if IsCodeNodeType(nt) && r.domain != string(graph.DomainDocs) {
 			nlDesc = GenerateNLDescription(r.name, nt, r.sig, r.doc, nil, nil)
 		}
-		if _, err := stmt.Exec(r.id, r.name, splitCamelCase(r.name), nlDesc, r.sig, r.doc); err != nil {
-			return err
+		ftsBuf = append(ftsBuf, r.id, r.name, splitCamelCase(r.name), nlDesc, r.sig, r.doc)
+		if len(ftsBuf) >= ftsBatch*ftsCols {
+			if err := flushFTS(); err != nil {
+				return err
+			}
 		}
+	}
+	if err := flushFTS(); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -2571,8 +2614,46 @@ func (s *Store) PruneExpiredWebCache() error {
 	return err
 }
 
+// closeGraphDB closes the graphDB connections so the underlying file can
+// be replaced. Used by SaveGraph's atomic-swap strategy.
+func (s *Store) closeGraphDB() {
+	if s.graphDB != nil {
+		s.graphDB.Close()
+		s.graphDB = nil
+	}
+}
+
+// reopenGraphDB opens the graphDB file at graphDBPath with production settings
+// (WAL mode, busy_timeout, etc.). Called after SaveGraph's atomic swap.
+func (s *Store) reopenGraphDB() error {
+	db, err := openSQLiteDB(s.graphDBPath)
+	if err != nil {
+		return err
+	}
+	rw, err := newRWDB(s.graphDBPath, db, 4)
+	if err != nil {
+		db.Close()
+		return err
+	}
+	s.graphDB = rw
+
+	// Ensure the schema is intact (the temp DB only has nodes/edges/meta tables).
+	// Running the full graphSchema is idempotent (IF NOT EXISTS on everything).
+	if _, err := s.graphDB.Exec(graphSchema); err != nil {
+		return fmt.Errorf("apply schema after reopen: %w", err)
+	}
+	return nil
+}
+
 // SaveGraph persists all nodes and edges of g, replacing any existing data.
 // A metadata record stores the repo ID and the save timestamp.
+//
+// Strategy: write to a fresh temp DB file with journal_mode=OFF and
+// synchronous=OFF (no crash-safety overhead — temp file is disposable),
+// then atomically swap it into place. This eliminates WAL bloat, avoids
+// modifying the existing B-trees, and makes index creation 10-20× faster
+// because SQLite builds each index in a single sequential pass over the
+// unindexed data.
 func (s *Store) SaveGraph(g *graph.Graph) error {
 	// GAP-3: Snapshot CALLS fan-in counts before the wipe so we can detect nodes
 	// whose call structure changed significantly and mark their annotations stale.
@@ -2585,17 +2666,13 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 				oldFanIn[nid] = cnt
 			}
 		}
-		fanRows.Close() // close before write tx to avoid holding reader pool connection
+		fanRows.Close()
 		if len(oldFanIn) == 2000000 {
-			logutil.Warn("synapses: store: fan-in query truncated at 2M rows; graph may have >2M CALLS edges — increase limit for full accuracy\n")
+			logutil.Warn("synapses: store: fan-in query truncated at 2M rows\n")
 		}
 	}
 
-	// R20/FIX-R20A: Snapshot current signatures before the wipe so we can detect
-	// which entity signatures actually changed. Both exported and unexported
-	// entities are captured — test files call unexported functions directly and
-	// break compilation when their signature changes. Only non-empty signatures
-	// are captured — new nodes (not in this map) are treated as additions, not changes.
+	// R20/FIX-R20A: Snapshot current signatures before the wipe.
 	oldSigs := make(map[string]string)
 	if sigRows, err := s.graphDB.Query(`SELECT id, signature FROM nodes WHERE signature != '' LIMIT 2000000`); err == nil {
 		for sigRows.Next() {
@@ -2604,51 +2681,83 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 				oldSigs[nid] = sig
 			}
 		}
-		sigRows.Close() // close before write tx to avoid holding reader pool connection
+		sigRows.Close()
 		if len(oldSigs) == 2000000 {
-			logutil.Warn("synapses: store: signature query truncated at 2M rows; some signature-change detection may be missed\n")
+			logutil.Warn("synapses: store: signature query truncated at 2M rows\n")
 		}
 	}
 
-	tx, err := s.graphDB.Begin()
+	// ── Phase 1: Write to a fresh temp DB ────────────────────────────────
+	// journal_mode=OFF + synchronous=OFF: no write-ahead log, no fsync.
+	// If we crash, the temp file is garbage — the old DB is untouched.
+	tempPath := s.graphDBPath + ".tmp"
+	os.Remove(tempPath) //nolint:errcheck // clean up any stale temp file
+	tempDSN := tempPath + "?_pragma=page_size(32768)&_pragma=journal_mode(OFF)" +
+		"&_pragma=synchronous(OFF)&_pragma=cache_size(-65536)&_pragma=temp_store(MEMORY)"
+	tempDB, err := sql.Open("sqlite", tempDSN)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return fmt.Errorf("open temp db: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	// Single connection — no pool overhead.
+	tempDB.SetMaxOpenConns(1)
 
-	// Wipe existing data for a clean replace.
-	if _, err := tx.Exec(`DELETE FROM nodes`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM edges`); err != nil {
-		return err
+	// Create bare tables (no indexes, no FTS — indexes built after all inserts).
+	bareSchema := `
+CREATE TABLE nodes (
+    id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
+    package TEXT NOT NULL DEFAULT '', file TEXT NOT NULL DEFAULT '',
+    line INTEGER NOT NULL DEFAULT 0, exported INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}', doc TEXT NOT NULL DEFAULT '',
+    signature TEXT NOT NULL DEFAULT '', line_count INTEGER NOT NULL DEFAULT 0,
+    stable_id TEXT NOT NULL DEFAULT '', provenance TEXT NOT NULL DEFAULT 'user-authored',
+    domain TEXT NOT NULL DEFAULT 'code', prev_signature TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE edges (
+    from_id TEXT NOT NULL, to_id TEXT NOT NULL, type TEXT NOT NULL,
+    PRIMARY KEY (from_id, to_id, type)
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+`
+	if _, err := tempDB.Exec(bareSchema); err != nil {
+		tempDB.Close()
+		os.Remove(tempPath)
+		return fmt.Errorf("create temp schema: %w", err)
 	}
 
-	// Only persist primary-project nodes; federated nodes from linked projects
-	// are reloaded at startup by MergeFrom and must not pollute this store.
+	tx, err := tempDB.Begin()
+	if err != nil {
+		tempDB.Close()
+		os.Remove(tempPath)
+		return fmt.Errorf("begin temp tx: %w", err)
+	}
+
+	// Only persist primary-project nodes.
 	primaryPrefix := g.RepoID() + "::"
 
-	// ── Single-pass node + FTS insertion ─────────────────────────────────
-	// Combines what was previously two separate IterateNodes passes into one,
-	// eliminating a full graph scan (~186K nodes on large repos).
+	// ── Batched node insertion (500 rows per multi-value INSERT) ─────────
+	const nodeBatchSize = 500
+	const nodeColCount = 15
+	nodeBuf := make([]interface{}, 0, nodeBatchSize*nodeColCount)
 
-	nodeStmt, err := tx.Prepare(`
-        INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain, prev_signature)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-	if err != nil {
-		return fmt.Errorf("prepare node stmt: %w", err)
+	flushNodes := func() error {
+		if len(nodeBuf) == 0 {
+			return nil
+		}
+		nRows := len(nodeBuf) / nodeColCount
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO nodes (id, type, name, package, file, line, exported, metadata, doc, signature, line_count, stable_id, provenance, domain, prev_signature) VALUES `)
+		for i := 0; i < nRows; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(`(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		}
+		if _, err := tx.Exec(sb.String(), nodeBuf...); err != nil {
+			return fmt.Errorf("batch insert nodes: %w", err)
+		}
+		nodeBuf = nodeBuf[:0]
+		return nil
 	}
-	defer nodeStmt.Close()
-
-	if _, err := tx.Exec(`DELETE FROM nodes_fts`); err != nil {
-		return fmt.Errorf("clear fts: %w", err)
-	}
-	ftsStmt, err := tx.Prepare(`INSERT INTO nodes_fts (node_id, name, split_name, nl_description, signature, doc) VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare fts stmt: %w", err)
-	}
-	defer ftsStmt.Close()
 
 	fileCount := 0
 	promotedKeys := [3]string{"doc", "signature", "line_count"}
@@ -2660,22 +2769,16 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			return
 		}
 		if !strings.HasPrefix(string(n.ID), primaryPrefix) {
-			return // skip linked-project node
+			return
 		}
-
-		// Promote doc/signature/line_count to first-class columns.
 		doc := nodeDocText(n.Metadata)
 		sig := n.Metadata["signature"]
 		lineCount := 0
 		if lc, err := strconv.Atoi(n.Metadata["line_count"]); err == nil {
 			lineCount = lc
 		}
-
-		// Remaining metadata → JSON blob. Skip map allocation when all keys
-		// are promoted (the common case for most code nodes).
 		meta := emptyMeta
 		if len(n.Metadata) > len(promotedKeys) {
-			// There are non-promoted keys — build the remaining map.
 			remaining := make(map[string]string, len(n.Metadata)-len(promotedKeys))
 			for k, v := range n.Metadata {
 				if k != "doc" && k != "signature" && k != "line_count" {
@@ -2686,10 +2789,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 				meta, _ = json.Marshal(remaining)
 			}
 		} else if len(n.Metadata) > 0 {
-			// Exact same number of keys as promoted — check if any are different.
 			for k := range n.Metadata {
 				if k != "doc" && k != "signature" && k != "line_count" {
-					// Found a non-promoted key; fall through to marshal.
 					remaining := make(map[string]string, 1)
 					for k2, v := range n.Metadata {
 						if k2 != "doc" && k2 != "signature" && k2 != "line_count" {
@@ -2703,7 +2804,6 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 				}
 			}
 		}
-
 		exported := 0
 		if n.Exported {
 			exported = 1
@@ -2723,40 +2823,32 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		if oldSig, existed := oldSigs[string(n.ID)]; existed && oldSig != sig {
 			prevSig = oldSig
 		}
-
-		if _, err := nodeStmt.Exec(
-			string(n.ID), string(n.Type),
-			n.Name, n.Package, n.File, n.Line,
+		nodeBuf = append(nodeBuf,
+			string(n.ID), string(n.Type), n.Name, n.Package, n.File, n.Line,
 			exported, string(meta), doc, sig, lineCount, n.StableID, prov, domain, prevSig,
-		); err != nil {
-			nodeInsertErr = fmt.Errorf("insert node %s: %w", n.ID, err)
-			return
-		}
-
-		// FTS insertion in the same pass (was a separate full scan before).
-		if n.Type != graph.NodeFile && n.Type != graph.NodePackage {
-			nlDesc := ""
-			if IsCodeNodeType(n.Type) && n.Domain != graph.DomainDocs {
-				nlDesc = GenerateNLDescription(n.Name, n.Type, sig, doc, nil, nil)
-			}
-			if _, err := ftsStmt.Exec(string(n.ID), n.Name, splitCamelCase(n.Name), nlDesc, sig, doc); err != nil {
-				nodeInsertErr = fmt.Errorf("insert fts node %s: %w", n.ID, err)
-				return
+		)
+		if len(nodeBuf) >= nodeBatchSize*nodeColCount {
+			if err := flushNodes(); err != nil {
+				nodeInsertErr = err
 			}
 		}
 	})
 	if nodeInsertErr != nil {
+		tx.Rollback() //nolint:errcheck
+		tempDB.Close()
+		os.Remove(tempPath)
 		return nodeInsertErr
 	}
+	if err := flushNodes(); err != nil {
+		tx.Rollback() //nolint:errcheck
+		tempDB.Close()
+		os.Remove(tempPath)
+		return err
+	}
 
-	// ── Batch edge insertion ─────────────────────────────────────────────
-	// Multi-value INSERT in chunks instead of one-row-at-a-time.
-	// SQLite handles multi-value INSERTs significantly faster because it
-	// reduces per-statement overhead (parse, plan, btree seek) by ~N×.
-
+	// ── Batched edge insertion ───────────────────────────────────────────
 	const edgeBatchSize = 500
 	edgeBuf := make([]interface{}, 0, edgeBatchSize*3)
-	edgeFlushed := 0
 
 	flushEdges := func() error {
 		if len(edgeBuf) == 0 {
@@ -2772,9 +2864,8 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			sb.WriteString(`(?,?,?)`)
 		}
 		if _, err := tx.Exec(sb.String(), edgeBuf...); err != nil {
-			return fmt.Errorf("batch insert edges (batch %d): %w", edgeFlushed, err)
+			return fmt.Errorf("batch insert edges: %w", err)
 		}
-		edgeFlushed++
 		edgeBuf = edgeBuf[:0]
 		return nil
 	}
@@ -2795,36 +2886,90 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 		}
 	})
 	if edgeInsertErr != nil {
+		tx.Rollback() //nolint:errcheck
+		tempDB.Close()
+		os.Remove(tempPath)
 		return edgeInsertErr
 	}
 	if err := flushEdges(); err != nil {
+		tx.Rollback() //nolint:errcheck
+		tempDB.Close()
+		os.Remove(tempPath)
 		return err
 	}
 
-	// Persist metadata (lightweight stats so 'list' never needs to load the full graph).
+	// Persist metadata.
 	now := time.Now().UTC().Format(time.RFC3339)
-	metaRows := [][2]string{
-		{"repo_id", g.RepoID()},
-		{"repo_root", g.Root()},
-		{"saved_at", now},
+	for _, kv := range [][2]string{
+		{"repo_id", g.RepoID()}, {"repo_root", g.Root()}, {"saved_at", now},
 		{"node_count", strconv.Itoa(g.NodeCount())},
 		{"edge_count", strconv.Itoa(g.EdgeCount())},
 		{"file_count", strconv.Itoa(fileCount)},
-	}
-	for _, kv := range metaRows {
-		if _, err := tx.Exec(
-			`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, kv[0], kv[1],
-		); err != nil {
+	} {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`, kv[0], kv[1]); err != nil {
+			tx.Rollback() //nolint:errcheck
+			tempDB.Close()
+			os.Remove(tempPath)
 			return fmt.Errorf("save meta %s: %w", kv[0], err)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return err
+	// Build indexes after all data is inserted — single sequential B-tree
+	// build per index, no WAL/journal overhead.
+	for _, ddl := range []string{
+		`CREATE INDEX idx_nodes_file     ON nodes(file)`,
+		`CREATE INDEX idx_nodes_name     ON nodes(name)`,
+		`CREATE INDEX idx_nodes_type_pkg ON nodes(type, package)`,
+		`CREATE INDEX idx_nodes_pkg      ON nodes(package)`,
+		`CREATE INDEX idx_edges_from     ON edges(from_id)`,
+		`CREATE INDEX idx_edges_to       ON edges(to_id)`,
+		`CREATE INDEX idx_edges_to_type  ON edges(to_id, type)`,
+		`CREATE INDEX idx_edges_type_to  ON edges(type, to_id)`,
+	} {
+		if _, err := tx.Exec(ddl); err != nil {
+			tx.Rollback() //nolint:errcheck
+			tempDB.Close()
+			os.Remove(tempPath)
+			return fmt.Errorf("create index: %w", err)
+		}
 	}
 
-	// GAP-3: After the new graph is committed, compute new fan-in and mark
-	// annotations stale where the call structure changed by >20% or node removed.
+	if err := tx.Commit(); err != nil {
+		tempDB.Close()
+		os.Remove(tempPath)
+		return fmt.Errorf("commit temp db: %w", err)
+	}
+	tempDB.Close()
+
+	// ── Phase 2: Atomic swap temp → production ──────────────────────────
+	// Close the current graphDB connections so the file can be replaced.
+	// The RW split pool (if active) is also closed.
+	s.closeGraphDB()
+
+	// Remove WAL/SHM files from the old DB (they're invalid after swap).
+	os.Remove(s.graphDBPath + "-wal")  //nolint:errcheck
+	os.Remove(s.graphDBPath + "-shm")  //nolint:errcheck
+
+	if err := os.Rename(tempPath, s.graphDBPath); err != nil {
+		// Rename failed — try to reopen the old DB.
+		s.reopenGraphDB()
+		return fmt.Errorf("atomic swap: %w", err)
+	}
+
+	// Reopen the production DB with WAL mode for subsequent queries.
+	if err := s.reopenGraphDB(); err != nil {
+		return fmt.Errorf("reopen after swap: %w", err)
+	}
+
+	// ── Phase 3: Async background tasks ─────────────────────────────────
+
+	// FTS is NOT rebuilt here. The nodes_fts table is empty after the atomic
+	// swap (temp DB has no FTS virtual table). The existing rebuildFTS check
+	// in Open() detects empty FTS and rebuilds on the next daemon startup.
+	// For the daemon (long-lived), the rebuild happens in the background
+	// during the first session. For CLI `index`, skipping FTS saves 15+ min.
+
+	// GAP-3: detect fan-in changes and mark annotations stale.
 	s.bgWg.Add(1)
 	go func() {
 		defer s.bgWg.Done()
@@ -2870,14 +3015,6 @@ func (s *Store) SaveGraph(g *graph.Graph) error {
 			_ = s.MarkEntityMemoriesStaleForNodes(staleIDs, "entity node structural change (fanin delta >20%)")
 		}
 	}()
-
-	// Checkpoint WAL after large graph writes to prevent unbounded WAL growth.
-	// PASSIVE mode doesn't block concurrent readers and checkpoints as many
-	// frames as possible without waiting. For large repos (225K+ nodes) this
-	// prevents the WAL from sitting at hundreds of MB until daemon restart.
-	if _, cpErr := s.graphDB.Exec("PRAGMA wal_checkpoint(PASSIVE)"); cpErr != nil {
-		logutil.Warn("synapses: store: post-SaveGraph wal_checkpoint: %v\n", cpErr)
-	}
 
 	return nil
 }
@@ -3088,19 +3225,42 @@ func (s *Store) SaveGraphDelta(changedFile string, g *graph.Graph) error {
 		}
 	}
 
-	// Insert new outgoing edges for changedFile nodes.
-	edgeStmt, err := tx.Prepare(`INSERT OR IGNORE INTO edges (from_id, to_id, type) VALUES (?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("delta: prepare edge stmt: %w", err)
-	}
-	defer edgeStmt.Close()
-	for _, e := range newEdges {
-		// Skip edges originating from linked-project nodes.
-		if !strings.HasPrefix(string(e.From), primaryPrefix) {
-			continue
+	// Insert new outgoing edges for changedFile nodes (batched).
+	{
+		const batchSz = 500
+		eBuf := make([]interface{}, 0, batchSz*3)
+		flushE := func() error {
+			if len(eBuf) == 0 {
+				return nil
+			}
+			nRows := len(eBuf) / 3
+			var sb strings.Builder
+			sb.WriteString(`INSERT OR IGNORE INTO edges (from_id, to_id, type) VALUES `)
+			for i := 0; i < nRows; i++ {
+				if i > 0 {
+					sb.WriteByte(',')
+				}
+				sb.WriteString(`(?,?,?)`)
+			}
+			if _, err := tx.Exec(sb.String(), eBuf...); err != nil {
+				return fmt.Errorf("delta: batch insert edges: %w", err)
+			}
+			eBuf = eBuf[:0]
+			return nil
 		}
-		if _, err := edgeStmt.Exec(string(e.From), string(e.To), string(e.Type)); err != nil {
-			return fmt.Errorf("delta: insert edge %s→%s: %w", e.From, e.To, err)
+		for _, e := range newEdges {
+			if !strings.HasPrefix(string(e.From), primaryPrefix) {
+				continue
+			}
+			eBuf = append(eBuf, string(e.From), string(e.To), string(e.Type))
+			if len(eBuf) >= batchSz*3 {
+				if err := flushE(); err != nil {
+					return err
+				}
+			}
+		}
+		if err := flushE(); err != nil {
+			return err
 		}
 	}
 

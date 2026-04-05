@@ -105,7 +105,7 @@ func linkDocFiles(g *graph.Graph, files []*graph.Node, codeNames map[string][]*g
 // like "New", "Run", "Get", "err". Qualified names like "Store.Close"
 // are indexed under both the full name and the method suffix "Close".
 func buildCodeNames(g *graph.Graph) map[string][]*graph.Node {
-	allNodes := g.AllNodes()
+	allNodes := g.AllNodesUnsorted()
 	codeNames := make(map[string][]*graph.Node, len(allNodes)/2)
 	for _, n := range allNodes {
 		if n.Type == graph.NodeFile || n.Type == graph.NodePackage || n.Type == graph.NodeSection {

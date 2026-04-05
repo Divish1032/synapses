@@ -77,12 +77,12 @@ func ResolveTSTypesCallEdges(g *graph.Graph, root string) (int, error) {
 		line int
 	}
 	posToNode := make(map[posKey]graph.NodeID, g.NodeCount())
-	for _, n := range g.AllNodes() {
+	g.IterateNodes(func(n *graph.Node) {
 		switch n.Type {
 		case graph.NodeFunction, graph.NodeMethod:
 			posToNode[posKey{filepath.Clean(n.File), n.Line}] = n.ID
 		}
-	}
+	})
 
 	// Track edges added in this batch. Existing edges checked via g.HasEdge.
 	type edgeKey struct{ from, to graph.NodeID }

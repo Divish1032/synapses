@@ -22,7 +22,7 @@ import (
 //
 // Returns the number of new IMPLEMENTS edges added.
 func ResolveHeritageEdges(g *graph.Graph) int {
-	nodes := g.AllNodes()
+	nodes := g.AllNodesUnsorted()
 
 	// Build name → []NodeID index for all interface and struct nodes.
 	// Multiple nodes may share the same name (different packages/files).

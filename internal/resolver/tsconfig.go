@@ -201,19 +201,19 @@ func ResolvePathAliases(g *graph.Graph) int {
 	}
 
 	rewritten := 0
-	for _, n := range g.AllNodes() {
+	g.IterateNodes(func(n *graph.Node) {
 		if n.Type != graph.NodePackage {
-			continue
+			return
 		}
 		resolved, matched := cfg.resolvePathAlias(n.Name)
 		if !matched {
-			continue
+			return
 		}
 		// Rewrite the package node's Name and Package to the resolved path.
 		// This allows the resolver's import map to match against actual module paths.
 		n.Name = resolved
 		n.Package = resolved
 		rewritten++
-	}
+	})
 	return rewritten
 }

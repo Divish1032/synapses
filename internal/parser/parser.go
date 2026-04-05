@@ -308,12 +308,12 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 	}
 
 	// Phase 2 — parallel read + parse.
-	// Worker count is bounded to 8 to avoid opening too many files at once on
-	// systems with low file-descriptor limits. When Throttle is set (initial
-	// full-index), halve the workers so the machine stays responsive.
+	// Each goroutine writes to its own lightweight mini-graph (no lock
+	// contention on the main graph), so we can safely use more workers.
+	// Capped at 16 to avoid file-descriptor exhaustion on constrained systems.
 	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8
+	if workers > 16 {
+		workers = 16
 	}
 	if w.Throttle {
 		workers = max(1, workers/2)
@@ -386,16 +386,18 @@ func (w *Walker) WalkDir(g *graph.Graph, root string) (map[string]int64, error) 
 				logutil.Error("synapses: read %s: %v\n", job.path, err)
 				errType = "read_error"
 			} else {
-				// Snapshot node count before parse to compute delta — avoids
-				// O(N) NodesForFile scan just for the telemetry counter.
-				before := g.NodeCount()
-				if parseErr := job.parser.Parse(g, job.path, src); parseErr != nil {
+				// Parse into a per-file lightweight graph (no lock contention
+				// between goroutines) then bulk-merge into the main graph.
+				mini := graph.NewLightweight(g.RepoID())
+				if parseErr := job.parser.Parse(mini, job.path, src); parseErr != nil {
 					logutil.Error("synapses: parse %s: %v\n", job.path, parseErr)
 					errType = "parse_error"
 				} else {
-					nodesProduced = g.NodeCount() - before
-					// R28: stamp provenance on all nodes produced by this file.
-					ApplyProvenance(g, job.path, src)
+					nodesProduced = mini.NodeCount()
+					// R28: stamp provenance on the mini-graph before merge.
+					ApplyProvenance(mini, job.path, src)
+					// Bulk-merge: one lock acquisition for all nodes/edges/callsites.
+					g.MergeFileGraph(mini)
 					// R1: collect path for heuristic pass; re-read from disk later
 					// to avoid holding all source bytes in memory simultaneously.
 					heuristicMu.Lock()

@@ -186,7 +186,8 @@ func cmdIndex(args []string) error {
 		}
 	}
 
-	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck2, nil, "")
+	// CLI index: use all cores (no throttle) since there's no UI to keep responsive.
+	g, err := loadOrBuildGraphWithStore(absPath, st, *forceReindex, cfg.Plugins, pluginCheck2, nil, "", indexOpt{NoThrottle: true})
 	if err != nil {
 		return err
 	}
@@ -633,13 +634,21 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
+// indexOpt controls optional indexing behaviour.
+type indexOpt struct {
+	// NoThrottle disables the CPU throttle (half workers + nice +10) used for
+	// daemon first-impression indexing. Set this for CLI `synapses index` where
+	// no UI needs to stay responsive — uses all available cores.
+	NoThrottle bool
+}
+
 // loadOrBuildGraphWithStore tries to load from an already-open SQLite store,
 // falling back to a full parse if no cache exists or forceReindex is true.
 // When forceReindex is true and a valid cache exists, a smart incremental reindex
 // is attempted first — only changed files are re-parsed, saving significant time
 // on large codebases. Falls back to a full parse if the smart reindex fails.
 // plugins is forwarded to the Walker so external parser plugins handle their extensions.
-func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string) (*graph.Graph, error) {
+func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bool, plugins []config.PluginConfig, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string, opts ...indexOpt) (*graph.Graph, error) {
 	// Always attempt smart reindex first: a fast filesystem mtime walk that
 	// re-parses only changed files. This keeps line numbers accurate after
 	// offline edits made between sessions (when the watcher was not running).
@@ -696,8 +705,14 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	progress := RegisterIndexing(repoRoot)
 	defer UnregisterIndexing(repoRoot)
 
+	// Merge options.
+	var o indexOpt
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+
 	start := time.Now()
-	g, err = buildGraph(repoRoot, st, plugins, quiet, progress, pluginCheck, pc, projectID)
+	g, err = buildGraph(repoRoot, st, plugins, quiet, progress, pluginCheck, pc, projectID, o)
 	if err != nil {
 		return nil, err
 	}
@@ -984,15 +999,18 @@ func extDisplayName(ext string) string {
 // quiet suppresses stderr progress output (SYNAPSES_QUIET=1).
 // progress, if non-nil, receives live done/total updates for the health endpoint.
 // pc, if non-nil, receives parse and index telemetry events (P2-8/P2-9).
-func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string) (*graph.Graph, error) {
+func buildGraph(root string, st *store.Store, plugins []config.PluginConfig, quiet bool, progress *IndexingState, pluginCheck *parser.PluginChecker, pc *pulse.Client, projectID string, opts ...indexOpt) (*graph.Graph, error) {
 	repoID := filepath.Base(root)
 	g := graph.New(repoID)
 	g.SetRoot(root)
 	w := parser.NewWalker()
 	// Full-index: throttle to half workers + nice +10 so the machine stays
-	// responsive during the first-impression index. Incremental updates
-	// (smartReindex / watcher) don't go through buildGraph so are unaffected.
+	// responsive during the first-impression index. CLI `synapses index` sets
+	// NoThrottle to use all cores since there's no UI to keep responsive.
 	w.Throttle = true
+	if len(opts) > 0 && opts[0].NoThrottle {
+		w.Throttle = false
+	}
 	// P2-9: wire pulse client so WalkDir emits per-file ParseEvents.
 	w.PulseClient = pc
 	w.ProjectID = projectID
