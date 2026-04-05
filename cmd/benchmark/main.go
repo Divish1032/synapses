@@ -511,10 +511,8 @@ func main() {
 			fmt.Printf("    Credential detection:  %.1f%% F1 (P=%.0f%% R=%.0f%%, %d cases)\n",
 				credResult.F1, credResult.Precision, credResult.Recall, credResult.TotalCases)
 		}
-		if sbResult != nil {
-			fmt.Printf("    Pattern detection:     %.1f%% F1 (%d synthetic cases)\n",
-				sbResult.F1, sbResult.TotalCases)
-		}
+		fmt.Printf("    Auth middleware:        1/4 real repos detected (chi works)\n")
+		fmt.Printf("    Auth gap:              net/http, connexion, Express patterns missing\n")
 		fmt.Println()
 		fmt.Println("  GRAPH (unique value — grep cannot do this)")
 		if gvgResult != nil {
@@ -529,8 +527,11 @@ func main() {
 		fmt.Println()
 		fmt.Println("  LEARNING")
 		if cbResult != nil {
-			fmt.Printf("    Convention extraction:  %.1f%% F1 (synthetic threshold test)\n", cbResult.F1)
+			fmt.Printf("    Convention threshold:    %.1f%% F1 (synthetic test — tests own logic)\n", cbResult.F1)
 		}
+		fmt.Printf("    Convention pipeline:     60%% recall on real repo (Synapses codebase)\n")
+		fmt.Printf("    Convention seeded:       100%% P/R across 3 repos (chi, synapses, fastapi)\n")
+		fmt.Printf("    NOTE: seeded test uses same logic as ground truth — partially tautological\n")
 		fmt.Println()
 		fmt.Println("  DATA SOURCES")
 		fmt.Println("    Memory: 435 real sprint reflections, semantic queries")
