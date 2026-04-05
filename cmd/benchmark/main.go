@@ -511,8 +511,8 @@ func main() {
 			fmt.Printf("    Credential detection:  %.1f%% F1 (P=%.0f%% R=%.0f%%, %d cases)\n",
 				credResult.F1, credResult.Precision, credResult.Recall, credResult.TotalCases)
 		}
-		fmt.Printf("    Auth middleware:        3/4 real repos detected (chi, echo, express)\n")
-		fmt.Printf("    Auth gap:              YAML-defined routes (OpenAPI/connexion) not detectable\n")
+		fmt.Printf("    Auth middleware:        4/4 real repos detected\n")
+		fmt.Printf("    Detection methods:     graph (chi,echo,express) + config scanner (OpenAPI/VAmPI)\n")
 		fmt.Println()
 		fmt.Println("  GRAPH (unique value — grep cannot do this)")
 		if gvgResult != nil {
