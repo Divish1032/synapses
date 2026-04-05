@@ -21,6 +21,10 @@
           "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
           "(?i)^mysql://[^:/]+:[^@/]{4,}@",
           "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@",
+          "(?i)^amqps?://[^:/]+:[^@/]{4,}@",
+          "(?i)^redis://[^:/]*:[^@/]{4,}@",
+          "^SG\\.[a-zA-Z0-9_-]{22,}\\.[a-zA-Z0-9_-]{22,}$",
+          "^key-[a-zA-Z0-9]{32,}$",
           "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
           "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
         ],
@@ -44,6 +48,14 @@
       "detection": {
         "check_type": "hardcoded_secret",
         "secret_patterns": [
+          "(?i)^jdbc:[a-z]+://[^:/]+:[^@/]{4,}@",
+          "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
+          "(?i)^mysql://[^:/]+:[^@/]{4,}@",
+          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@",
+          "(?i)^amqps?://[^:/]+:[^@/]{4,}@",
+          "(?i)^redis://[^:/]*:[^@/]{4,}@",
+          "^SG\\.[a-zA-Z0-9_-]{22,}\\.[a-zA-Z0-9_-]{22,}$",
+          "^key-[a-zA-Z0-9]{32,}$",
           "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
           "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
         ],

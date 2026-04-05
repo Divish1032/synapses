@@ -728,6 +728,14 @@ func loadOrBuildGraphWithStore(repoRoot string, st *store.Store, forceReindex bo
 	if err := st.SaveGraph(g); err != nil {
 		logutil.Error("synapses: cache save failed: %v\n", err)
 	}
+
+	// Detect conventions from graph structure (imports, directory patterns).
+	// Static conventions (confidence 0.50) supplement session-based ones (0.60+)
+	// without overwriting them — graph-first, sessions as reinforcement.
+	if n := mcpsrv.DetectStaticConventions(g, st, projectID); n > 0 && !quiet {
+		logutil.Info("[synapses] detected %d static conventions\n", n)
+	}
+
 	emitGraphSnapshot(g, pc, projectID) // P2-7: graph topology snapshot
 
 	return g, nil
