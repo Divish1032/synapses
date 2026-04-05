@@ -50,7 +50,8 @@ type RealConventionResult struct {
 func RunRealConventionBench() (*reporter.ConventionBenchReport, error) {
 	repos := []RealConventionCase{
 		buildChiCase(),
-		buildSynapsesCase(), // test on ourselves — we know our conventions
+		buildSynapsesCase(),
+		buildFastAPICase(),
 	}
 
 	var results []RealConventionResult
@@ -211,6 +212,58 @@ func buildChiCase() RealConventionCase {
 		Language:    "go",
 		Conventions: conventions,
 	}
+}
+
+// buildFastAPICase detects conventions from the FastAPI repo (Python).
+func buildFastAPICase() RealConventionCase {
+	repoDir := "/tmp/synbench_repos/fastapi-convention"
+	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+		log.Printf("  WARNING: FastAPI repo not available")
+		return RealConventionCase{}
+	}
+
+	conventions := detectPythonConventions(repoDir)
+	return RealConventionCase{
+		Repo:        "tiangolo/fastapi",
+		RepoURL:     "https://github.com/tiangolo/fastapi",
+		Language:    "python",
+		Conventions: conventions,
+	}
+}
+
+// detectPythonConventions analyzes Python source code for conventions.
+func detectPythonConventions(repoDir string) []DetectedConvention {
+	var conventions []DetectedConvention
+	pyFiles := findFiles(repoDir, "*.py")
+	testFiles := findFiles(repoDir, "test_*.py")
+
+	if len(testFiles) > 5 {
+		conventions = append(conventions, DetectedConvention{
+			Category: store.ObsCategoryTestingPattern,
+			Key:      "py_test_files_touched",
+			Evidence: fmt.Sprintf("%d Python test files", len(testFiles)),
+		})
+	}
+
+	pytestCount := countFilesContaining(testFiles, "pytest")
+	if pytestCount > len(testFiles)/3 {
+		conventions = append(conventions, DetectedConvention{
+			Category: store.ObsCategoryLibraryUsage,
+			Key:      "uses_pytest",
+			Evidence: fmt.Sprintf("%d/%d test files use pytest", pytestCount, len(testFiles)),
+		})
+	}
+
+	fastapiCount := countFilesWithImport(pyFiles, "fastapi")
+	if fastapiCount > 3 {
+		conventions = append(conventions, DetectedConvention{
+			Category: store.ObsCategoryLibraryUsage,
+			Key:      "uses_fastapi",
+			Evidence: fmt.Sprintf("%d files import fastapi", fastapiCount),
+		})
+	}
+
+	return conventions
 }
 
 // buildSynapsesCase detects conventions from THIS project (we know ground truth best).

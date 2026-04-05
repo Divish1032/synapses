@@ -139,6 +139,75 @@ func TestSecurityBench_RealRepo_GoTestBench(t *testing.T) {
 	}
 }
 
+// TestSecurityBench_RealRepo_SecDevLabs_Go tests against secDevLabs ecommerce-api (Go, net/http).
+func TestSecurityBench_RealRepo_SecDevLabs_Go(t *testing.T) {
+	repoDir := "/tmp/synbench_repos/secDevLabs/owasp-top10-2021-apps/a1/ecommerce-api"
+	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+		t.Skip("secDevLabs ecommerce-api not found")
+	}
+
+	g, err := parseRepo(repoDir)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	t.Logf("Parsed: %d nodes, %d edges", g.NodeCount(), g.EdgeCount())
+
+	engine := security.DefaultEngine()
+	serverFile := filepath.Join(repoDir, "app/server.go")
+	if _, err := os.Stat(serverFile); os.IsNotExist(err) {
+		t.Skip("server.go not found")
+	}
+	content, _ := os.ReadFile(serverFile)
+	violations := engine.CheckFile(g, serverFile, content)
+	t.Logf("Violations in server.go: %d", len(violations))
+	for _, v := range violations {
+		t.Logf("  [%s] %s — %s", v.Severity, v.PatternID, v.Target)
+	}
+	// This is a known-vulnerable Go app with broken access control (OWASP A01).
+	// Any finding is a true positive.
+	if len(violations) > 0 {
+		t.Logf("DETECTED: %d security findings on known-vulnerable Go app", len(violations))
+	} else {
+		t.Log("KNOWN GAP: no findings on secDevLabs Go app — may need different route patterns")
+	}
+}
+
+// TestSecurityBench_RealRepo_NodeExpress tests against Node.js Express vulnerable apps.
+func TestSecurityBench_RealRepo_NodeExpress(t *testing.T) {
+	repoDir := "/tmp/synbench_repos/node-express-bench"
+	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+		t.Skip("NodeTestBenches not found")
+	}
+
+	g, err := parseRepo(repoDir)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	t.Logf("Parsed: %d nodes, %d edges", g.NodeCount(), g.EdgeCount())
+
+	engine := security.DefaultEngine()
+
+	// Find Express route files.
+	routeFiles := findFiles(repoDir, "*.js")
+	totalViolations := 0
+	for _, f := range routeFiles {
+		content, _ := os.ReadFile(f)
+		if !strings.Contains(string(content), "express") {
+			continue
+		}
+		violations := engine.CheckFile(g, f, content)
+		if len(violations) > 0 {
+			rel, _ := filepath.Rel(repoDir, f)
+			t.Logf("  %s: %d violations", rel, len(violations))
+			for _, v := range violations {
+				t.Logf("    [%s] %s", v.Severity, v.PatternID)
+			}
+			totalViolations += len(violations)
+		}
+	}
+	t.Logf("Total Express violations: %d across %d files scanned", totalViolations, len(routeFiles))
+}
+
 // TestSecurityBench_RealRepo_VAmPI tests against a real vulnerable Flask app.
 func TestSecurityBench_RealRepo_VAmPI(t *testing.T) {
 	repoDir := "/tmp/synbench_repos/vampi"
