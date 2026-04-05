@@ -17,6 +17,9 @@ import (
 //
 // This is NOT a synthetic test. It uses real code and real file paths.
 func TestConventionPipeline_RealRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow convention pipeline test in short mode")
+	}
 	repoDir := "/Users/itachi/Documents/Github/synapses-os/synapses"
 	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
 		t.Skip("synapses repo not at expected path")
@@ -48,12 +51,13 @@ func TestConventionPipeline_RealRepo(t *testing.T) {
 
 	projectID := "synapses-bench"
 
-	// Parse the repo for library detection (need graph for import-based observations).
-	g := graph.New("synapses")
-	g.SetRoot(repoDir)
-	// We don't need to fully parse — just create enough structure for library detection.
-	// Simulate by adding file nodes with import edges for known libraries.
-	simulateGraphImports(g, repoDir, goFiles[:min(50, len(goFiles))])
+	// Parse the repo to get real import edges. The parser creates NodePackage +
+	// EdgeImports during WalkDir — no resolver needed for import detection.
+	g, err := parseRepo(repoDir)
+	if err != nil {
+		t.Fatalf("parse repo: %v", err)
+	}
+	t.Logf("Parsed graph: %d nodes, %d edges", g.NodeCount(), g.EdgeCount())
 
 	// Simulate 5 sessions, each touching DIVERSE files from the repo.
 	// Include files from handlers, store, tests, and files that import known libraries.
@@ -61,10 +65,12 @@ func TestConventionPipeline_RealRepo(t *testing.T) {
 	for session := 0; session < 5; session++ {
 		sessionID := fmt.Sprintf("sim-sess-%d", session)
 
-		// Pick a diverse mix: source files + test files + handler files.
+		// Pick a DIVERSE mix that covers different architectural layers.
+		// Each session should touch handler files, store files, AND test files
+		// to produce testing_pattern, file_pattern, and library_usage observations.
 		var sessionFiles []string
 
-		// Add test files (different slice per session) — triggers testing_pattern.
+		// Test files (triggers testing_pattern).
 		testStart := session * 8
 		testEnd := testStart + 8
 		if testEnd > len(testFiles) {
@@ -74,37 +80,35 @@ func TestConventionPipeline_RealRepo(t *testing.T) {
 			sessionFiles = append(sessionFiles, testFiles[testStart:testEnd]...)
 		}
 
-		// Add source files that import known libraries (for library_usage detection).
-		// Scan a different range per session to get diverse imports.
-		srcStart := session * 15
-		srcEnd := srcStart + 15
-		if srcEnd > len(goFiles) {
-			srcEnd = len(goFiles)
+		// Deliberately include files from key directories:
+		// - internal/mcp/ (handler layer)
+		// - internal/store/ (repository layer)
+		// - internal/security/ (has testify imports)
+		keyDirs := []string{
+			filepath.Join(repoDir, "internal", "mcp"),
+			filepath.Join(repoDir, "internal", "store"),
+			filepath.Join(repoDir, "internal", "security"),
 		}
-		if srcStart >= srcEnd {
-			srcStart = 0
-			srcEnd = min(15, len(goFiles))
-		}
-		sessionFiles = append(sessionFiles, goFiles[srcStart:srcEnd]...)
+		for _, dir := range keyDirs {
+			dirFiles := findFiles(dir, "*.go")
+			pick := session % max(len(dirFiles), 1)
+			end := min(pick+3, len(dirFiles))
+			sessionFiles = append(sessionFiles, dirFiles[pick:end]...)
 
-		// Make paths relative (like the real observation pipeline expects).
-		var relFiles []string
-		for _, f := range sessionFiles {
-			rel, err := filepath.Rel(repoDir, f)
-			if err == nil {
-				relFiles = append(relFiles, rel)
-			}
+			// Also include test files from this dir (they often import testify).
+			dirTestFiles := findFiles(dir, "*_test.go")
+			tPick := session % max(len(dirTestFiles), 1)
+			tEnd := min(tPick+2, len(dirTestFiles))
+			sessionFiles = append(sessionFiles, dirTestFiles[tPick:tEnd]...)
 		}
 
+		// Use absolute paths — the graph stores absolute paths from WalkDir.
 		// Run the REAL observation extraction logic:
-		// testing_pattern: count _test.go files per language
-		// file_pattern: detect handler/service/repository layers from paths
-		// library_usage: detect known libraries from graph imports (simulated)
-		obs := extractObservationsFromFiles(sessionID, projectID, relFiles, g)
+		obs := extractObservationsFromFiles(sessionID, projectID, sessionFiles, g)
 		for _, o := range obs {
 			st.InsertSessionObservation(o)
 		}
-		t.Logf("  Session %d: %d files → %d observations", session, len(relFiles), len(obs))
+		t.Logf("  Session %d: %d files → %d observations", session, len(sessionFiles), len(obs))
 	}
 
 	// 4. Run convention extraction (same logic as runConventionExtraction).
@@ -227,37 +231,76 @@ func extractObservationsFromFiles(sessionID, projectID string, files []string, g
 		obs = append(obs, o)
 	}
 
-	// Library detection from imports in touched files.
+	// Library detection via graph import edges, with content-based fallback.
+	// wellKnownLibraries maps import path substrings to observation keys.
+	libraries := []struct {
+		contains string
+		key      string
+	}{
+		{"testify", "uses_testify"},
+		{"/chi", "uses_chi_router"},
+		{"gin-gonic", "uses_gin_router"},
+		{"labstack/echo", "uses_echo_router"},
+		{"golang-jwt", "uses_golang_jwt"},
+	}
+
+	libSeen := map[string]bool{}
 	for _, f := range files {
 		absPath := f
 		if !filepath.IsAbs(f) {
 			absPath = filepath.Join(g.Root(), f)
 		}
-		data, err := os.ReadFile(absPath)
-		if err != nil {
-			continue
+		// Resolve symlinks — macOS /tmp is a symlink to /private/tmp and the
+		// graph stores the resolved path from WalkDir.
+		if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+			absPath = resolved
 		}
-		content := string(data)
+		// Find the file node in the graph and walk its IMPORTS edges.
+		fileNodes := g.FindByFile(absPath)
+		for _, n := range fileNodes {
+			if n.Type != graph.NodeFile {
+				continue
+			}
+			for _, e := range g.OutEdges(n.ID) {
+				if e.Type != graph.EdgeImports {
+					continue
+				}
+				imp := g.GetNode(e.To)
+				if imp == nil {
+					continue
+				}
+				importPath := imp.Name
+				for _, lib := range libraries {
+					if strings.Contains(importPath, lib.contains) && !libSeen[lib.key] {
+						libSeen[lib.key] = true
+						o := base
+						o.Category = store.ObsCategoryLibraryUsage
+						o.Key = lib.key
+						o.Value = "1"
+						o.Confidence = 0.6
+						obs = append(obs, o)
+					}
+				}
+			}
+		}
 
-		// Keys MUST match wellKnownLibraries in session_observations.go.
-		libraries := []struct {
-			contains string
-			key      string
-		}{
-			{"testify", "uses_testify"},
-			{"/chi", "uses_chi_router"},
-			{"gin-gonic", "uses_gin_router"},
-			{"labstack/echo", "uses_echo_router"},
-		}
-		for _, lib := range libraries {
-			if strings.Contains(content, lib.contains) {
-				o := base
-				o.Category = store.ObsCategoryLibraryUsage
-				o.Key = lib.key
-				o.Value = "1"
-				o.Confidence = 0.6
-				obs = append(obs, o)
-				break // one library per file
+		// Fallback: if graph didn't find the file, scan content for import lines.
+		if len(fileNodes) == 0 {
+			data, err := os.ReadFile(absPath)
+			if err != nil {
+				continue
+			}
+			content := string(data)
+			for _, lib := range libraries {
+				if !libSeen[lib.key] && strings.Contains(content, "\""+lib.contains) {
+					libSeen[lib.key] = true
+					o := base
+					o.Category = store.ObsCategoryLibraryUsage
+					o.Key = lib.key
+					o.Value = "1"
+					o.Confidence = 0.5
+					obs = append(obs, o)
+				}
 			}
 		}
 	}

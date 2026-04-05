@@ -19,12 +19,18 @@
           "^sk_live_[a-zA-Z0-9]{24,}$",
           "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
           "(?i)^mysql://[^:/]+:[^@/]{4,}@",
-          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@"
+          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@",
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
         ],
         "scope": "file"
       },
       "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from std::env::var() or a secret manager instead.",
-      "tags": ["owasp-a07", "secrets", "production-critical"]
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "production-critical"
+      ]
     },
     {
       "id": "rust-generic-fallback-secret",
@@ -36,12 +42,19 @@
       "description": "env::var() is called with unwrap_or() or unwrap_or_else() that provides a hardcoded credential when the environment variable is absent. The fallback credential is embedded in the compiled binary.",
       "detection": {
         "check_type": "hardcoded_secret",
-        "secret_patterns": [],
+        "secret_patterns": [
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
+        ],
         "detect_fallback": true,
         "scope": "file"
       },
-      "message": "'{target}' in {file} falls back to a hardcoded value when the environment variable is absent. Remove the fallback — panic or return an Err at startup if the required secret is not configured.",
-      "tags": ["owasp-a07", "secrets", "fallback-credential"]
+      "message": "'{target}' in {file} falls back to a hardcoded value when the environment variable is absent. Remove the fallback \u2014 panic or return an Err at startup if the required secret is not configured.",
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "fallback-credential"
+      ]
     }
   ]
 }

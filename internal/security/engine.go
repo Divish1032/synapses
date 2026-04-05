@@ -760,6 +760,17 @@ func buildFileContext(g *graph.Graph, filePath string) *fileContext {
 					}
 				}
 			}
+			// Also collect unresolved method callees preserved by the resolver.
+			// These are method calls on local variables (r.Get(), app.Use()) where
+			// the resolver couldn't determine the target node but saved the name.
+			if unresolved, ok := n.Metadata["unresolved_callees"]; ok {
+				for _, name := range strings.Split(unresolved, ",") {
+					name = strings.TrimSpace(name)
+					if name != "" {
+						fc.callees[name] = true
+					}
+				}
+			}
 		}
 	}
 

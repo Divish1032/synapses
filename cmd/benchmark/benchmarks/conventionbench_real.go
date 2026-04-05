@@ -256,10 +256,10 @@ func detectGoConventions(repoDir string) []DetectedConvention {
 		})
 	}
 
-	// Detect HTTP framework usage.
-	chiCount := countFilesContaining(goFiles, "go-chi/chi")
-	ginCount := countFilesContaining(goFiles, "gin-gonic/gin")
-	echoCount := countFilesContaining(goFiles, "labstack/echo")
+	// Detect HTTP framework usage — count files with REAL imports (import lines only).
+	chiCount := countFilesWithImport(goFiles, "go-chi/chi")
+	ginCount := countFilesWithImport(goFiles, "gin-gonic/gin")
+	echoCount := countFilesWithImport(goFiles, "labstack/echo")
 
 	// Keys MUST match wellKnownLibraries in session_observations.go.
 	if chiCount > 3 {
@@ -295,6 +295,18 @@ func detectGoConventions(repoDir string) []DetectedConvention {
 			Evidence: fmt.Sprintf("%d handler files", len(handlerFiles)),
 		})
 	}
+
+	// Detect repository/store layer.
+	storeFiles := findFiles(repoDir, "*store*")
+	repoFiles := findFiles(repoDir, "*repository*")
+	if len(storeFiles)+len(repoFiles) > 3 {
+		conventions = append(conventions, DetectedConvention{
+			Category: store.ObsCategoryFilePattern,
+			Key:      "uses_repository_layer",
+			Evidence: fmt.Sprintf("%d store/repository files", len(storeFiles)+len(repoFiles)),
+		})
+	}
+
 	if len(serviceFiles) > 3 {
 		conventions = append(conventions, DetectedConvention{
 			Category: store.ObsCategoryFilePattern,
@@ -314,7 +326,7 @@ func findFiles(dir, pattern string) []string {
 		}
 		if info.IsDir() {
 			name := info.Name()
-			if name == ".git" || name == "vendor" || name == "node_modules" || name == ".synapses" {
+			if name == ".git" || name == "vendor" || name == "node_modules" || name == ".synapses" || name == ".claude" || name == "worktrees" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -337,6 +349,32 @@ func countFilesContaining(files []string, substr string) int {
 		}
 		if strings.Contains(string(data), substr) {
 			count++
+		}
+	}
+	return count
+}
+
+// countFilesWithImport counts files that have the substring in an actual Go
+// import statement (between "import" and the closing paren), not just anywhere
+// in the file (which catches pattern config strings).
+func countFilesWithImport(files []string, pkg string) int {
+	count := 0
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		// Simple heuristic: look for the package in a quoted import line.
+		// This avoids counting string references in pattern definitions.
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "\"") || strings.HasPrefix(trimmed, "_ \"") {
+				if strings.Contains(trimmed, pkg) {
+					count++
+					break
+				}
+			}
 		}
 	}
 	return count

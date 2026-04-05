@@ -20,12 +20,18 @@
           "(?i)^jdbc:[a-z]+://[^:/]+:[^@/]{4,}@",
           "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
           "(?i)^mysql://[^:/]+:[^@/]{4,}@",
-          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@"
+          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@",
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
         ],
         "scope": "file"
       },
       "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from System.getenv(), Spring @Value, or a vault instead.",
-      "tags": ["owasp-a07", "secrets", "production-critical"]
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "production-critical"
+      ]
     },
     {
       "id": "java-generic-fallback-secret",
@@ -37,12 +43,19 @@
       "description": "System.getenv() is called with a ternary or Optional fallback that provides a hardcoded credential when the environment variable is absent. This is a common configuration pattern that embeds credentials in source code.",
       "detection": {
         "check_type": "hardcoded_secret",
-        "secret_patterns": [],
+        "secret_patterns": [
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
+        ],
         "detect_fallback": true,
         "scope": "file"
       },
-      "message": "'{target}' in {file} falls back to a hardcoded value when the environment variable is absent. Remove the fallback — throw an exception at startup if the required secret is not configured.",
-      "tags": ["owasp-a07", "secrets", "fallback-credential"]
+      "message": "'{target}' in {file} falls back to a hardcoded value when the environment variable is absent. Remove the fallback \u2014 throw an exception at startup if the required secret is not configured.",
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "fallback-credential"
+      ]
     }
   ]
 }

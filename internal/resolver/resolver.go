@@ -299,18 +299,38 @@ func ResolveCallEdges(g *graph.Graph) int {
 			targets = globalNameRegistry[site.FuncName]
 		}
 
-		for _, targetID := range targets {
-			key := edgeKey{site.CallerID, targetID}
-			if seen[key] {
-				continue // deduplicate: same function may call the same target multiple times
+		if len(targets) > 0 {
+			for _, targetID := range targets {
+				key := edgeKey{site.CallerID, targetID}
+				if seen[key] {
+					continue // deduplicate: same function may call the same target multiple times
+				}
+				seen[key] = true
+				pendingEdges = append(pendingEdges, &graph.Edge{
+					From: site.CallerID,
+					To:   targetID,
+					Type: graph.EdgeCalls,
+				})
+				resolved++
 			}
-			seen[key] = true
-			pendingEdges = append(pendingEdges, &graph.Edge{
-				From: site.CallerID,
-				To:   targetID,
-				Type: graph.EdgeCalls,
-			})
-			resolved++
+		} else {
+			// Unresolved call site: preserve the function name in the caller
+			// node's metadata so the security engine can check it. This handles
+			// method calls on local variables (r.Get(), app.Use()) where the
+			// resolver can't determine the target node.
+			callerNode := g.GetNode(site.CallerID)
+			if callerNode != nil {
+				if callerNode.Metadata == nil {
+					callerNode.Metadata = make(map[string]string)
+				}
+				existing := callerNode.Metadata["unresolved_callees"]
+				if existing != "" {
+					existing += "," + site.FuncName
+				} else {
+					existing = site.FuncName
+				}
+				callerNode.Metadata["unresolved_callees"] = existing
+			}
 		}
 	}
 

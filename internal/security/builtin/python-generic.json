@@ -22,12 +22,18 @@
           "^AIza[0-9A-Za-z_-]{35}$",
           "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
           "(?i)^mysql://[^:/]+:[^@/]{4,}@",
-          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@"
+          "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@",
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
         ],
         "scope": "file"
       },
       "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from os.environ or a secret manager instead.",
-      "tags": ["owasp-a07", "secrets", "production-critical"]
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "production-critical"
+      ]
     },
     {
       "id": "python-generic-fallback-secret",
@@ -39,12 +45,19 @@
       "description": "os.environ.get() or os.getenv() is called with a hardcoded default fallback, embedding a credential in source code for cases where the environment variable is absent. This pattern is extremely common in Python and frequently reaches production.",
       "detection": {
         "check_type": "hardcoded_secret",
-        "secret_patterns": [],
+        "secret_patterns": [
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
+        ],
         "detect_fallback": true,
         "scope": "file"
       },
-      "message": "'{target}' in {file} uses a hardcoded fallback value when the environment variable is absent. Remove the default — raise a RuntimeError at startup if the required secret is not configured.",
-      "tags": ["owasp-a07", "secrets", "fallback-credential"]
+      "message": "'{target}' in {file} uses a hardcoded fallback value when the environment variable is absent. Remove the default \u2014 raise a RuntimeError at startup if the required secret is not configured.",
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "fallback-credential"
+      ]
     }
   ]
 }

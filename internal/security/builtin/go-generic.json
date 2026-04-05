@@ -26,12 +26,18 @@
           "(?i)^postgres(?:ql)?://[^:/]+:[^@/]{4,}@",
           "(?i)^mysql://[^:/]+:[^@/]{4,}@",
           "(?i)^mongodb(?:\\+srv)?://[^:/]+:[^@/]{4,}@",
-          "(?i)^amqps?://[^:/]+:[^@/]{4,}@"
+          "(?i)^amqps?://[^:/]+:[^@/]{4,}@",
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
         ],
         "scope": "file"
       },
       "message": "Variable '{target}' in {file} contains what appears to be a hardcoded credential. Load secrets from environment variables (os.Getenv) or a secret manager instead.",
-      "tags": ["owasp-a07", "secrets", "production-critical"]
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "production-critical"
+      ]
     },
     {
       "id": "go-generic-fallback-secret",
@@ -43,12 +49,19 @@
       "description": "A credential-holding variable is loaded from an environment variable but falls back to a hardcoded value when the environment variable is not set. The fallback credential is embedded in source code, exposing it in version control. This pattern is common in development and is frequently promoted to production accidentally.",
       "detection": {
         "check_type": "hardcoded_secret",
-        "secret_patterns": [],
+        "secret_patterns": [
+          "^-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "^https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+$"
+        ],
         "detect_fallback": true,
         "scope": "file"
       },
-      "message": "Variable '{target}' in {file} has a hardcoded fallback value used when the environment variable is absent. Remove the fallback — fail fast if the required secret is not configured.",
-      "tags": ["owasp-a07", "secrets", "fallback-credential"]
+      "message": "Variable '{target}' in {file} has a hardcoded fallback value used when the environment variable is absent. Remove the fallback \u2014 fail fast if the required secret is not configured.",
+      "tags": [
+        "owasp-a07",
+        "secrets",
+        "fallback-credential"
+      ]
     },
     {
       "id": "go-generic-direct-db-import",
@@ -60,12 +73,32 @@
       "description": "A file in the handler or controller layer directly imports a database package (database/sql, gorm, sqlx, etc.) instead of going through a repository or service layer. This creates tight coupling between the HTTP layer and data storage, making it hard to test and change.",
       "detection": {
         "check_type": "direct_import",
-        "handler_file_patterns": ["*handler*.go", "*/handler/*.go", "*/handlers/*.go", "*/api/*.go", "*/route/*.go", "*/routes/*.go", "*controller*.go", "*/controller/*.go", "*/controllers/*.go"],
-        "forbidden_import_patterns": ["database/sql", "gorm.io/*", "github.com/jmoiron/sqlx", "github.com/go-gorm/*", "github.com/uptrace/bun"],
+        "handler_file_patterns": [
+          "*handler*.go",
+          "*/handler/*.go",
+          "*/handlers/*.go",
+          "*/api/*.go",
+          "*/route/*.go",
+          "*/routes/*.go",
+          "*controller*.go",
+          "*/controller/*.go",
+          "*/controllers/*.go"
+        ],
+        "forbidden_import_patterns": [
+          "database/sql",
+          "gorm.io/*",
+          "github.com/jmoiron/sqlx",
+          "github.com/go-gorm/*",
+          "github.com/uptrace/bun"
+        ],
         "scope": "file"
       },
       "message": "File {file} appears to be a handler/controller but directly imports a database package. Access data through a repository or service layer instead.",
-      "tags": ["architecture", "layer-violation", "testability"]
+      "tags": [
+        "architecture",
+        "layer-violation",
+        "testability"
+      ]
     }
   ]
 }
