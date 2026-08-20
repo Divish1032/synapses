@@ -1,8 +1,10 @@
 # Synapses — Code Intelligence for AI Agents
 
-[![Release](https://img.shields.io/github/v/release/SynapsesOS/synapses?style=for-the-badge&color=00ADD8)](https://github.com/SynapsesOS/synapses/releases/latest)
+[![Project status: paused](https://img.shields.io/badge/status-paused-8b949e?style=for-the-badge)](#project-status)
+[![Release](https://img.shields.io/github/v/release/Divish1032/synapses?style=for-the-badge&color=00ADD8)](https://github.com/Divish1032/synapses/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-[![CI](https://github.com/SynapsesOS/synapses/actions/workflows/ci.yml/badge.svg)](https://github.com/SynapsesOS/synapses/actions)
+[![CI](https://github.com/Divish1032/synapses/actions/workflows/ci.yml/badge.svg)](https://github.com/Divish1032/synapses/actions)
+
 **Synapses** is a graph-based code intelligence server that gives AI coding agents structured understanding of large codebases. Replace ad-hoc grep with typed graph queries. Supports 49 languages. Works with Claude Code, Cursor, Zed, Windsurf, and any editor via [MCP](https://modelcontextprotocol.io).
 
 ```
@@ -11,46 +13,41 @@ IDE → MCP Tools → Synapses (Graph+SQLite)
 
 ---
 
-## Quick Start
+## Project status
 
-### 1. Install
+Development is currently paused. This repository remains public as a portfolio
+case study of a local-first AI-agent control plane: graph-based code context,
+episodic memory, agent coordination, architectural validation, and MCP
+integration. The code and releases remain available for evaluation, but the
+project should not be treated as actively supported production software.
 
-#### Recommended: Desktop App (includes CLI)
+## What this project demonstrates
 
-Download from [synapsesos.com](https://synapsesos.com) or install via terminal:
+- Designing an MCP server and tool surface for coding agents
+- Building typed code graphs across many programming languages
+- Combining deterministic retrieval, embeddings, and episodic memory
+- Coordinating concurrent agent sessions with durable local state
+- Shipping a cross-platform Go CLI with SQLite-backed persistence
+- Degrading safely when optional model-backed components are unavailable
 
-```bash
-curl -fsSL https://synapsesos.com/install.sh | sh
-```
+## Explore from source
 
-This installs the Synapses desktop app with the CLI included.
-
-#### Homebrew
-
-```bash
-brew install synapses
-```
-
-#### Server / CI (CLI only, no GUI)
-
-```bash
-curl -fsSL https://synapsesos.com/install.sh | sh
-```
-
-On headless systems, this installs the CLI binary without the desktop app.
-
-#### From source (contributors)
+Requirements: Go 1.26 or a compatible newer release.
 
 ```bash
-git clone https://github.com/SynapsesOS/synapses
+git clone https://github.com/Divish1032/synapses.git
 cd synapses
 go build -o ./build/synapses ./cmd/synapses
+go test ./...
+```
+
+The historical onboarding flow can then be explored with:
+
+```bash
 ./build/synapses init
 ```
 
-See [Developer Setup](https://synapsesos.com/docs/v1/guides/developer-setup) for connecting a source-built binary to the desktop app.
-
-### 2. Initialize Your Project
+## Historical quick start
 
 ```bash
 cd /path/to/your/repo
@@ -142,7 +139,9 @@ Synapses maintains **episodic memory** (past decisions, failures), an **agent me
 
 The Synapses daemon exposes a REST API at `http://localhost:11435` for project management, health checks, and admin operations.
 
-For a visual dashboard — live index stats, task queues, episodic memory, agent activity, and one-click reindex — use the **[Synapses desktop app](https://github.com/SynapsesOS/synapses-app)**, a standalone Tauri application available for macOS, Linux, and Windows.
+The project also included a separate desktop dashboard for live index stats,
+task queues, episodic memory, agent activity, and one-click reindexing. That
+companion application is no longer presented as an actively supported download.
 
 ---
 
@@ -215,7 +214,7 @@ All commands use the syntax `synapses <command> [flags]`.
 | `dev` | `link\|unlink\|status` | Developer binary management |
 | `daemon` | `serve\|install\|uninstall\|logs` | Low-level daemon control |
 
-See [CLI Reference](https://synapsesos.com/docs/v1/reference/cli) for detailed documentation of all commands and flags.
+Run `synapses --help` for the command and flag reference included in this build.
 
 ---
 
@@ -428,12 +427,10 @@ Synapses builds on several excellent open-source projects:
 
 ## Links
 
-- **GitHub**: https://github.com/SynapsesOS/synapses
-- **Organization**: https://github.com/SynapsesOS
-- **Desktop App**: https://github.com/SynapsesOS/synapses-app
+- **Repository**: https://github.com/Divish1032/synapses
+- **Releases**: https://github.com/Divish1032/synapses/releases
 
 ## Support
 
-- **Issues**: https://github.com/SynapsesOS/synapses/issues
-- **Discussions**: https://github.com/SynapsesOS/synapses/discussions
-- **Security**: security@synapsesos.dev (see [SECURITY.md](SECURITY.md))
+- **Issues**: https://github.com/Divish1032/synapses/issues
+- **Security**: See [SECURITY.md](SECURITY.md)
